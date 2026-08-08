@@ -3,8 +3,75 @@
 Notable changes to Mindweave. Dates are release dates.
 
 The 1.x line is the build-in-the-open phase. The next milestone is Release 1, when
-Mindweave lands on npm and the numbering resets. Between here and there: no new
-features, just real use and fixing whatever that turns up.
+Mindweave lands on npm and the numbering resets.
+
+---
+
+## v1.9.5 (2026-08-08): the agent can look things up, and look at your app
+
+Two things the agent could not do before, and four fixes to how commands are reported.
+
+### Searching the web
+
+`web_fetch` could read a page you already knew the address of. There was no way to
+find one, so any question whose answer changed after the model was trained had no
+route to an answer: current library APIs, recent releases, whether a package still
+exists.
+
+`web_search` fills that in. It returns an answer with the pages behind it, so the
+common question resolves in one step instead of a search followed by a fetch, and you
+can follow any source with `web_fetch` for the full page.
+
+Searching belongs to the model's own provider. Mindweave does not sign up to a search
+service, hold a second API key, or route your queries through anything of its own. A
+model that cannot search says so plainly and points you at `web_fetch` rather than
+failing in a way that invites the agent to keep retrying.
+
+### Seeing a window
+
+A process being alive is not the same as an app working: a window rendering a stack
+trace is alive. `screenshot` captures one window so the agent can look at it and tell
+you what is actually on screen, which also covers a layout that is subtly wrong, a
+chart with no data, or a dialog nobody expected.
+
+It captures **one window and never the whole screen**, and it asks before every
+capture, naming the window it is about to photograph and saying the image goes to the
+model. A screenshot is the one thing here that can pick up what the agent was never
+pointed at, so the narrow scope and the question are the design rather than a setting.
+There is no clicking or typing: seeing closes the loop, acting is a different tool with
+a much larger risk surface.
+
+On a model without vision the file is captured and named rather than sent, because
+being told a picture exists is more useful than being handed one that cannot be read.
+
+### Commands report what actually happened
+
+**A failed PowerShell command could report success.** Exit codes were read from
+`$LASTEXITCODE`, which only native programs set. A cmdlet that failed left it unset,
+that was read as zero, and the agent was told the command worked. It hit most of what
+gets written day to day, `Get-Content`, `Remove-Item`, `Copy-Item`, and the agent would
+then build on work that had not happened. Both signals are now read, so a cmdlet failure
+is a failure and a program's own exit code still survives intact.
+
+**Long output kept the wrong end.** Only the first 30,000 characters reached the model.
+Builds and test runs put their banner at the start and their diagnosis at the end, so a
+verbose run filled the budget with progress and the failure was discarded. Both ends are
+kept now, and the gap is marked where it falls.
+
+**Backgrounded `cmd` commands left their script behind** in the temp directory, once per
+run, forever. They are cleaned up when the shell ends.
+
+**Non-English output could arrive corrupted.** Output was decoded one chunk at a time, so
+a character split across two reads became a replacement glyph. Decoding now spans chunks.
+
+### Also
+
+Process cleanup on macOS and Linux, carried over from work that was diagnosed but held
+back: killing a process group silently did nothing when the child was not spawned as a
+group leader, a killed process could be reported as still running while it waited to be
+reaped, and shutdown skipped shells whose wrapper had exited while their children had
+not. Windows is unaffected by all three. Three test files that had never run in the
+suite are now part of it.
 
 ---
 

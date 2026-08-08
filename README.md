@@ -30,6 +30,22 @@ reason about your code.
 How the project is run, what gets into the core and what does not: [PHILOSOPHY.md](PHILOSOPHY.md).
 It is short, and it is the honest version.
 
+## Coming up: Release 1
+
+Mindweave has been built in the open through the 1.x line and is close to the real thing.
+
+The next milestone is the **official release: Mindweave 1**. That is when it lands on npm,
+installable in one command, with the numbering reset to match. Release 1 is the first
+version meant for people who were not watching it get built.
+
+**The new UI is fully designed and lands before then.** It was drawn from scratch rather
+than borrowed, because a terminal is not a small browser and pretending otherwise is why
+so many CLI tools feel busy. It is quieter than what ships today and it gets out of the
+way while the agent works.
+
+Between here and there, the work is whatever real use turns up, plus the capabilities the
+agent is still missing. See the [changelog](CHANGELOG.md).
+
 ## Install
 
 Requires **Windows**, **Node.js 20+**, and a model API key.
@@ -106,6 +122,14 @@ treated as untrusted by default. Full guide: [docs/MCP.md](docs/MCP.md).
 **Images.** Drag a screenshot into the prompt, or write `@shot.png`. A model that can see
 gets the image. A text-only model says so plainly rather than pretending.
 
+**Web search.** Ask about a current API or a recent release and the agent looks it up
+instead of guessing from training data, then follows any source for the full page. It runs
+through your model's own provider, so there is no second account and no key to manage.
+
+**Seeing your app.** The agent can capture one window and look at it, which is how you
+tell an app that started from an app that works. One window, never the whole screen, and
+it asks first, naming the window it is about to capture.
+
 **Per-project governor.** Give a project standing rules, reusable skills, and forbidden
 paths or commands that the agent has to respect.
 
@@ -114,55 +138,21 @@ without bloating the shared core. Only the driver you are using is ever loaded.
 
 ## Recently
 
-**v1.9.4** added an automated build and fixed the two bugs it found within hours. On
-Windows, any account name longer than eight characters has a second, shortened form,
-and Mindweave was comparing the two as though they were different directories: every
-command claimed to have changed the working directory, and paths stopped displaying
-relative to your project. Separately, with ripgrep installed, `glob` would list `.env`
-and private keys, the files every other tool declines to open, because the pattern you
-passed cancelled the exclusions that were meant to outrank it. Builds now run on
-Windows for Node 20 and 22 on every push.
+**v1.9.5** gave the agent two things it did not have. It can now search the web, so a
+question whose answer changed after the model was trained has a route to an answer
+instead of a guess; searching runs through the model's own provider, with no second
+account and no key of yours going anywhere. It can also take a picture of one window and
+look at it, which is how you tell an app that started from an app that works. Capture is
+one window, never the screen, and it asks first, naming the window.
 
-**v1.9.3** made search and indexing answer honestly. Results used to depend on whether
-ripgrep was installed, because only ripgrep respected `.gitignore` while both engines
-claimed to; the built-in walker now honours it as well. The code map was built from an
-unfiltered walk, so lookups could surface symbols from files that `read_file` and `grep`
-refuse to open, and that exclusion now applies when indexing. Language server installs
-could hang forever and leave processes running behind them, which is what made fresh
-projects stall for minutes at a time; every step now has a deadline. There is also CI at
-last, running on Windows, and the crash that used to block it turned out to be an
-out-of-memory fault rather than a scheduling problem.
-
-**v1.9.2** cut how much the agent says and how often it re-reads. It was writing a
-paragraph before every tool call, so a turn with twenty lookups printed twenty
-paragraphs of the same plan restated; it now writes one line per turn, and replies match
-the question instead of arriving as a document. It was also re-sending file content that
-was already on screen in front of it, sometimes four times for one file. Both read paths
-now check what is actually rendered before sending anything again.
-
-**v1.9.1** read all 36 tools against their own implementations, one at a time. 21 of the
-findings were code rather than wording: a diagnostics check that reported "no problems"
-about files it never looked at, skill instructions silently corrupted by `$` handling,
-Escape on a question answering it for you, sub-agents putting dialogs on your screen, and
-a tool recommending a credential format that could never have worked.
+The same release fixed how commands report themselves. A failing PowerShell command could
+come back as a success, because exit codes were read from a variable only native programs
+set, so a failed `Get-Content` or `Remove-Item` looked like it had worked and the agent
+built on it. Long output kept only its first 30,000 characters, which is the banner rather
+than the failure at the end; both ends are kept now. Backgrounded `cmd` commands stopped
+leaving a script behind on every run, and non-English output stopped arriving corrupted.
 
 Full detail in the [changelog](CHANGELOG.md).
-
-## Coming up: Release 1
-
-Mindweave has been built in the open through the 1.x line and is close to the real thing.
-
-The next milestone is the **official release: Mindweave 1**. That is when it lands on npm,
-installable in one command, with the numbering reset to match. Release 1 is the first
-version meant for people who were not watching it get built.
-
-**The new UI is fully designed and lands before then.** It was drawn from scratch rather
-than borrowed, because a terminal is not a small browser and pretending otherwise is why
-so many CLI tools feel busy. It is quieter than what ships today and it gets out of the
-way while the agent works.
-
-Between here and there: no new features. Just real use, and fixing what that turns up.
-Recent releases are exactly that. See the [changelog](CHANGELOG.md).
 
 ## Known problems
 
