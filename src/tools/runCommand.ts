@@ -32,6 +32,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { catastrophicCommandReason, sensitiveCommandReason } from "./guard.js";
 import { forbiddenCommandReason, forbiddenCommandPatternReason } from "../governor/forbidden.js";
@@ -51,7 +52,20 @@ type Shell = "powershell" | "cmd";
 
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
 const MAX_TIMEOUT_MS = 600_000; // 10 minutes
-const MAX_OUTPUT_CHARS = 30_000;
+/**
+ * How much command output reaches the model, split across the two ends.
+ *
+ * Keeping the FIRST 30,000 characters and dropping the rest throws away the part
+ * that matters: a build or test run puts its banner and progress at the start and
+ * its diagnosis — the failing assertion, the stack, "3 tests failed" — at the very
+ * end. A verbose `tsc` or webpack run overflows the budget on progress noise alone,
+ * so the model would receive a wall of chatter, a truncation notice, and nothing
+ * about why the command failed.
+ *
+ * Both ends are kept instead, weighted toward the tail. The same total budget.
+ */
+const HEAD_CHARS = 8_000;
+const TAIL_CHARS = 22_000;
 /** How long to wait after `exit` for `close` before settling anyway. See the listener
  *  in runShell: a surviving grandchild can hold the output pipe open forever. */
 const CLOSE_GRACE_MS = 2_000;
@@ -288,24 +302,41 @@ async function runShell(
     }
     // Declared policy wins; the name guess is only the default when nothing was said.
     const notify = declaredNotify ?? guessNotifyPolicy(command);
-    const info = mgr.adopt(child, { command, cwd: ctx.cwd, cwdFile, notify });
+    const info = mgr.adopt(child, { command, cwd: ctx.cwd, cwdFile, tempFile, notify });
     return backgroundedResult(info.id, command, `Started in the background as shell #${info.id}`, notify);
   }
 
   return new Promise<ToolResult>((resolve) => {
-    let output = "";
-    let truncated = false;
+    let head = "";
+    let tail = "";
+    let dropped = 0;
     let timedOut = false;
     let settled = false;
 
+    // Decode ACROSS chunks. A chunk boundary can fall inside a multi-byte UTF-8
+    // sequence, and decoding each Buffer on its own turns that character into a
+    // replacement glyph — which shows up in any non-English output and in the box
+    // drawing most test runners use. The decoder holds the partial bytes back until
+    // the rest arrives.
+    const decoder = new StringDecoder("utf8");
+
     const collect = (chunk: Buffer) => {
-      if (truncated) return;
-      output += chunk.toString("utf8");
-      if (output.length > MAX_OUTPUT_CHARS) {
-        output = output.slice(0, MAX_OUTPUT_CHARS);
-        truncated = true;
+      let rest = decoder.write(chunk);
+      if (!rest) return;
+      if (head.length < HEAD_CHARS) {
+        const room = HEAD_CHARS - head.length;
+        head += rest.slice(0, room);
+        rest = rest.slice(room);
+      }
+      if (!rest) return;
+      tail += rest;
+      if (tail.length > TAIL_CHARS) {
+        dropped += tail.length - TAIL_CHARS;
+        tail = tail.slice(tail.length - TAIL_CHARS);
       }
     };
+    /** Everything kept, with the gap named where it happened. */
+    const collected = () => composeOutput(head, tail, dropped);
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
 
@@ -322,7 +353,7 @@ async function runShell(
         // Auto-backgrounded after running too long inline. Somebody was waiting on this,
         // so its completion is the point unless the caller said otherwise.
         const notify = declaredNotify ?? "on_finish";
-        const info = mgr.adopt(child, { command, cwd: ctx.cwd, initial: output, cwdFile, notify });
+        const info = mgr.adopt(child, { command, cwd: ctx.cwd, initial: collected(), cwdFile, tempFile, notify });
         resolve(
           backgroundedResult(
             info.id,
@@ -353,7 +384,7 @@ async function runShell(
       killTree(child.pid);
       void fs.rm(cwdFile, { force: true }).catch(() => {});
       if (tempFile) void fs.rm(tempFile, { force: true }).catch(() => {});
-      const body = output.trim();
+      const body = collected().trim();
       resolve({
         output: body ? `${body}\n\n[interrupted]` : "Command interrupted before it finished.",
         isError: true,
@@ -370,7 +401,7 @@ async function runShell(
       detachAbort();
       await applyCwd(cwdFile, ctx);
       if (tempFile) await fs.rm(tempFile, { force: true }).catch(() => {});
-      resolve(format(command, ctx, output, truncated, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore));
+      resolve(format(command, ctx, collected(), dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore));
     };
 
     child.on("error", (error) => {
@@ -454,9 +485,24 @@ function buildInvocation(
   }
   if (IS_WINDOWS) {
     // After the command, record the final location and preserve its exit code.
+    //
+    // `$?` has to be captured on the very FIRST line after the command, because every
+    // statement sets it — including an assignment, which always succeeds. Read it
+    // second and you are reading whether `$__ec = …` worked, which is always true.
+    //
+    // Both signals are needed because they cover different halves of PowerShell.
+    // `$LASTEXITCODE` is set ONLY by native executables, so a failing cmdlet
+    // (`Get-Content` on a missing file, a failed `Remove-Item` — most of what a model
+    // writes) leaves it null, which used to be coerced to 0 and reported to the model
+    // as SUCCESS. `$?` catches those. It is not enough on its own either: it says
+    // whether something failed, never with which code, and `exit 3` from a real
+    // program has to survive as 3. So: take the native code when there is one, and
+    // otherwise promote a cmdlet failure to 1.
     const wrapped =
       `${command}\n` +
+      `$__ok = $?\n` +
       `$__ec = $LASTEXITCODE; if ($null -eq $__ec) { $__ec = 0 }\n` +
+      `if (-not $__ok -and $__ec -eq 0) { $__ec = 1 }\n` +
       `$PWD.Path | Out-File -FilePath ${psQuote(cwdFile)} -Encoding utf8\n` +
       `exit $__ec`;
     return {
@@ -484,6 +530,19 @@ function buildInvocation(
     `pwd -P > ${shQuote(cwdFile)} 2>/dev/null\n` +
     `exit $__ec`;
   return { bin: posixShell().bin, args: ["-c"], wrapped };
+}
+
+/**
+ * Join the kept head and tail of a long output, naming the gap (pure).
+ *
+ * The marker sits WHERE the loss happened rather than at the end, so the model can
+ * see that the two halves are not contiguous. A trailing "output truncated" note
+ * after a head-only excerpt reads as "there was a bit more", which is exactly the
+ * wrong impression when the missing part is the answer.
+ */
+export function composeOutput(head: string, tail: string, dropped: number): string {
+  if (dropped <= 0) return head + tail;
+  return `${head}\n… [${dropped.toLocaleString("en-US")} characters omitted from the middle] …\n${tail}`;
 }
 
 /**
@@ -560,7 +619,9 @@ function format(
 
   if (body) {
     parts.push(body);
-    if (truncated) parts.push("… (output truncated)");
+    // The gap is already marked inline, at the point it happened; this only names
+    // the shape of what arrived so the model doesn't read the two halves as one run.
+    if (truncated) parts.push("(long output: the start and the end are shown, the middle was dropped)");
   } else if (!timedOut) {
     parts.push("(no output)");
   }
