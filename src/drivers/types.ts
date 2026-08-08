@@ -336,4 +336,43 @@ export interface Driver extends DriverManifest {
    * text channel repairs it here. Defaults to identity when a driver omits it.
    */
   sanitizeText?(raw: string): string;
+
+  /**
+   * Optional: look something up on the web.
+   *
+   * Search is a provider capability, not a service core buys: a model that can
+   * search does it inside its own infrastructure, and one that can't cannot be
+   * given the ability by bolting a third-party index onto core. So this is the
+   * same bargain as `acceptsImages` — the driver reports what its provider can
+   * do, and core decides how to degrade. Absent means NO, and the `web_search`
+   * tool says so plainly rather than pretending.
+   *
+   * Returns the answer the provider grounded in what it found, plus the sources
+   * it used. Results come back this way rather than as raw hits because providers
+   * hand the page text to the model and not to the caller — the citations are the
+   * only part core can read, so the synthesis has to come from the same call.
+   */
+  webSearch?(query: string, options?: SearchOptions): Promise<SearchResult>;
+}
+
+/** Options for a single `webSearch` call. */
+export interface SearchOptions {
+  /** Abort the underlying request (the engine's interrupt reaches it this way). */
+  signal?: AbortSignal;
+}
+
+/** One page a search leaned on. */
+export interface SearchSource {
+  title: string;
+  url: string;
+}
+
+/** What a provider found, in the only shape every provider can supply. */
+export interface SearchResult {
+  /** The provider's answer, grounded in the pages it read. */
+  answer: string;
+  /** The pages behind that answer, in the order they were cited. */
+  sources: SearchSource[];
+  /** True when the provider stopped searching early (its own loop hit a cap). */
+  partial?: boolean;
 }

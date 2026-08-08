@@ -19,6 +19,8 @@ import { readSymbolTool } from "./readSymbol.js";
 import { replaceSymbolBody } from "./replaceSymbol.js";
 import { diagnosticsTool } from "./diagnostics.js";
 import { webFetch } from "./webFetch.js";
+import { webSearch } from "./webSearch.js";
+import { screenshot } from "./screenshot.js";
 import { todoWrite } from "./todo.js";
 import { useSkill } from "./useSkill.js";
 import { rememberRule, forbidPath, forbidCommand, forbidMcpTool, createSkill } from "./governorTools.js";
@@ -38,6 +40,7 @@ export const TOOLS: Tool[] = [
   globTool,
   grepTool,
   readFile,
+  webSearch,
   webFetch,
   // Code intelligence (read-only, chassis-backed)
   outlineTool,
@@ -61,6 +64,8 @@ export const TOOLS: Tool[] = [
   useSkill,
   // Clarification (read-only: asks the user a focused question, changes nothing)
   askUserTool,
+  // Sight (read-only: photographs one approved window, changes nothing)
+  screenshot,
   // Action (mutating)
   writeFile,
   editFile,

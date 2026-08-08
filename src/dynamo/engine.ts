@@ -13,7 +13,7 @@
  * the read-only tool exactly like any other tool call — so this whole function
  * can later move to a server unchanged, with tools executing on the client.
  */
-import { activeDriver, ensureDriver } from "../drivers/registry.js";
+import { activeDriver, ensureDriver, manifestForModel } from "../drivers/registry.js";
 import type { ChatMessage, ImagePart, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
 import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, narrationFault, narrationNudge, VERIFY_NUDGE } from "./verify.js";
@@ -918,7 +918,7 @@ export async function respond(session: Session, options: RespondOptions = {}): P
         if (decision === "allow-all") ctx.guardAllowAll = true;
       }
       const result = await tool.execute(parseArgs(call.arguments), session.toolContext);
-      return { call, output: result.output, summary: result.summary, isError: result.isError, detail: result.detail, quiet: result.quiet, fullContentOf: result.fullContentOf };
+      return { call, output: result.output, summary: result.summary, isError: result.isError, detail: result.detail, quiet: result.quiet, fullContentOf: result.fullContentOf, images: result.images };
     };
 
     // Emit each tool's END the instant IT finishes — not batched after the whole
@@ -977,6 +977,38 @@ export async function respond(session: Session, options: RespondOptions = {}): P
       });
     }
     await options.persist?.(); // durable: tool results recorded, transcript well-formed
+
+    // Images a tool produced (screenshot) reach the model HERE, as a following user
+    // message, rather than inside the tool result. Two reasons, both hard:
+    //
+    //  1. Wire compatibility. An image inside a tool-result message is fine on
+    //     Anthropic and rejected by OpenAI-compatible providers, which is most of
+    //     the driver folders. A user message with images is the one shape every
+    //     provider already takes — the same path a user's `@file` attachment uses,
+    //     so it inherits payload loading, eviction, and token accounting for free.
+    //  2. Ordering. Nothing may sit between an assistant's tool_calls and their
+    //     results, so this runs after the loop above, where the other queued pushes
+    //     already land (a nudge slipped in mid-run once broke every tool-calling
+    //     turn on DeepSeek).
+    //
+    // Whether the picture is SENT or merely named is core's call, made once from a
+    // fact the manifest states — a tool never asks which provider is running.
+    const shots = results.flatMap((r) => r.images ?? []);
+    if (shots.length > 0) {
+      const canSee = manifestForModel(session.modelConfig.model).acceptsImages?.(session.modelConfig.model) ?? false;
+      const names = shots.map((i) => basename(i.path)).join(", ");
+      session.transcript.push({
+        role: "user",
+        content: canSee
+          ? `Here ${shots.length === 1 ? "is the image" : "are the images"} just captured (${names}).`
+          : `${names} was captured and saved, but this model cannot see images, so you are ` +
+            `being told about it rather than shown it. Describe what you expected to verify ` +
+            `and ask the user what they see, or switch to a model with vision using /model.`,
+        synthetic: true,
+        ...(canSee ? { images: shots } : {}),
+      });
+      await options.persist?.();
+    }
 
     // Re-scope guard. A todo_write that clears the list ("all tasks completed")
     // marks a natural stopping point: the requested work is done. If the model

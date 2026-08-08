@@ -68,6 +68,23 @@ export interface ToolResult {
    * exited non-zero — those are real news and stay visible.
    */
   quiet?: boolean;
+
+  /**
+   * Images this call produced, for the model to actually LOOK at.
+   *
+   * Refs, never bytes — the same rule the transcript already follows: the engine
+   * loads the payload once per turn and the caps live in one place.
+   *
+   * These do NOT ride on the tool result itself. An image inside a tool-result
+   * message is accepted by Anthropic and rejected by OpenAI-compatible providers,
+   * and most driver folders are OpenAI-shaped, so sending them that way would make
+   * the feature work on one provider and 400 on the rest. The engine instead
+   * surfaces them as a following user message — the identical path a user's `@file`
+   * attachment takes, which every provider already accepts. It also gates them on
+   * whether the running model can see an image at all, so a text-only model is told
+   * where the file is rather than handed a message claiming a picture it can't read.
+   */
+  images?: import("../memory/images.js").ImageRef[];
 }
 
 /**

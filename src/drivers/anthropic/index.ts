@@ -11,13 +11,14 @@
  * to repair.
  */
 import type { Driver } from "../types.js";
-import { streamTurn, toolTurn } from "./client.js";
+import { streamTurn, toolTurn, webSearch } from "./client.js";
 import { anthropicManifest } from "./manifest.js";
 
 export const anthropicDriver: Driver = {
   ...anthropicManifest,
   toolTurn,
   streamTurn,
+  webSearch,
 };
 
 export default anthropicDriver;
