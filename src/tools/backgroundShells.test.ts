@@ -17,6 +17,7 @@ import type { ShellInfo } from "./backgroundShells.js";
 import { runCommand } from "./runCommand.js";
 import { shellOutput, listShells, killShell } from "./shellTools.js";
 import type { ToolContext } from "./types.js";
+import { isProcessStopped } from "./killTree.js";
 
 const NODE = process.execPath;
 const IS_WIN = process.platform === "win32";
@@ -615,4 +616,41 @@ test("list_shells' description names the two questions its output answers", () =
 
 test("shell_output's stated read cap is the real one", () => {
   assert.match(shellOutput.description, /at most 30,000 characters/i);
+});
+
+test("disposing kills a shell's descendants even after the wrapper has exited", async () => {
+  // The POSIX leak, isolated. Killing the `sh -c` wrapper does NOT kill what it
+  // started: the program is orphaned, keeps running, and keeps the stdio pipes open,
+  // so the owning process can never exit. dispose() used to skip any shell it had
+  // already marked "ended", which is exactly this case, so the orphan was never
+  // reaped. Measured on Linux: it outlived the entire test run.
+  const mgr = new BackgroundShells();
+  const ctx = {
+    cwd: process.cwd(),
+    roots: [process.cwd()],
+    reads: new Map(),
+    todos: [],
+    backgroundShells: mgr,
+  } as unknown as ToolContext;
+
+  await runCommand.execute(
+    { command: nodeCmd("setTimeout(()=>{}, 100000)"), run_in_background: true },
+    ctx,
+  );
+  const id = mgr.running()[0]!.id;
+  const entry = (mgr as unknown as { shells: Map<number, { child: { pid?: number; kill(): void } | null }> }).shells.get(id)!;
+  const wrapperPid = entry.child!.pid!;
+
+  // The wrapper dies; whatever it started does not.
+  entry.child!.kill();
+  await waitUntil(() => mgr.list().find((s) => s.id === id)!.status !== "running");
+
+  mgr.dispose();
+  await new Promise((r) => setTimeout(r, 1200)); // killTree escalates asynchronously
+
+  assert.equal(
+    isProcessStopped(wrapperPid),
+    true,
+    "the shell's process group must be gone after dispose, wrapper and descendants alike",
+  );
 });

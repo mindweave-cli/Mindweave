@@ -28,6 +28,7 @@
  * freeze the UI for a noticeable fraction of a second on every swap.
  */
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -73,6 +74,34 @@ export function spawnManaged(command: string, args: readonly string[], options: 
  * after the grace period. Windows uses `taskkill /F /T`, which is already a forced
  * whole-tree kill. Use only where an event loop is still running; see `killTreeSync`.
  */
+/**
+ * Signal the process GROUP led by `pid`, falling back to the process itself.
+ *
+ * The group is the point: it reaches grandchildren. But a group only exists if the
+ * child was spawned `detached`, which is what `spawnManaged` guarantees. A pid from
+ * a plain `spawn` leads no group, so `kill(-pid)` raises ESRCH and the whole kill
+ * used to be swallowed by a `catch` and do NOTHING, with no error and no signal.
+ *
+ * That silent no-op is what hangs a POSIX process: the child survives, its handle
+ * keeps the event loop alive, and the parent never exits. MEASURED on Linux, a
+ * plainly-spawned child was still in state `S` after killTreeSync returned.
+ *
+ * Falling back to the bare pid means the caller always gets the kill they asked
+ * for. Grandchildren of a non-detached child are still missed, which is exactly why
+ * `spawnManaged` exists, but one dead process beats zero.
+ */
+function signalGroupThenSelf(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Already gone, or no permission — nothing more we can do.
+    }
+  }
+}
+
 export function killTree(pid: number | undefined): void {
   if (pid === undefined) return;
   try {
@@ -80,14 +109,9 @@ export function killTree(pid: number | undefined): void {
       spawn("taskkill", killArgs(pid), { windowsHide: true, stdio: "ignore" });
       return;
     }
-    // Negative pid → the whole process group (spawnManaged made the child its leader).
-    process.kill(-pid, "SIGTERM");
+    signalGroupThenSelf(pid, "SIGTERM");
     const escalate = setTimeout(() => {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        // Gone during the grace period, which is the outcome we wanted.
-      }
+      signalGroupThenSelf(pid, "SIGKILL");
     }, TERM_GRACE_MS);
     // Never hold the process open just to deliver a follow-up kill.
     escalate.unref?.();
@@ -110,9 +134,39 @@ export function killTreeSync(pid: number | undefined): void {
     if (IS_WINDOWS) {
       spawnSync("taskkill", killArgs(pid), { windowsHide: true, stdio: "ignore" });
     } else {
-      process.kill(-pid, "SIGKILL");
+      signalGroupThenSelf(pid, "SIGKILL");
     }
   } catch {
     // Already gone, or no permission — nothing more we can do.
+  }
+}
+
+/**
+ * Has `pid` stopped running? Not the same as "does the pid exist".
+ *
+ * On POSIX a SIGKILLed child stays a ZOMBIE until its parent reaps it, and
+ * `kill(pid, 0)` succeeds against a zombie, so the obvious liveness check reports a
+ * process we just killed as still alive. MEASURED: right after killTreeSync, a
+ * correctly killed child sat in state `Z`. Callers that need "is it gone" therefore
+ * have to read the state, not just probe for existence.
+ *
+ * Windows has no zombie stage, so existence is the whole answer there.
+ */
+export function isProcessStopped(pid: number | undefined): boolean {
+  if (pid === undefined) return true;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return true; // no such process
+  }
+  if (IS_WINDOWS) return false;
+  try {
+    // /proc/<pid>/stat: the state letter follows the parenthesised command name,
+    // which can itself contain spaces or parens, so split on the LAST ") ".
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const after = stat.slice(stat.lastIndexOf(") ") + 2);
+    return after.startsWith("Z"); // reaped-pending is stopped for every practical purpose
+  } catch {
+    return true; // /proc entry vanished between the two checks
   }
 }

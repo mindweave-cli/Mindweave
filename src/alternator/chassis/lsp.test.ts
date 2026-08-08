@@ -13,14 +13,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LspManager, filesToOpen } from "./lsp.js";
 import { CodeChassis } from "./index.js";
+import { isProcessStopped } from "../../tools/killTree.js";
 
+/**
+ * Still running? A bare `kill(pid, 0)` is wrong here: on POSIX a killed server is a
+ * ZOMBIE until reaped and answers that probe as alive, so `shutdown` looked broken
+ * on Linux while it was working. The shared check reads the process state instead.
+ */
 function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return !isProcessStopped(pid);
 }
 
 async function tsProject(): Promise<string> {

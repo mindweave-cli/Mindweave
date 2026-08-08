@@ -209,6 +209,15 @@ export interface AdoptOptions {
   initial?: string;
   /** A temp cwd-file from run_command to clean up when the process ends. */
   cwdFile?: string;
+  /**
+   * A temp script file from run_command to clean up when the process ends.
+   *
+   * The `cmd` path materialises a `.bat`, because cmd.exe runs only the first line
+   * of a multi-line `/c` string. The foreground paths delete it themselves, but a
+   * command that gets BACKGROUNDED outlives them, so without this every backgrounded
+   * cmd run left its script in the temp directory permanently.
+   */
+  tempFile?: string;
 }
 
 interface Entry extends ShellInfo {
@@ -223,6 +232,7 @@ interface Entry extends ShellInfo {
   readyUiNotified: boolean; // "it came up" shown in the chat yet?
   readyTimer: ReturnType<typeof setTimeout> | null;
   cwdFile?: string;
+  tempFile?: string;
 }
 
 const active = new Set<BackgroundShells>();
@@ -267,6 +277,7 @@ export class BackgroundShells {
       readyUiNotified: false,
       readyTimer: null,
       cwdFile: opts.cwdFile,
+      tempFile: opts.tempFile,
     };
     this.shells.set(id, entry);
     if (opts.initial) this.append(entry, opts.initial);
@@ -350,6 +361,7 @@ export class BackgroundShells {
       cameUp: entry.ready,
     });
     if (entry.cwdFile) void fs.rm(entry.cwdFile, { force: true }).catch(() => {});
+    if (entry.tempFile) void fs.rm(entry.tempFile, { force: true }).catch(() => {});
     this.emit();
   }
 
@@ -458,11 +470,20 @@ export class BackgroundShells {
    */
   dispose(sync = false): void {
     for (const entry of this.shells.values()) {
-      if (entry.status === "running" && entry.child) {
+      // Kill by CHILD PRESENT, not by recorded status. A shell we have marked
+      // "ended" only means its WRAPPER exited, and on POSIX that says nothing about
+      // its descendants: kill the `sh -c` and the program it started is orphaned and
+      // keeps running, still holding the stdio pipes. MEASURED on Linux, where the
+      // orphan outlived the whole test process and stopped it from ever exiting.
+      // The group kill still reaches it, because a process group survives its leader
+      // as long as it has members. Signalling an already-dead pid is a harmless
+      // no-op, so there is nothing to lose by not consulting the status first.
+      if (entry.child) {
         if (sync) killTreeSync(entry.child.pid);
         else killTree(entry.child.pid);
       }
       if (entry.cwdFile) void fs.rm(entry.cwdFile, { force: true }).catch(() => {});
+      if (entry.tempFile) void fs.rm(entry.tempFile, { force: true }).catch(() => {});
     }
     this.shells.clear();
     active.delete(this);

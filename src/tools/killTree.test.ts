@@ -10,11 +10,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { killTree, killTreeSync } from "./killTree.js";
+import { killTree, killTreeSync, isProcessStopped, spawnManaged } from "./killTree.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
-/** A long-lived child we can try to kill. */
+/** A long-lived child we can try to kill, spawned PLAINLY (leads no process group). */
 function longLivedChild() {
   return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
     stdio: "ignore",
@@ -22,14 +22,22 @@ function longLivedChild() {
   });
 }
 
+/** The same, through the managed path that makes it a process-group leader. */
+function longLivedManagedChild() {
+  return spawnManaged(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+}
+
+/**
+ * Still running? Deliberately NOT a bare `kill(pid, 0)`.
+ *
+ * On POSIX a killed child is a ZOMBIE until reaped, and `kill(pid, 0)` succeeds
+ * against a zombie, so that check calls a correctly killed process alive and these
+ * tests failed on Linux while the kill was working perfectly.
+ */
 function alive(pid: number | undefined): boolean {
-  if (pid === undefined) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return !isProcessStopped(pid);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -93,4 +101,42 @@ test("killTreeSync reaps a shelled tree, not just the wrapper", { timeout: 30_00
 
   const survivors = kids.filter(alive);
   assert.deepEqual(survivors, [], `orphaned descendants after killTreeSync: ${survivors.join(", ")}`);
+});
+
+test("a plainly-spawned child is killed too, not silently ignored", { timeout: 30_000 }, async () => {
+  // The POSIX hang, in one test. killTree signals the process GROUP led by the pid,
+  // but a plain (non-detached) spawn leads no group, so the signal raised ESRCH and
+  // the catch swallowed it: no error, no signal, nothing dead. The child then kept
+  // Node's event loop alive and the whole test FILE hung instead of failing.
+  // MEASURED on Linux before the fix: state "S" (running) after killTreeSync returned.
+  const child = longLivedChild();
+  await sleep(400);
+  assert.ok(alive(child.pid), "child should be running before the kill");
+
+  killTreeSync(child.pid);
+
+  assert.equal(alive(child.pid), false, "a non-group-leader pid must still be killed");
+});
+
+test("a managed child is killed through its process group", { timeout: 30_000 }, async () => {
+  const child = longLivedManagedChild();
+  await sleep(400);
+  assert.ok(alive(child.pid));
+
+  killTree(child.pid);
+  await sleep(1500);
+
+  assert.equal(alive(child.pid), false);
+});
+
+test("a zombie counts as stopped, so a killed child is not reported alive", { timeout: 30_000 }, async () => {
+  // Guards the liveness check itself. Without this, the whole file passes on Windows
+  // and fails on POSIX for a reason that has nothing to do with killing.
+  const child = longLivedManagedChild();
+  await sleep(400);
+  killTreeSync(child.pid);
+
+  assert.equal(isProcessStopped(child.pid), true, "killed child must read as stopped");
+  assert.equal(isProcessStopped(undefined), true, "no pid is trivially stopped");
+  assert.equal(isProcessStopped(process.pid), false, "this very process is running");
 });
