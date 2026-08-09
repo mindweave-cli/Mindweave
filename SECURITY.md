@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-MindWeave ships from `main`. Security fixes land there and go out in the next release; there are no maintained older branches yet.
+Mindweave ships from `main`. Security fixes land there and go out in the next release; there are no maintained older branches yet.
 
 | Version | Supported |
 | ------- | --------- |
@@ -13,9 +13,9 @@ MindWeave ships from `main`. Security fixes land there and go out in the next re
 
 ## The threat model, honestly
 
-MindWeave is a local, single-user tool. It runs on your machine, with your API key, inside your repository, and it edits files and runs shell commands on your behalf. That is the product, and it means the interesting risks are not the ones a web app has:
+Mindweave is a local, single-user tool. It runs on your machine, with your API key, inside your repository, and it edits files and runs shell commands on your behalf. That is the product, and it means the interesting risks are not the ones a web app has:
 
-- **There is no MindWeave server.** No backend, no telemetry, no account. Your code and your key go to your model provider and nowhere else.
+- **There is no Mindweave server.** No backend, no telemetry, no account. Your code and your key go to your model provider and nowhere else.
 - **The agent has real capability.** It writes files and executes commands. A model that makes a bad call can do damage, the same way you can.
 - **The model is not trusted input.** A model can be wrong, and a repository can contain text written to manipulate one. Anything that must hold has to be enforced mechanically, not asked for in a prompt.
 
@@ -27,18 +27,18 @@ These live in `src/tools/guard.ts` and the governor, and none of them depend on 
 
 - **Secrets are never readable.** `.env`, `.ssh`, `*.pem`, private keys, and `.git` internals are refused by the file tools, excluded from search results, and blocked from shell commands that would print them. All three paths are gated, not just the obvious one, because `grep -r` and `cat` walk straight around a per-file check.
 - **A short list of catastrophic commands is refused.** Wiping a filesystem root, reformatting a disk, writing to a raw device, fork bombs. Deliberately narrow and high-confidence. This is a seatbelt, not a sandbox.
-- **Another tool's private data is asked about first.** If a project has been worked on by a different coding agent, its saved conversations and rules are not ours to read. MindWeave asks you before touching them rather than helping itself, and search skips them outright.
+- **Another tool's private data is asked about first.** If a project has been worked on by a different coding agent, its saved conversations and rules are not ours to read. Mindweave asks you before touching them rather than helping itself, and search skips them outright.
 - **Per-project forbidden paths and commands.** `/forbidden <path>` makes a path untouchable and the tools refuse it. Only you can lift it, per session, through an approval prompt. The model cannot lift it or work around it.
 - **Plan mode changes nothing.** In Architect mode the mutating tools are withheld from the request entirely, and refused if called anyway.
 - **Sentinel mode asks before every mutating action**, at the single execution choke point, so it covers every tool including sub-agent edits. It fails closed: no approval channel, or an unclear answer, refuses.
 
-What this is **not**: a sandbox, a jail, or a defense against a model deliberately trying to evade a string check. A single-user local tool does not ship a shell analyzer, and pretending otherwise would be worse than saying so. If you need true isolation, run MindWeave in a container or a VM.
+What this is **not**: a sandbox, a jail, or a defense against a model deliberately trying to evade a string check. A single-user local tool does not ship a shell analyzer, and pretending otherwise would be worse than saying so. If you need true isolation, run Mindweave in a container or a VM.
 
 ## MCP servers
 
-An MCP server is third-party code you pointed MindWeave at, and its tool descriptions go straight into the model's prompt where they are read as instructions. That makes a description an injection surface, not documentation. Three attacks follow from it: **tool poisoning** (hidden instructions in a description or schema), **rug pulls** (a clean server ships an update that poisons one), and **cross-server shadowing** (one server's description steering the agent into misusing another server's tools).
+An MCP server is third-party code you pointed Mindweave at, and its tool descriptions go straight into the model's prompt where they are read as instructions. That makes a description an injection surface, not documentation. Three attacks follow from it: **tool poisoning** (hidden instructions in a description or schema), **rug pulls** (a clean server ships an update that poisons one), and **cross-server shadowing** (one server's description steering the agent into misusing another server's tools).
 
-What MindWeave does about it:
+What Mindweave does about it:
 
 - **Descriptions and schemas are fingerprinted.** Every tool is hashed on first sight and the record is kept per project. If a description or its parameter schema moves, the tool is **blocked** and you are asked, with the change named. Decline and it stays blocked, and the old fingerprint is kept so you are asked again next session rather than the change being silently accepted. With no way to ask, it fails closed.
 - **The check runs again whenever a catalog moves, not only at startup.** A server can announce a changed tool list at any moment, and until v1.4 those new descriptions were reloaded without being compared to anything, which left the rug pull open in the one case the fingerprints existed to cover. A mid-session change now blocks the affected tools and tells you, rather than interrupting a running turn with a prompt.
@@ -52,7 +52,7 @@ What this is **not**: verification that a server is trustworthy. **A server that
 
 ## Your key
 
-MindWeave is bring-your-own-key. Keys are read from `~/.mindweave/.env`, a project `.env`, or your shell environment, and that file is written with `0600` permissions. Keys are never logged, never printed into the transcript, and never sent anywhere except the provider they belong to. Nothing about a key crosses a driver boundary: each provider's driver only ever sees its own.
+Mindweave is bring-your-own-key. Keys are read from `~/.mindweave/.env`, a project `.env`, or your shell environment, and that file is written with `0600` permissions. Keys are never logged, never printed into the transcript, and never sent anywhere except the provider they belong to. Nothing about a key crosses a driver boundary: each provider's driver only ever sees its own.
 
 ---
 

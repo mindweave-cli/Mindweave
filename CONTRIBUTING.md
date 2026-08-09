@@ -1,8 +1,8 @@
-# Contributing to MindWeave
+# Contributing to Mindweave
 
-First off, thank you for considering contributing to MindWeave!
+First off, thank you for considering contributing to Mindweave!
 
-MindWeave is built to be a fast, modular, terminal-native workspace for AI agents. Our core philosophy is to keep the orchestration engine vendor-neutral, while allowing specialized driver modules to deliver peak performance for every model provider.
+Mindweave is built to be a fast, modular, terminal-native workspace for AI agents. Our core philosophy is to keep the orchestration engine vendor-neutral, while allowing specialized driver modules to deliver peak performance for every model provider.
 
 Whether you're fixing a typo, adding a feature, or optimizing model performance under heavy context loads, your help makes this tool better for everyone.
 
@@ -29,7 +29,7 @@ We are actively inviting engineers to step up as Driver Leads for specific model
 
 ### What does a Driver Lead do?
 * Direct Ownership: Get listed under CODEOWNERS for your designated provider directory (/drivers/<provider>).
-* Architectural Influence: Shape how MindWeave handles prompt formatting, system instructions, token caching, and rate limiting for that specific model.
+* Architectural Influence: Shape how Mindweave handles prompt formatting, system instructions, token caching, and rate limiting for that specific model.
 * Direct Feedback Loop: Help ensure your favorite API or local model delivers the absolute best user experience in a terminal environment.
 
 If you have hands-on experience optimizing for a specific backend, open an issue or drop a comment in Discussions to claim or improve a driver!

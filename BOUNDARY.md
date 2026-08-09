@@ -4,7 +4,7 @@
 bug. It takes a minute and it exists because skipping it has already cost us real
 bugs, listed at the bottom.
 
-MindWeave runs several model providers through one engine. That only works if two
+Mindweave runs several model providers through one engine. That only works if two
 things stay true:
 
 - **Core never knows which model is running.** It owns the agent loop, the tools,
