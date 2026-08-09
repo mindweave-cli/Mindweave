@@ -19,6 +19,7 @@
 import type { Tool, ToolResult } from "./types.js";
 import type { SearchResult } from "../drivers/types.js";
 import { activeDriver } from "../drivers/registry.js";
+import { frameExternal } from "./untrusted.js";
 
 /** Sources listed per answer. Enough to judge the answer, short enough to read. */
 const MAX_SOURCES = 8;
@@ -89,7 +90,7 @@ export const webSearch: Tool = {
  * claim can be checked or followed with web_fetch.
  */
 export function formatSearch(query: string, result: SearchResult): string {
-  const lines: string[] = [`Search: ${query}`, ""];
+  const lines: string[] = [];
   if (result.answer) lines.push(result.answer);
 
   if (result.sources.length > 0) {
@@ -105,7 +106,11 @@ export function formatSearch(query: string, result: SearchResult): string {
   if (result.partial) {
     lines.push("", "(The search stopped early, so this may be incomplete.)");
   }
-  return lines.join("\n");
+
+  // Framed as external content. This is the least trustworthy input the agent has:
+  // the model picked the query and the open web picked what came back, including the
+  // titles, which are attacker-chosen text sitting right next to a real answer.
+  return frameExternal({ tag: "web_search", attrs: { query }, what: "a web search" }, lines.join("\n"));
 }
 
 function fail(message: string): ToolResult {

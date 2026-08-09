@@ -47,7 +47,8 @@ test("formatSearch leads with the answer and lists sources after it", () => {
       { title: "Changelog", url: "https://github.com/facebook/react/releases" },
     ],
   });
-  assert.match(out, /^Search: current react version/);
+  // The query rides on the frame's tag now, rather than a "Search:" line of its own.
+  assert.match(out, /<web_search query="current react version">/);
   // The answer must come before the sources, not after them.
   assert.ok(out.indexOf("React 19.2 is current.") < out.indexOf("Sources:"));
   assert.match(out, /1\. React releases — https:\/\/react\.dev\/versions/);

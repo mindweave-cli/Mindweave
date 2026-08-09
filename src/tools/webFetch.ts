@@ -22,11 +22,15 @@
 import TurndownService from "turndown";
 import type { Tool, ToolResult } from "./types.js";
 import { activeDriver } from "../drivers/registry.js";
+import { frameExternal } from "./untrusted.js";
 
 const FETCH_TIMEOUT_MS = 20_000;
 const DOWNLOAD_CAP_BYTES = 3_000_000; // stop reading a response past ~3MB
 const CONTENT_CAP_CHARS = 12_000; // how much cleaned content we return / distill from
 const DISTILL_OVER_CHARS = 12_000; // above this, summarize via a model call (if a prompt is given)
+/** Redirect hops followed before giving up. Enough for shorteners and canonical
+ *  redirects, short enough that a redirect loop cannot spin. */
+const MAX_REDIRECTS = 5;
 
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
 turndown.remove(["script", "style", "noscript", "iframe"]);
@@ -94,8 +98,14 @@ export const webFetch: Tool = {
     if (content.length > DISTILL_OVER_CHARS && prompt) {
       const distilled = await distill(content.slice(0, CONTENT_CAP_CHARS * 3), prompt);
       if (distilled) {
+        // Framed too. Distillation is a summary OF untrusted text, so an instruction
+        // planted in the page can survive into it — passing it through unmarked would
+        // launder the page's words into something that reads as ours.
         return {
-          output: `From ${finalUrl} (focused on: ${prompt})${redirected}\n\n${distilled}`,
+          output: frameExternal(
+            { tag: "web_page", attrs: { url: finalUrl }, what: "an external web page" },
+            `(focused on: ${prompt})${redirected}\n\n${distilled}`,
+          ),
           summary: `fetched ${hostOf(url)} (summarized)`,
         };
       }
@@ -112,7 +122,10 @@ export const webFetch: Tool = {
       : "";
 
     return {
-      output: `Content of ${finalUrl} (HTTP ${status})${redirected}\n\n${out}${footer}`,
+      output: frameExternal(
+        { tag: "web_page", attrs: { url: finalUrl, status: String(status) }, what: "an external web page" },
+        `${redirected}${redirected ? "\n\n" : ""}${out}${footer}`,
+      ),
       summary: `fetched ${hostOf(url)} (${out.length} chars${truncated ? ", truncated" : ""})`,
     };
   },
@@ -127,27 +140,84 @@ interface Fetched {
   body: string;
 }
 
-/** Fetch with timeout + size cap. Returns the body or an error message string. */
-async function fetchUrl(url: URL): Promise<Fetched | string> {
+/**
+ * Fetch with timeout + size cap, checking EVERY hop. Body, or an error string.
+ *
+ * Redirects are followed by hand rather than by `fetch`. Letting the client follow
+ * them means the SSRF guard only ever sees the URL the model supplied, and a public
+ * URL that answers `302 -> http://127.0.0.1:8080` (or the cloud metadata address) is
+ * then fetched with no check at all. That is a live bug class rather than a
+ * hypothetical: the same shape was fixed in pyload, crewai-tools, WeasyPrint and
+ * open-webui through 2026. The guidance is to refuse redirects or revalidate each
+ * hop; revalidating keeps ordinary shortened and canonicalising links working, which
+ * a coding agent hits constantly.
+ */
+async function fetchUrl(startUrl: URL): Promise<Fetched | string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let url = startUrl;
   try {
-    const res = await fetch(url, {
-      redirect: "follow",
-      signal: controller.signal,
-      headers: { "User-Agent": "Mindweave/0.1 (+terminal coding agent)", Accept: "text/html,text/*,application/json;q=0.9,*/*;q=0.8" },
-    });
-    const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-    const body = await readCapped(res);
-    return { finalUrl: res.url || url.toString(), status: res.status, contentType, body };
+    for (let hop = 0; ; hop++) {
+      const res = await fetch(url, {
+        // Manual, so a redirect target is a value we inspect rather than a request
+        // the client has already made on our behalf.
+        redirect: "manual",
+        signal: controller.signal,
+        headers: { "User-Agent": "Mindweave/0.1 (+terminal coding agent)", Accept: "text/html,text/*,application/json;q=0.9,*/*;q=0.8" },
+      });
+
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (!location) {
+        const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+        const body = await readCapped(res);
+        return { finalUrl: url.toString(), status: res.status, contentType, body };
+      }
+
+      // Discard the redirect's own body; only the destination matters from here.
+      await res.body?.cancel().catch(() => {});
+
+      const step = redirectStep(location, url, hop);
+      if ("error" in step) return step.error;
+      url = step.url;
+    }
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      return `Timed out fetching ${url.toString()} after ${FETCH_TIMEOUT_MS / 1000}s.`;
+      return `Timed out fetching ${startUrl.toString()} after ${FETCH_TIMEOUT_MS / 1000}s.`;
     }
-    return `Could not fetch ${url.toString()}: ${error instanceof Error ? error.message : String(error)}`;
+    return `Could not fetch ${startUrl.toString()}: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Decide whether one redirect hop may be followed (pure).
+ *
+ * Everything that makes a redirect dangerous is decided here, with no I/O, so the
+ * rule is unit-testable rather than only reachable through a live server — which
+ * matters because the interesting cases redirect INTO private addresses, and a test
+ * that has to bind one is a test nobody writes.
+ */
+export function redirectStep(location: string, from: URL, hop: number): { url: URL } | { error: string } {
+  if (hop >= MAX_REDIRECTS) {
+    return { error: `Gave up after ${MAX_REDIRECTS} redirects, most recently at ${from.toString()}.` };
+  }
+  // Relative Location headers are legal and common.
+  let next: URL;
+  try {
+    next = new URL(location, from);
+  } catch {
+    return { error: `Got an unreadable redirect target ("${location}") from ${from.toString()}.` };
+  }
+  // A redirect must not become a way to reach a scheme the tool would have refused
+  // outright — `file:`, `gopher:` and friends are a standard SSRF escalation.
+  if (next.protocol === "http:") next.protocol = "https:";
+  if (next.protocol !== "https:") {
+    return { error: `Refusing to follow a redirect to a "${next.protocol}" URL (${next.toString()}).` };
+  }
+  const blocked = ssrfReason(next);
+  if (blocked) return { error: `Refusing to follow a redirect from ${from.hostname}: ${blocked}` };
+  return { url: next };
 }
 
 /** Read a response body, stopping once past the byte cap. */
@@ -215,26 +285,107 @@ export function normalizeUrl(raw: string): URL | string {
   return url;
 }
 
-/** Basic SSRF guard: refuse localhost and private/link-local hosts. */
+/**
+ * SSRF guard: refuse localhost, private, and link-local hosts.
+ *
+ * Pure, and deliberately so — every hop of a redirect chain is put through it, and a
+ * check that needed I/O could not be run that often.
+ *
+ * Three things this covers beyond the obvious dotted-quad:
+ *
+ *  - **IPv6.** Blocking only `::1` left unique-local (`fc00::/7`) and link-local
+ *    (`fe80::/10`) wide open, which is most of what an internal IPv6 network uses.
+ *  - **Alternate IPv4 encodings.** `http://2130706433/` is `127.0.0.1` written as a
+ *    single decimal, and `0x7f.1` is the same host again. A string match on
+ *    "127." sees neither, and every SSRF filter-bypass list opens with this.
+ *  - **169.254.0.0/16**, which is where cloud instance metadata lives. It was
+ *    already covered, and it is the reason the rest matters.
+ *
+ * What it does NOT do: resolve DNS. A name that resolves to a private address still
+ * passes, and defending against that (or against rebinding between check and connect)
+ * means pinning the connection to a checked IP, which Node's fetch does not expose.
+ * Stated rather than papered over.
+ */
 export function ssrfReason(url: URL): string | null {
   const host = url.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) {
     return `Refusing to fetch a local address (${host}).`;
   }
-  if (host === "0.0.0.0" || host === "::1" || host === "[::1]") return `Refusing to fetch ${host}.`;
-  // IPv4 literal in a private/link-local/loopback range.
-  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
-    const isPrivate =
-      a === 10 ||
-      a === 127 ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168);
-    if (isPrivate) return `Refusing to fetch a private/loopback address (${host}).`;
+
+  // IPv6 literals arrive from `URL` still wrapped in brackets.
+  if (host.startsWith("[") && host.endsWith("]")) {
+    const v6 = host.slice(1, -1);
+    if (v6 === "::1" || v6 === "::") return `Refusing to fetch a loopback address (${host}).`;
+    // fc00::/7 (unique-local) and fe80::/10 (link-local).
+    if (/^f[cd][0-9a-f]{0,2}:/i.test(v6) || /^fe[89ab][0-9a-f]?:/i.test(v6)) {
+      return `Refusing to fetch a private/link-local address (${host}).`;
+    }
+    // IPv4 wearing an IPv6 hat. Both spellings have to be handled, because `URL`
+    // rewrites the readable one: `[::ffff:127.0.0.1]` is normalised to
+    // `[::ffff:7f00:1]` before this ever sees it, so matching only dotted form
+    // would catch nothing at all.
+    const mappedDotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(v6);
+    if (mappedDotted && isPrivateV4(mappedDotted[1]!)) {
+      return `Refusing to fetch a private/loopback address (${host}).`;
+    }
+    const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(v6);
+    if (mappedHex) {
+      const n = (parseInt(mappedHex[1]!, 16) << 16) | parseInt(mappedHex[2]!, 16);
+      const dotted = [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join(".");
+      if (isPrivateV4(dotted)) return `Refusing to fetch a private/loopback address (${host}).`;
+    }
+    return null;
   }
+  if (host === "::1" || host === "::") return `Refusing to fetch a loopback address (${host}).`;
+
+  const v4 = asIPv4(host);
+  if (v4 && isPrivateV4(v4)) return `Refusing to fetch a private/loopback address (${host}).`;
   return null;
+}
+
+/**
+ * Normalise anything that is really an IPv4 address into dotted-quad, or null (pure).
+ *
+ * Covers dotted decimal, a bare 32-bit integer (`2130706433`), and hex/octal parts
+ * (`0x7f.0.0.1`, `0177.0.0.1`) — the standard filter-bypass encodings. Anything that
+ * is not unambiguously an address returns null and is treated as a hostname.
+ */
+export function asIPv4(host: string): string | null {
+  if (/^\d+$/.test(host)) {
+    const n = Number(host);
+    if (!Number.isSafeInteger(n) || n < 0 || n > 0xffffffff) return null;
+    return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join(".");
+  }
+  const parts = host.split(".");
+  if (parts.length !== 4) return null;
+  const nums: number[] = [];
+  for (const p of parts) {
+    if (p === "") return null;
+    let n: number;
+    if (/^0x[0-9a-f]+$/i.test(p)) n = parseInt(p, 16);
+    else if (/^0[0-7]+$/.test(p)) n = parseInt(p, 8);
+    else if (/^\d+$/.test(p)) n = Number(p);
+    else return null;
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+    nums.push(n);
+  }
+  return nums.join(".");
+}
+
+/** Is a dotted-quad in a loopback, private, or link-local range? (pure) */
+function isPrivateV4(dotted: string): boolean {
+  const p = dotted.split(".").map(Number);
+  const [a, b] = [p[0]!, p[1]!];
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) || // link-local, and cloud instance metadata
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) || // carrier-grade NAT
+    a >= 224 // multicast and reserved
+  );
 }
 
 function isTextual(contentType: string): boolean {

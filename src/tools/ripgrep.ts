@@ -18,8 +18,27 @@ const TIMEOUT_MS = 20_000;
 
 let probe: Promise<boolean> | undefined;
 
+/**
+ * Force the built-in walker even where ripgrep is installed.
+ *
+ * Search has two engines and picks one from what happens to be on the machine, so
+ * every run exercises exactly one of them: this machine has ripgrep, the CI runners
+ * do not, and neither ever covered both. The two have already drifted apart once —
+ * only ripgrep honoured `.gitignore` until v1.9.3, while both claimed to — and a
+ * difference like that is invisible until someone runs the other path.
+ *
+ * Setting this lets one machine test both, which is what the CI matrix uses.
+ */
+const FORCED_OFF = process.env.MINDWEAVE_NO_RIPGREP === "1";
+
+/** Reset the cached probe. Tests only — the env var is read per probe, not per call. */
+export function resetRipgrepProbe(): void {
+  probe = undefined;
+}
+
 /** True if `rg` is runnable. Probed once and cached for the session. */
 export function ripgrepAvailable(): Promise<boolean> {
+  if (FORCED_OFF) return Promise.resolve(false);
   if (!probe) {
     probe = new Promise<boolean>((resolve) => {
       try {

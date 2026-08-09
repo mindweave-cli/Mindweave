@@ -63,6 +63,23 @@ jobs:
           set -o pipefail
           npm test 2>&1 | tee test-output.txt
 
+      # Search has TWO engines and picks one from what is installed, so a single run
+      # only ever covers one of them. The runners have no ripgrep, so the suite above
+      # is the built-in walker; this installs ripgrep and runs the search tests again
+      # to cover the other path. The two drifted apart once already (only ripgrep
+      # honoured .gitignore until v1.9.3) and nothing caught it, because no machine
+      # ran both.
+      - name: Test the ripgrep search path
+        shell: bash
+        run: |
+          set -o pipefail
+          choco install ripgrep -y --no-progress --limit-output
+          rg --version
+          node --import tsx --test \
+            src/tools/tools.test.ts \
+            src/tools/codeIntel.test.ts \
+            src/tools/multiroot.test.ts 2>&1 | tee rg-output.txt
+
       # Failures as ANNOTATIONS, not only the run summary. The summary is rendered by
       # JavaScript and full logs need admin rights on the API, so neither can be read
       # from outside a browser. Annotations come back from the public checks API, and
