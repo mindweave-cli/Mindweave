@@ -89,6 +89,24 @@ export function modeById(id: ModeId): Mode {
 }
 
 /**
+ * Which mode a set of behaviour flags amounts to (pure).
+ *
+ * The reverse of what `applyMode` does, and it exists because the flags can now move
+ * without the user pressing anything: approving a plan lifts `planMode` mid-turn and
+ * the engine restores it when the turn ends. The indicator has to be able to name
+ * whatever state it finds rather than only what it last set.
+ *
+ * Reading flags rather than being told a name is what keeps modes a client concept —
+ * nothing below this file knows the word "Architect". `planMode` wins over `guarded`
+ * because a read-only turn cannot act, so there is nothing left to confirm.
+ */
+export function modeFromFlags(flags: { planMode?: boolean; guarded?: boolean }): ModeId {
+  if (flags.planMode) return "architect";
+  if (flags.guarded) return "sentinel";
+  return "lightning";
+}
+
+/**
  * The next mode when the user presses shift-tab: the following ENABLED mode in
  * list order, wrapping around. Disabled modes (Sentinel, for now) are skipped, so
  * the rotation is only over what actually exists.

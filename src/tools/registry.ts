@@ -21,6 +21,7 @@ import { diagnosticsTool } from "./diagnostics.js";
 import { webFetch } from "./webFetch.js";
 import { webSearch } from "./webSearch.js";
 import { screenshot } from "./screenshot.js";
+import { exitPlan } from "./exitPlan.js";
 import { todoWrite } from "./todo.js";
 import { useSkill } from "./useSkill.js";
 import { rememberRule, forbidPath, forbidCommand, forbidMcpTool, createSkill } from "./governorTools.js";
@@ -66,6 +67,8 @@ export const TOOLS: Tool[] = [
   askUserTool,
   // Sight (read-only: photographs one approved window, changes nothing)
   screenshot,
+  // Planning (read-only, and offered only while planning — see `planOnly`)
+  exitPlan,
   // Action (mutating)
   writeFile,
   editFile,
@@ -106,7 +109,12 @@ export function findTool(name: string): Tool | undefined {
  */
 export function toolSchemas(opts: { planMode?: boolean; readOnlyOnly?: boolean } = {}): ToolSchema[] {
   const readOnly = opts.planMode || opts.readOnlyOnly;
-  const tools = readOnly ? TOOLS.filter((tool) => tool.readOnly) : TOOLS;
+  // `planOnly` runs the filter the other way: those tools exist BECAUSE planning is
+  // happening, so they appear only in plan mode and are hidden the rest of the time.
+  // A read-only sub-agent is not planning, so it does not get them either.
+  const tools = (readOnly ? TOOLS.filter((tool) => tool.readOnly) : TOOLS).filter((tool) =>
+    tool.planOnly ? opts.planMode === true : true,
+  );
   return tools.map((tool) => ({
     type: "function",
     function: {

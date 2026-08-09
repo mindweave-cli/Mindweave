@@ -2,8 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TOOLS, toolSchemas } from "./registry.js";
 
-test("toolSchemas advertises every tool by default", () => {
-  assert.equal(toolSchemas().length, TOOLS.length);
+test("toolSchemas advertises every tool by default, except the plan-only ones", () => {
+  // The point of this test is that nothing gets accidentally dropped from the model's
+  // view. `planOnly` tools are the one deliberate exception: they exist only because
+  // planning is happening, so they are absent by default and present in plan mode.
+  // Counted from the registry rather than hard-coded, so adding either kind is safe.
+  const planOnly = TOOLS.filter((t) => t.planOnly);
+  assert.ok(planOnly.length > 0, "this exception should describe something real");
+  assert.equal(toolSchemas().length, TOOLS.length - planOnly.length);
+
+  const inPlan = toolSchemas({ planMode: true }).map((s) => s.function.name);
+  for (const tool of planOnly) assert.ok(inPlan.includes(tool.name), `${tool.name} missing in plan mode`);
 });
 
 test("the editing tools route to each other, so the model can pick correctly", () => {

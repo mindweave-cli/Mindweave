@@ -306,6 +306,26 @@ export interface ToolContext {
    * context that never attached a pool.
    */
   mcp?: import("../mcp/manager.js").McpManager;
+
+  /**
+   * Tell the UI its mode flags moved underneath it.
+   *
+   * Modes stay a CLIENT concept: nothing here knows the word "Architect". A tool
+   * changes `planMode`/`guarded` and calls this; the client reads those flags back
+   * and works out which mode that is. Absent outside the interactive CLI, where
+   * there is no indicator to keep honest.
+   */
+  onModeChange?: () => void;
+
+  /**
+   * Planning was left to carry out an approved plan, and should be returned to when
+   * the turn ends.
+   *
+   * Approval buys ONE turn of doing, not a permanent change of mode. Without this
+   * the session would quietly sit in Lightning afterwards, having been put there by
+   * a tool call rather than by the user, and the next request would run unplanned.
+   */
+  planResume?: boolean;
 }
 
 export interface Tool {
@@ -327,6 +347,16 @@ export interface Tool {
    * with each other. Mutating tools (write/edit/run) must run alone, in order.
    */
   readOnly: boolean;
+
+  /**
+   * Offered ONLY while planning, and hidden everywhere else.
+   *
+   * The inverse of how the plan filter usually works: every other tool is a thing
+   * the model may do that planning takes away, while this is a thing that exists
+   * solely because planning is happening. Advertising it in an ordinary turn would
+   * invite the model to call something with nothing to end.
+   */
+  planOnly?: boolean;
 
   /**
    * May THIS call run in parallel with the others in the same batch? Optional and

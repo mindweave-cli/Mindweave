@@ -180,10 +180,14 @@ export function volatileContext(
   // toggling it with shift-tab never invalidates the cached system prompt.
   if (planMode) {
     parts.push(
-      "You are in PLAN MODE (Architect). Research the codebase and think the change through, then present a clear, " +
-        "step-by-step plan for the user to approve — do NOT modify files, run commands, or take any action. Editing " +
-        "tools are withheld this turn; if you need one, say so in the plan. Once the user approves and switches modes, " +
-        "you'll carry it out.",
+      "You are in PLAN MODE (Architect). Research the codebase and think the change through; do NOT modify files, " +
+        "run commands, or take any action while planning — the editing tools are withheld until the plan is approved. " +
+        "Where a decision is genuinely the user's (which approach, which of two designs), ask with ask_user rather " +
+        "than choosing for them. " +
+        "When you know exactly what you would change, call exit_plan with the WHOLE plan in it. That is how planning " +
+        "ends: the user reads the plan there, and approving it starts the work immediately, in the same turn, with " +
+        "you following that plan. Do not write the plan out as an ordinary reply and stop — prose between steps is " +
+        "shortened before the user sees it, so a plan presented that way reaches them in pieces.",
     );
   }
   // The maintained session state — first in the volatile tail so the model reads
@@ -597,7 +601,30 @@ export function callIsConcurrencySafe(
   return tool.isConcurrencySafe ? tool.isConcurrencySafe(args) : tool.readOnly;
 }
 
+/**
+ * Run one turn, and put planning back afterwards if an approved plan left it.
+ *
+ * The restore is in a `finally` rather than at the end of the turn because approval
+ * grants ONE turn of doing however that turn ends — a step-budget pause, an error, or
+ * Esc all have to come back to planning. Leaving it off would strand the session in a
+ * mode it was put into by a tool call rather than by the user, and the next request
+ * would run unplanned.
+ */
 export async function respond(session: Session, options: RespondOptions = {}): Promise<string> {
+  try {
+    return await respondTurn(session, options);
+  } finally {
+    if (session.toolContext.planResume) {
+      session.toolContext.planResume = false;
+      session.toolContext.planMode = true;
+      session.toolContext.guarded = false;
+      session.toolContext.guardAllowAll = false;
+      session.toolContext.onModeChange?.();
+    }
+  }
+}
+
+async function respondTurn(session: Session, options: RespondOptions = {}): Promise<string> {
   // Make sure the provider serving the selected model is loaded before anything
   // in this turn reaches for it. Cached after the first call, so this is free on
   // every subsequent turn, and it keeps `activeDriver()` safe to call synchronously
@@ -607,19 +634,37 @@ export async function respond(session: Session, options: RespondOptions = {}): P
   // Built-in tools plus whatever the connected MCP servers offer. An MCP tool is
   // dispatched, displayed and gated by exactly the same machinery as a built-in — the
   // merge here and the lookup fallback below are the entire integration.
-  const readOnlyTurn = planMode || session.toolContext.readOnlyTools === true;
+  let readOnlyTurn = planMode || session.toolContext.readOnlyTools === true;
   // ONE frozen view of the MCP catalog for the whole turn, used for BOTH the advertised
   // list and dispatch. Reading live state twice let a server die (or announce a changed
   // tool list) between the two, so the model could be refused a tool we had just told it
   // it had. It also pins the exact `tools` bytes across the turn's steps, which is what
   // keeps the provider's cached prefix intact while the tool loop runs.
-  const mcpTurn = session.toolContext.mcp?.snapshot(readOnlyTurn);
-  const builtinTools = toolSchemas({ planMode, readOnlyOnly: session.toolContext.readOnlyTools });
+  let mcpTurn = session.toolContext.mcp?.snapshot(readOnlyTurn);
   // Recomputed PER STEP, not once per turn: a large catalog is held behind
   // `find_mcp_tools`, and a tool the model just searched for has to be callable on the
   // very next step or the search was a lie. When nothing is deferred (the common case)
   // this returns identical bytes every step, so the cached prefix is untouched.
-  const stepTools = () => [...builtinTools, ...(mcpTurn?.exposedSchemas() ?? [])];
+  // Rebuilt per step rather than once per turn, because an approved plan LIFTS plan
+  // mode mid-turn and the model has to receive the tools it was just granted. When
+  // nothing changes this returns identical bytes every step, so the provider's cached
+  // prefix is untouched — the same argument that already applies to deferred MCP tools.
+  const stepTools = () => {
+    const ro = (session.toolContext.planMode ?? false) || session.toolContext.readOnlyTools === true;
+    if (ro !== readOnlyTurn) {
+      // The MCP catalog is re-snapshotted too, or approving a plan would grant the
+      // built-in editing tools while leaving every MCP action hidden until next turn.
+      readOnlyTurn = ro;
+      mcpTurn = session.toolContext.mcp?.snapshot(ro);
+    }
+    return [
+      ...toolSchemas({
+        planMode: session.toolContext.planMode ?? false,
+        readOnlyOnly: session.toolContext.readOnlyTools,
+      }),
+      ...(mcpTurn?.exposedSchemas() ?? []),
+    ];
+  };
   const lookup = (name: string) => findTool(name) ?? mcpTurn?.asTool(name);
   const stepLimit = options.maxSteps ?? STEP_BUDGET;
   // Sinks the spawn_subagent tool reuses (it only ever gets the ToolContext, not the
@@ -811,7 +856,9 @@ export async function respond(session: Session, options: RespondOptions = {}): P
       await options.persist?.(); // durable: the reply is on disk before we return
       // Verification gate: it edited files but never checked them. Nudge once and
       // let it continue — a fact-based reminder, not a decision about the code.
-      if (VERIFY_GATE && !planMode && mutatedThisTurn && !verifiedThisTurn && !verifyNudged) {
+      // Live, not the value captured at the top: an approved plan lifts plan mode
+      // mid-turn, and the work that follows has to be verified like any other.
+      if (VERIFY_GATE && !session.toolContext.planMode && mutatedThisTurn && !verifiedThisTurn && !verifyNudged) {
         verifyNudged = true;
         session.transcript.push({ role: "user", content: VERIFY_NUDGE, synthetic: true });
         continue;
@@ -882,7 +929,9 @@ export async function respond(session: Session, options: RespondOptions = {}): P
       }
       // Belt-and-suspenders for plan mode: the schema filter already hides mutating
       // tools, but if the model calls one anyway, refuse it instead of running it.
-      if (planMode && !tool.readOnly) {
+      // Live, not the captured value. Reading the stale one here would refuse the
+      // editing tools the user had just approved, for the rest of the turn.
+      if (session.toolContext.planMode && !tool.readOnly) {
         return {
           call,
           output: `Refused: '${call.name}' changes files or state, but you're in plan mode. Present your plan instead; the user will approve and switch out of plan mode to carry it out.`,

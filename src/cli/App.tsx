@@ -50,7 +50,7 @@ import type { ConnectionStatus as McpStatus } from "../mcp/connection.js";
 import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, splitArgs } from "../mcp/configWrite.js";
 import { mapPromptArguments, parsePromptCommand, promptCommand, promptUsage } from "../mcp/prompts.js";
 import type { Entry, Session, SessionMeta } from "../memory/types.js";
-import { DEFAULT_MODE, modeById, nextMode, type ModeId } from "./modes.js";
+import { DEFAULT_MODE, modeById, modeFromFlags, nextMode, type ModeId } from "./modes.js";
 
 const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
 
@@ -278,6 +278,17 @@ export function App() {
     s.toolContext.planMode = m.readOnly;
     s.toolContext.guarded = m.guarded;
     s.toolContext.guardAllowAll = false;
+    // exit_plan moves these flags mid-turn when a plan is approved, and the engine
+    // moves them back when the turn ends. The indicator has to follow, or it would
+    // claim the session is still planning while it is carrying the plan out. Modes
+    // stay a client concept: the flags are read back and named here, never there.
+    s.toolContext.onModeChange = () => {
+      const id = modeFromFlags(s.toolContext);
+      // Both, like applyMode does: the ref is what a session swap reads back, so
+      // updating only the rendered state would restore the pre-approval mode later.
+      modeRef.current = id;
+      setMode(id);
+    };
   }
 
   // Switch interaction mode (shift-tab). Updates the indicator and the flags the
