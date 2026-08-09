@@ -1,0 +1,9 @@
+{
+  // The PUBLISHED build. `tsconfig.json` stays the whole-project view so that
+  // `npm run typecheck` still checks the tests; this one only decides what ends up
+  // in `dist/`, and the tests do not belong there. They run from source through tsx,
+  // so nothing needs them compiled, and shipping them meant every install carried the
+  // full suite.
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx"]
+}
