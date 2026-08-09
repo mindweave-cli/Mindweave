@@ -17,7 +17,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { ToolContext } from "./types.js";
 import type { SearchResult } from "../drivers/types.js";
 import { webSearch, formatSearch } from "./webSearch.js";
-import { extractSearch } from "../drivers/anthropic/client.js";
+import { extractSearch } from "../drivers/searchBlocks.js";
 import { ensureDriver } from "../drivers/registry.js";
 
 function ctx(): ToolContext {
@@ -116,6 +116,33 @@ test("extractSearch lists a page once even when several searches hit it", () => 
   );
 });
 
+test("extractSearch drops a result the provider sent without a usable URL", () => {
+  // Found by running a real DeepSeek search, not by reading: one returned result
+  // carried neither title nor url despite the SDK's types promising both, and it
+  // rendered to the model as "undefined — undefined".
+  const result = extractSearch(
+    message([
+      resultBlock([
+        hit("Real page", "https://example.com/a"),
+        { type: "web_search_result", encrypted_content: "x", page_age: null },
+        { type: "web_search_result", title: "", url: "   ", encrypted_content: "x", page_age: null },
+      ]),
+      { type: "text", text: "answer" },
+    ]),
+  );
+  assert.deepEqual(result.sources, [{ title: "Real page", url: "https://example.com/a" }]);
+});
+
+test("extractSearch falls back to the URL when a result has no title", () => {
+  const result = extractSearch(
+    message([
+      resultBlock([{ type: "web_search_result", url: "https://example.com/x", encrypted_content: "x", page_age: null }]),
+      { type: "text", text: "answer" },
+    ]),
+  );
+  assert.deepEqual(result.sources, [{ title: "https://example.com/x", url: "https://example.com/x" }]);
+});
+
 test("extractSearch marks a turn the provider paused as partial", () => {
   const result = extractSearch(
     message([resultBlock([hit("Docs", "https://example.com/a")]), { type: "text", text: "so far" }], "pause_turn"),
@@ -131,15 +158,30 @@ test("web_search rejects an empty query", async () => {
   assert.match(result.output, /`query` is required/);
 });
 
-test("web_search degrades on a model that cannot search, without erroring", async () => {
-  // DeepSeek implements no `webSearch`, which is the common path: it is the
-  // default provider. The tool must say so rather than fail, or the model reads
-  // it as transient and retries.
-  await ensureDriver("deepseek-v4-flash");
-  const result = await webSearch.execute({ query: "anything" }, ctx());
-  assert.equal(result.isError, undefined);
-  assert.match(result.output, /cannot search the web/);
-  assert.match(result.output, /web_fetch/);
+test("DeepSeek can search, over its own endpoint", async () => {
+  // It serves native search on an Anthropic-protocol endpoint rather than the
+  // OpenAI-compatible one its chat uses, with the same key. Declaring the
+  // capability is what core reads; the transport is the driver's business.
+  const driver = await ensureDriver("deepseek-v4-flash");
+  assert.equal(typeof driver.webSearch, "function");
+});
+
+test("web_search degrades on a provider without search, without erroring", async () => {
+  // Every installed provider can search today, so the degrade path is reached by
+  // taking the capability away from a real driver rather than by inventing one.
+  // The path still matters: it is what a future provider without search gets, and
+  // it must not read as a transient failure the model should retry.
+  const driver = await ensureDriver("deepseek-v4-flash");
+  const saved = driver.webSearch;
+  delete driver.webSearch;
+  try {
+    const result = await webSearch.execute({ query: "anything" }, ctx());
+    assert.equal(result.isError, undefined);
+    assert.match(result.output, /cannot search the web/);
+    assert.match(result.output, /web_fetch/);
+  } finally {
+    driver.webSearch = saved;
+  }
 });
 
 test("web_search is offered to the model as a read-only tool", () => {

@@ -10,7 +10,7 @@
  * model-specific repairs in their own module, and this file as the thin assembly.
  */
 import type { Driver } from "../types.js";
-import { streamTurn, toolTurn } from "./client.js";
+import { streamTurn, toolTurn, webSearch } from "./client.js";
 import { stripInlineToolCalls } from "./inlineTools.js";
 import { deepseekManifest } from "./manifest.js";
 
@@ -18,6 +18,9 @@ export const deepseekDriver: Driver = {
   ...deepseekManifest,
   toolTurn,
   streamTurn,
+  // Served over DeepSeek's own Anthropic-protocol endpoint, with the same key. Chat
+  // stays on the OpenAI path; only this call changes protocol.
+  webSearch,
   // The live UI renders raw text deltas, which is the one place DeepSeek's leaked
   // DSML markup can still reach the screen — the assembled turn is already clean.
   sanitizeText: stripInlineToolCalls,

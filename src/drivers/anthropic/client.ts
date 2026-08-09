@@ -24,11 +24,11 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { basename } from "node:path";
+import { extractSearch, SEARCH_MAX_USES, SEARCH_SYSTEM } from "../searchBlocks.js";
 import type {
   ModelRequest,
   SearchOptions,
   SearchResult,
-  SearchSource,
   StreamEvent,
   StreamOptions,
   StreamResult,
@@ -284,67 +284,19 @@ export function toTurn(message: Anthropic.Message): Turn {
   return { content, toolCalls, stop: toStop(message.stop_reason) };
 }
 
-/** How many searches one `web_search` call may run before the provider stops. */
-const SEARCH_MAX_USES = 5;
-
-/**
- * Pull an answer and its citations out of a finished search message.
- *
- * Two shapes have to be handled and only one of them is a list. A failed search
- * comes back on a SUCCESSFUL response as a `web_search_tool_result` block whose
- * `content` is an error OBJECT rather than an array of results, so indexing it
- * blind yields nonsense instead of throwing. Hence the `Array.isArray` gate.
- *
- * Sources are de-duplicated by URL: the model commonly reads the same page across
- * two searches in one turn, and listing it twice reads as two separate findings.
- */
-export function extractSearch(message: Anthropic.Message): SearchResult {
-  let answer = "";
-  const sources: SearchSource[] = [];
-  const seen = new Set<string>();
-
-  for (const block of message.content) {
-    if (block.type === "text") {
-      answer += block.text;
-      continue;
-    }
-    if (block.type !== "web_search_tool_result") continue;
-    // The error branch. Nothing to list; the answer text explains it.
-    if (!Array.isArray(block.content)) continue;
-    for (const hit of block.content) {
-      if (seen.has(hit.url)) continue;
-      seen.add(hit.url);
-      sources.push({ title: hit.title || hit.url, url: hit.url });
-    }
-  }
-
-  return {
-    answer: answer.trim(),
-    sources,
-    // The provider's own search loop has a ceiling; past it the turn comes back
-    // paused rather than finished. We keep what it found instead of resuming,
-    // and say so, because a partial answer with its sources is still useful.
-    partial: message.stop_reason === "pause_turn",
-  };
-}
-
 /**
  * Search the web.
  *
- * Model-work boundary: this is a model call inside a tool, and its prompt is
- * deliberately thin — search, answer from what you find, say when you didn't
- * find it. No analysis rules, no house style, nothing about how to judge a
- * source. The engineering judgment stays with the model that asked.
+ * The parsing lives in `../searchBlocks.ts` because it is the PROTOCOL's shape, not
+ * this provider's: other providers serve their own native search over the same
+ * Messages protocol, and one parser shared beats two that drift.
  */
 export async function webSearch(query: string, options: SearchOptions = {}): Promise<SearchResult> {
   const message = await api().messages.create(
     {
       model: MODEL,
       max_tokens: MAX_TOKENS_BUFFERED,
-      system:
-        "Search the web to answer the request. Answer only from what you find, " +
-        "and say so plainly if the answer is not there. Include specifics — " +
-        "versions, names, dates, code — rather than describing the pages.",
+      system: SEARCH_SYSTEM,
       messages: [{ role: "user", content: query }],
       // The dated variant is the tool version, not a date to keep current. This
       // one filters results before they reach the context window, and it runs

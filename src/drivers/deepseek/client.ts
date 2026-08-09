@@ -13,6 +13,8 @@
 import type {
   ChatMessage,
   ModelRequest,
+  SearchOptions,
+  SearchResult,
   StreamEvent,
   StreamOptions,
   StreamResult,
@@ -23,11 +25,30 @@ import type {
   Usage,
   WireToolCall,
 } from "../types.js";
+import { extractSearch, SEARCH_MAX_USES, SEARCH_SYSTEM } from "../searchBlocks.js";
 import { parseInlineToolCalls } from "./inlineTools.js";
 import { DEFAULT_MODEL } from "./manifest.js";
 
 const BASE_URL = process.env.MINDWEAVE_BASE_URL ?? "https://api.deepseek.com";
 const MODEL = process.env.MINDWEAVE_MODEL ?? DEFAULT_MODEL;
+
+/**
+ * Where DeepSeek serves its own web search.
+ *
+ * DeepSeek speaks two protocols on one account and one key. Chat and tools run over
+ * the OpenAI-compatible path above; the native web search is served ONLY over this
+ * Anthropic-Messages-compatible one, as a server-side tool. So this driver talks to
+ * both, and which one a request uses is decided by the OPERATION rather than by
+ * configuration — there is nothing for the user to choose and no second key.
+ *
+ * Only the search call moves. Putting the whole driver here would cost real things:
+ * this endpoint ignores `cache_control` (so the prompt cache the OpenAI path relies
+ * on would be gone) and does not carry MCP tools, images, or code execution.
+ */
+const ANTHROPIC_BASE_URL = process.env.MINDWEAVE_DEEPSEEK_ANTHROPIC_URL ?? "https://api.deepseek.com/anthropic";
+
+/** Output ceiling for the buffered search call. */
+const SEARCH_MAX_TOKENS = 8_000;
 
 /**
  * Render a ModelRequest to OpenAI-shape wire messages: the stable system prompt,
@@ -321,6 +342,47 @@ async function postStream(body: Record<string, unknown>, signal?: AbortSignal): 
     throw new Error(`DeepSeek API error ${response.status}: ${detail || response.statusText}`);
   }
   return response;
+}
+
+/**
+ * Search the web, over DeepSeek's own Anthropic-protocol endpoint.
+ *
+ * DeepSeek runs the search on its own servers with the key the user already has.
+ * Nothing third-party is involved and there is no second key — the same account,
+ * reached over the protocol that happens to carry its search.
+ *
+ * The SDK is imported HERE rather than at the top of the file so that a DeepSeek
+ * session that never searches does not load it. That lazy split is measured and
+ * deliberate (it is why drivers load on demand at all), and a top-level import would
+ * quietly undo it for every DeepSeek user.
+ *
+ * The model id is passed through as DeepSeek's own (`deepseek-v4-pro`), which is what
+ * their documented example does. Their Claude-name mapping is a compatibility shim
+ * for clients that only know Anthropic model names, and routing through it would mean
+ * naming a Claude model to get a DeepSeek one — indirection with nothing to gain.
+ */
+export async function webSearch(query: string, options: SearchOptions = {}): Promise<SearchResult> {
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const client = new Anthropic({
+    apiKey: requireApiKey(),
+    baseURL: ANTHROPIC_BASE_URL,
+    // DeepSeek authenticates this endpoint with `x-api-key`, which is what the SDK
+    // sends for `apiKey`. It ignores `anthropic-version` rather than requiring it.
+  });
+  const message = await client.messages.create(
+    {
+      model: MODEL,
+      max_tokens: SEARCH_MAX_TOKENS,
+      system: SEARCH_SYSTEM,
+      messages: [{ role: "user", content: query }],
+      // The original tool version, not Anthropic's newer dated one: this is
+      // DeepSeek's implementation of the protocol, and the widely-implemented
+      // version is the one to send to a compatibility endpoint.
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: SEARCH_MAX_USES }],
+    },
+    { signal: options.signal },
+  );
+  return extractSearch(message);
 }
 
 /** The DeepSeek API key, or a clear setup error if it isn't configured yet. */

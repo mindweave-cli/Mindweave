@@ -11,6 +11,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
   activeDriver,
   allModels,
@@ -152,6 +153,19 @@ test("every provider declares the key metadata setup needs", () => {
     assert.match(m.apiKeyEnv, /^[A-Z][A-Z0-9_]*$/, `${m.id} apiKeyEnv is not an env var name`);
     assert.match(m.keysUrl, /^https:\/\//, `${m.id} keysUrl is not an https URL`);
   }
+});
+
+test("the DeepSeek driver does not statically import another provider's SDK", async () => {
+  // DeepSeek serves its native search over an Anthropic-protocol endpoint, so its
+  // driver reaches for that SDK — but only inside the search call, behind a dynamic
+  // import. A static one at the top of the file would load the SDK for every
+  // DeepSeek session, undoing the lazy split that is the whole reason drivers load
+  // on demand. That regression would be invisible: everything still works, it is
+  // just slower for people who never search.
+  const src = await readFile(new URL("./deepseek/client.ts", import.meta.url), "utf8");
+  const staticImport = /^\s*import\s[^\n]*["']@anthropic-ai\/sdk["']/m.exec(src);
+  assert.equal(staticImport, null, "the SDK must only be reached through a dynamic import");
+  assert.match(src, /await import\(\s*["']@anthropic-ai\/sdk["']\s*\)/, "expected the dynamic import");
 });
 
 test("providers use distinct API key variables", () => {
