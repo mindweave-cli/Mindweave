@@ -71,6 +71,9 @@ mindweave
 On first launch it asks for your API key and saves it to `~/.mindweave/.env`, so it works
 in every project afterwards. Then type what you want done.
 
+`mindweave --help` covers setup and the launch flags; `mindweave --version` prints the
+version. Everything else is configured in a session, not on the command line.
+
 Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) makes search faster.
 Without it Mindweave uses a built-in walker.
 
@@ -138,22 +141,23 @@ without bloating the shared core. Only the driver you are using is ever loaded.
 
 ## Recently
 
-**v1.9.7** hardened the tools that reach outside your machine. `web_fetch` checked the
-address it was handed and then followed redirects without checking again, so a public
-URL that redirected to `127.0.0.1` or a cloud metadata address was fetched anyway. Each
-hop is now checked before anything connects to it, and the address check itself grew to
-cover private IPv6, addresses written in decimal or hex, and several other ways of
-writing a local address so it does not look like one.
+**v1.9.8** gave DeepSeek web search. Search is a capability of your model's own
+provider rather than something Mindweave buys, so it worked on Claude models and
+reported itself unavailable on DeepSeek, which is the default. DeepSeek does have
+native search; it is served over a different protocol than the one used for chat.
 
-Web pages and search results now arrive marked as external content to reason about
-rather than instructions to follow, the same framing MCP output already had. Screenshots
-used to sit in a temporary folder forever, holding whatever was on screen; they are now
-cleared after a retention period. SECURITY.md covers both areas, including the limit
-worth knowing: a screenshot can capture a secret that is visible on screen, which the
-file tools would have refused to read.
+It now searches, on DeepSeek's own servers, with the key you already have. No second
+key, no account, nothing to choose. Chat stays where it was and only the search call
+changes protocol, so the prompt cache and MCP support are untouched. Searching does
+cost more than an ordinary turn, because DeepSeek makes further requests to summarise
+what it finds.
 
-Search runs on ripgrep when installed and a built-in walker otherwise, and no machine
-ever tested both. The engine can now be forced, and the build exercises both paths.
+That is the pattern for every provider added from here: each declares whether it has
+native search, and its driver routes that one call over whichever protocol carries it.
+
+Also fixed: a search result arriving without a title or an address reached the model as
+"undefined — undefined", and `--version` and `--help` were ignored — the interactive
+session started instead, and without a terminal attached it hung rather than exiting.
 
 Full detail in the [changelog](CHANGELOG.md).
 

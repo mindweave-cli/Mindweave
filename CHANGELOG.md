@@ -7,6 +7,40 @@ Mindweave lands on npm and the numbering resets.
 
 ---
 
+## v1.9.8 (2026-08-09): DeepSeek can search the web
+
+Web search is a capability of the model's own provider rather than a service
+Mindweave buys, so it worked on Claude models and reported itself unavailable on
+DeepSeek. DeepSeek does have native search; it is simply served over a different
+protocol than the one used for chat.
+
+DeepSeek now searches. It runs on DeepSeek's own servers, with the key already
+configured, and nothing third-party is involved. There is no second key, no account
+to create, and nothing to choose: chat continues over the endpoint it always used and
+only the search call speaks the other protocol. Moving everything there would have
+cost the prompt cache, images, and MCP support, none of which that endpoint carries.
+
+Searching on DeepSeek costs more than an ordinary turn, because their side makes
+further requests to summarise what it finds.
+
+This is the pattern for every provider added from here: a provider declares whether it
+has native search, and the driver routes that one call over whichever protocol carries
+it. Providers without native search continue to say so plainly and point at
+`web_fetch`.
+
+### Fixes
+
+**A malformed search result reached the model.** A live DeepSeek search returned a
+result carrying neither a title nor an address, which rendered in the source list as
+"undefined — undefined". Results without a usable address are now dropped, and a
+result with an address but no title is listed by its address.
+
+**`--version` and `--help` now work.** Both flags were ignored: the interactive
+session started instead, and without a terminal attached it hung rather than exiting.
+They print and exit immediately, which is what a script or a packaging tool expects.
+
+---
+
 ## v1.9.7 (2026-08-09): hardening what reaches outside the machine
 
 A review of the tools that leave the machine found that none of them went through a
