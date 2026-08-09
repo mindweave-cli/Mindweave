@@ -7,7 +7,38 @@ Mindweave lands on npm and the numbering resets.
 
 ---
 
-## v1.9.5 (2026-08-08): the agent can look things up, and look at your app
+## v1.9.6 (2026-08-09): approving a plan starts the work
+
+Plan mode could produce a plan and then had no way to finish. Approving one meant
+switching modes by hand and asking again for the thing that had just been described,
+and the plan itself often arrived in pieces.
+
+### The plan is shown whole
+
+A plan used to be ordinary prose, and prose written before a tool call is treated as
+narration: shortened to two sentences, and dropped entirely after the first one in a
+turn. That is right for "checking the config now" and wrong for the plan itself, so a
+plan composed between lookups reached the screen in fragments.
+
+Plans now come through their own channel and are shown in full, once.
+
+### Approving it is the instruction
+
+The plan arrives with four answers: approve and let it work, approve and confirm each
+action, reject, or send it back for changes. Approving starts the work immediately,
+in the same turn, following the plan that was just read rather than a version of it
+recovered from the conversation.
+
+Approval covers that piece of work and not the session. When the work ends, planning
+resumes, including after an interruption or an error. Anything unrecognised coming
+back from the prompt counts as a refusal, so an empty or unexpected answer can never
+start work.
+
+Decisions that are genuinely the user's are asked during planning rather than assumed.
+
+---
+
+## v1.9.5 (2026-08-09): the agent can look things up, and look at your app
 
 Two things the agent could not do before, and four fixes to how commands are reported.
 

@@ -138,19 +138,17 @@ without bloating the shared core. Only the driver you are using is ever loaded.
 
 ## Recently
 
-**v1.9.5** gave the agent two things it did not have. It can now search the web, so a
-question whose answer changed after the model was trained has a route to an answer
-instead of a guess; searching runs through the model's own provider, with no second
-account and no key of yours going anywhere. It can also take a picture of one window and
-look at it, which is how you tell an app that started from an app that works. Capture is
-one window, never the screen, and it asks first, naming the window.
+**v1.9.6** finished plan mode. Architect could work out what to change and then had
+nowhere to put it: the plan was ordinary prose, and prose written between tool calls
+gets shortened on screen, so a plan composed while the agent was still looking around
+arrived in pieces. Approving it meant switching modes by hand and asking a second time
+for the thing that had just been described.
 
-The same release fixed how commands report themselves. A failing PowerShell command could
-come back as a success, because exit codes were read from a variable only native programs
-set, so a failed `Get-Content` or `Remove-Item` looked like it had worked and the agent
-built on it. Long output kept only its first 30,000 characters, which is the banner rather
-than the failure at the end; both ends are kept now. Backgrounded `cmd` commands stopped
-leaving a script behind on every run, and non-English output stopped arriving corrupted.
+Plans are now shown whole, once, and approving one is the instruction. You get four
+answers: approve and let it work, approve and confirm each action, reject, or send it
+back for changes. Approving starts the work in the same turn, following the plan you
+just read. Approval covers that piece of work rather than the session, so planning
+resumes when it finishes.
 
 Full detail in the [changelog](CHANGELOG.md).
 
