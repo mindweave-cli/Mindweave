@@ -16,6 +16,17 @@ import { createElement } from "react";
 import { App } from "./cli/App.js";
 import { loadConfig } from "./cli/bootstrap.js";
 import { sweepCapturesInBackground } from "./tools/captureSweep.js";
+import { parseStartupArgs } from "./cli/startupArgs.js";
+
+// --help / --version answer and exit, BEFORE anything reads config, sweeps a
+// directory, or starts the UI. They used to fall through to the interactive app,
+// which then hung forever with no TTY to render into — the one thing a packaging
+// tool or a script does with a new CLI.
+const startup = parseStartupArgs(process.argv.slice(2));
+if (startup.kind === "print") {
+  process.stdout.write(startup.text + "\n");
+  process.exit(0);
+}
 
 // Load config (global ~/.mindweave/.env + project .env) so provider API keys are
 // available no matter which project we're launched in.
