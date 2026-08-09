@@ -7,6 +7,58 @@ Mindweave lands on npm and the numbering resets.
 
 ---
 
+## v1.9.7 (2026-08-09): hardening what reaches outside the machine
+
+A review of the tools that leave the machine found that none of them went through a
+guard. Every file tool passes through `guard.ts` and every MCP result is framed as
+external data; web pages, search results, and screen captures went through neither.
+
+### A redirect could reach a private address
+
+`web_fetch` checked the address it was given and then followed redirects without
+checking again. A public URL answering with a redirect to `127.0.0.1`, an internal
+host, or a cloud instance metadata address was fetched anyway, and its contents
+returned. Redirects are now followed one hop at a time and each destination is checked
+before anything connects to it.
+
+The address check itself was thin. It now covers private and link-local IPv6, addresses
+written in decimal or hexadecimal to slip past a text match, IPv4 addresses wrapped in
+IPv6 notation, and carrier-grade NAT ranges. Redirects to schemes other than http and
+https are refused rather than followed.
+
+### Web content is marked as data
+
+Pages and search results now arrive inside a delimited block that says plainly it is
+external content to reason about rather than instructions to follow, which is the
+treatment MCP output already had. Search results need it most: the model chooses the
+query, and whatever answers chooses the words, including page titles that sit next to
+a real answer.
+
+This is a boundary the model is asked to respect, not a wall, and the documentation
+says so rather than claiming more.
+
+### Screenshots no longer accumulate
+
+Each capture was written to a temporary folder and never removed, so every window ever
+photographed stayed on disk indefinitely, holding whatever was on screen at the time.
+Captures are now cleared after a retention period, swept at startup so a crash cannot
+leave them behind.
+
+### The security policy describes the product again
+
+SECURITY.md gained sections on web content and on screen capture, including the honest
+limit: a screenshot can capture a secret that is visible on screen, which the file
+tools would have refused to read. The approval prompt naming the window is the control,
+which is why it appears every time.
+
+### Both search engines are tested
+
+Search runs on ripgrep when it is installed and a built-in walker otherwise, and a
+given machine only ever exercised one of them. The two had already drifted apart once.
+The engine can now be forced, and the build runs the search tests on both paths.
+
+---
+
 ## v1.9.6 (2026-08-09): approving a plan starts the work
 
 Plan mode could produce a plan and then had no way to finish. Approving one meant

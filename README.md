@@ -138,17 +138,22 @@ without bloating the shared core. Only the driver you are using is ever loaded.
 
 ## Recently
 
-**v1.9.6** finished plan mode. Architect could work out what to change and then had
-nowhere to put it: the plan was ordinary prose, and prose written between tool calls
-gets shortened on screen, so a plan composed while the agent was still looking around
-arrived in pieces. Approving it meant switching modes by hand and asking a second time
-for the thing that had just been described.
+**v1.9.7** hardened the tools that reach outside your machine. `web_fetch` checked the
+address it was handed and then followed redirects without checking again, so a public
+URL that redirected to `127.0.0.1` or a cloud metadata address was fetched anyway. Each
+hop is now checked before anything connects to it, and the address check itself grew to
+cover private IPv6, addresses written in decimal or hex, and several other ways of
+writing a local address so it does not look like one.
 
-Plans are now shown whole, once, and approving one is the instruction. You get four
-answers: approve and let it work, approve and confirm each action, reject, or send it
-back for changes. Approving starts the work in the same turn, following the plan you
-just read. Approval covers that piece of work rather than the session, so planning
-resumes when it finishes.
+Web pages and search results now arrive marked as external content to reason about
+rather than instructions to follow, the same framing MCP output already had. Screenshots
+used to sit in a temporary folder forever, holding whatever was on screen; they are now
+cleared after a retention period. SECURITY.md covers both areas, including the limit
+worth knowing: a screenshot can capture a secret that is visible on screen, which the
+file tools would have refused to read.
+
+Search runs on ripgrep when installed and a built-in walker otherwise, and no machine
+ever tested both. The engine can now be forced, and the build exercises both paths.
 
 Full detail in the [changelog](CHANGELOG.md).
 
@@ -177,9 +182,6 @@ model call. Repeated reads of the same content are now caught and refused, so a 
 costs less, but the shape is unchanged. This is partly model behaviour and partly prompt
 work, and it is measurable: `scripts/narration.mjs` reports it against a real session.
 
-**ripgrep's path is not covered by tests.** It is the primary search engine when
-installed, and the test machine does not have it, so only the fallback walker is
-exercised behaviourally.
 
 **MCP has been driven against one real published server.** Tools have been exercised end
 to end; resources and prompts have only been tested against servers written for the
