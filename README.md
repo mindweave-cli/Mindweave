@@ -30,7 +30,7 @@ reason about your code.
 How the project is run, what gets into the core and what does not: [PHILOSOPHY.md](PHILOSOPHY.md).
 It is short, and it is the honest version.
 
-> ## ⚠ Hold off on using Mindweave for now
+> ## ⚠ Hold off on using Mindweave for now!
 >
 > A deep audit of the agent as of lately 8/10 found real problems we want fixed
 > before anyone builds on this. We're telling you now rather than letting you
