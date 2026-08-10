@@ -30,6 +30,34 @@ reason about your code.
 How the project is run, what gets into the core and what does not: [PHILOSOPHY.md](PHILOSOPHY.md).
 It is short, and it is the honest version.
 
+> ## ⚠ Hold off on using Mindweave for now
+>
+> A deep audit of the agent (August 2026) found real problems we want fixed
+> before anyone builds on this. We're telling you now rather than letting you
+> find out mid-session:
+>
+> - **Token consumption is much higher than it should be.** Task-critical
+>   context is re-sent uncached on every model step, and a few prefix blocks
+>   (MINDWEAVE.md, the memory index) grow without a cap and can invalidate the
+>   prompt cache mid-session. Even a short session costs noticeably more than
+>   it needs to — on premium providers, several times more.
+> - **File writes were not atomic.** A crash at exactly the wrong moment could
+>   truncate a file being edited. The fix (temp file + fsync + rename) is
+>   written and being verified.
+> - **Too many tools are advertised at once.** 39 always-on tools measurably
+>   degrade the model's tool selection. We're moving rare tools behind the
+>   same deferred pool MCP tools already use, and merging overlapping ones.
+> - Smaller issues from the same audit: process cleanup on POSIX, a
+>   sub-agent result contract, and per-session cost instrumentation.
+>
+> None of this loses your data in normal use — the worst finding needs a
+> crash at exactly the wrong moment — but the token cost alone is reason to
+> wait. The fixes are in progress and will land as v1.10.x with the audit
+> notes in the changelog, as usual. If you want to try Mindweave anyway,
+> set spending limits (`MINDWEAVE_MAX_TASK_USD`) and know the above going in.
+>
+> — Niman
+
 ## Coming up: Release 1
 
 Mindweave has been built in the open through the 1.x line, and **that line is now
