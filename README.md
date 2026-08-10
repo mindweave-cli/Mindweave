@@ -51,7 +51,7 @@ It is short, and it is the honest version.
 >   sub-agent result contract, and per-session cost instrumentation.
 >
 > None of this loses your data in normal use the worst finding needs a
-> crash at exactly the wrong moment — but the token cost alone is reason to
+> crash at exactly the wrong moment but the token cost alone is reason to
 > wait. The fixes are in progress and will land as v1.10.x with the audit
 > notes in the changelog, as usual. If you want to try Mindweave anyway,
 > set spending limits (`MINDWEAVE_MAX_TASK_USD`) and know the above going in.
