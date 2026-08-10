@@ -32,7 +32,7 @@ It is short, and it is the honest version.
 
 > ## ⚠ Hold off on using Mindweave for now
 >
-> A deep audit of the agent (August 2026) found real problems we want fixed
+> A deep audit of the agent as of lately 8/10 found real problems we want fixed
 > before anyone builds on this. We're telling you now rather than letting you
 > find out mid-session:
 >
@@ -40,7 +40,7 @@ It is short, and it is the honest version.
 >   context is re-sent uncached on every model step, and a few prefix blocks
 >   (MINDWEAVE.md, the memory index) grow without a cap and can invalidate the
 >   prompt cache mid-session. Even a short session costs noticeably more than
->   it needs to — on premium providers, several times more.
+>   it needs to on premium providers, several times more.
 > - **File writes were not atomic.** A crash at exactly the wrong moment could
 >   truncate a file being edited. The fix (temp file + fsync + rename) is
 >   written and being verified.
