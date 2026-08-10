@@ -187,6 +187,10 @@ export function microcompact(
   // Old assistant recaps are condensed beyond the recent window — this is what stops a
   // finished task from resurfacing. Recent replies (last keepLastN entries) are kept.
   const recapBoundary = Math.max(0, entries.length - keepLastN);
+  // Images additionally respect the live tool round, exactly as tool-result bodies do:
+  // whatever the model has not acted on yet is full fidelity or it is working blind,
+  // and that rule cannot hold for text and not for pictures.
+  const imageBoundary = lastRoundStart >= 0 ? Math.min(recapBoundary, lastRoundStart) : recapBoundary;
 
   let cleared = 0;
   let recapsCleared = 0;
@@ -229,11 +233,18 @@ export function microcompact(
     // 4) Old image attachments → dropped, leaving a line that names the file.
     //    An image is the most expensive thing a turn can carry (thousands of tokens
     //    for a screenshot, re-sent on EVERY subsequent request) and also the most
-    //    perfectly reconstructible: the file is still on disk. So it evicts on the
-    //    same window as a tool-result body, and the note it leaves is the path,
-    //    which is exactly the restoration key the rule above asks for. The user's
-    //    own words are untouched — only the payload goes.
-    if (i < recapBoundary && e.role === "user" && e.images && e.images.length > 0) {
+    //    perfectly reconstructible: the file is still on disk. The note it leaves is
+    //    the path, which is exactly the restoration key the rule above asks for. The
+    //    user's own words are untouched — only the payload goes.
+    //
+    //    The window is `imageBoundary`, which is the recap window ALSO held back to
+    //    the last tool round. That last clause is the point: this used to key off the
+    //    raw entry index alone, while tool-result bodies key off a window that is
+    //    additionally capped at `lastRoundStart`, so an image attached during the
+    //    live round could be evicted while every tool result around it was kept —
+    //    dropping the picture the model was in the middle of looking at. The comment
+    //    here claimed the two windows already matched. They did not.
+    if (i < imageBoundary && e.role === "user" && e.images && e.images.length > 0) {
       imagesCleared += e.images.length;
       const names = e.images.map((img) => basename(img.path)).join(", ");
       const { images: _dropped, ...rest } = e;
@@ -344,10 +355,36 @@ export function stripAnalysis(summary: string): string {
  */
 const MIN_SUMMARY_CHARS = 40;
 
+/** Numbered sections the reply must show before it is believed to be a summary. */
+const MIN_SUMMARY_SECTIONS = 2;
+
+/**
+ * How many DISTINCT numbered markers the text carries (pure).
+ *
+ * Deliberately loose: markers are counted anywhere rather than only at the start of
+ * a line, so a summary that arrives on one line still passes. The job is telling a
+ * structured answer apart from a sentence of prose, not grading the structure.
+ */
+function numberedSections(text: string): number {
+  const seen = new Set<string>();
+  for (const m of text.matchAll(/(?:^|\s)(\d)[.)]\s/g)) seen.add(m[1]!);
+  return seen.size;
+}
+
 export function usableSummary(content: string, stop?: string): string | null {
-  if (stop === "truncated") return null;
+  // Accept only a CLEAN finish. This was a list of bad stop reasons containing
+  // exactly one of them, `truncated`, while the type carries four: a refusal, an
+  // overflow, and an overloaded provider all returned text that passed every check
+  // below and replaced the conversation. Naming the good case instead means a stop
+  // reason added by a future driver fails safe rather than passing by omission —
+  // absent still means `end`, which is what a provider means by saying nothing.
+  if (stop !== undefined && stop !== "end") return null;
   const cleaned = stripAnalysis(content);
   if (cleaned.length < MIN_SUMMARY_CHARS) return null;
+  // A refusal is fluent, well over the length floor, and structurally nothing like
+  // the nine numbered sections that were asked for. Length alone could not tell them
+  // apart, and the reply is trusted to REPLACE the session.
+  if (numberedSections(cleaned) < MIN_SUMMARY_SECTIONS) return null;
   return cleaned;
 }
 

@@ -37,6 +37,28 @@ function oneLine(value: string): string {
   return value.replace(/[\r\n]+/g, " ").trim();
 }
 
+/**
+ * Build a frontmatter header, flattening EVERY value on the way in.
+ *
+ * `oneLine` used to be applied field by field at each call site, and one field was
+ * missed: `globs` went in raw as `globs: ${globs.join(", ")}`. That is the field
+ * deciding when a rule fires, and a newline inside it writes whatever the model
+ * likes into the header — a second key, or a `---` that closes it early and turns
+ * the rest of the rule into body.
+ *
+ * Written as one place that flattens everything, so the next field added cannot
+ * repeat the mistake. Empty values are dropped rather than emitted blank.
+ */
+function frontmatter(fields: Record<string, string | undefined>): string {
+  const lines: string[] = ["---"];
+  for (const [key, raw] of Object.entries(fields)) {
+    const value = oneLine(raw ?? "");
+    if (value) lines.push(`${key}: ${value}`);
+  }
+  lines.push("---", "");
+  return lines.join("\n");
+}
+
 /** A short name derived from a rule's text (first few words) when none is given. */
 export function deriveRuleName(body: string): string {
   return slugify(body.split(/\s+/).slice(0, 6).join(" "));
@@ -58,11 +80,11 @@ export async function writeRule(
   const dir = join(projectDir(cwd), "rules");
   await fs.mkdir(dir, { recursive: true });
   const file = join(dir, `${slugify(name)}.md`);
-  const header =
-    `---\nname: ${oneLine(name)}\n` +
-    (description ? `description: ${oneLine(description)}\n` : "") +
-    (globs.length > 0 ? `globs: ${globs.join(", ")}\n` : "") +
-    `---\n`;
+  const header = frontmatter({
+    name,
+    description,
+    globs: globs.join(", "),
+  });
   await fs.writeFile(file, `${header}${body}\n`, "utf8");
   return { name: oneLine(name), description: oneLine(description), body, ...(globs.length > 0 ? { globs } : {}) };
 }
@@ -91,13 +113,13 @@ export async function writeSkill(cwd: string, skill: NewSkill): Promise<SkillMet
   const description = oneLine(skill.description);
   const whenToUse = oneLine(skill.whenToUse ?? "");
   const argumentHint = oneLine(skill.argumentHint ?? "");
-  const header =
-    `---\nname: ${name}\n` + // already the slug: no newline can survive slugify
-    (description ? `description: ${description}\n` : "") +
-    (whenToUse ? `when_to_use: ${whenToUse}\n` : "") +
-    (argumentHint ? `argument-hint: ${argumentHint}\n` : "") +
-    (skill.globs && skill.globs.length > 0 ? `globs: ${skill.globs.join(", ")}\n` : "") +
-    `---\n`;
+  const header = frontmatter({
+    name, // already the slug: no newline can survive slugify
+    description,
+    when_to_use: whenToUse,
+    "argument-hint": argumentHint,
+    globs: skill.globs?.join(", ") ?? "",
+  });
   await fs.writeFile(join(dir, "SKILL.md"), `${header}${skill.body}\n`, "utf8");
 
   return {

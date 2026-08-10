@@ -151,14 +151,29 @@ const SUBAGENT_PREAMBLE =
  */
 export function forkSession(parent: Session, task: string, opts: { readOnly?: boolean } = {}): Session {
   const p = parent.toolContext;
+  const id = randomUUID();
   const childContext: ToolContext = {
     ...p,
     reads: new Map(),
     todos: [],
+    // Its own id, not the parent's. The spread carries `sessionId`, so a child asking
+    // "which conversation am I?" answered with the parent's — harmless while nothing
+    // writes session-scoped state from a child, and wrong the moment something does.
+    sessionId: id,
     subagentDepth: (p.subagentDepth ?? 0) + 1,
     readOnlyTools: opts.readOnly === true ? true : p.readOnlyTools,
-    // Cleared so the child re-derives its own from the engine when it runs.
-    guardAllowAll: p.guardAllowAll,
+    // CLEARED, not inherited. This line used to copy the parent's value under a
+    // comment claiming it cleared it, and the engine's gate is
+    // `guarded && !guardAllowAll` — so an inherited `true` skipped the approval check
+    // outright. Combined with the missing approval channel below, a sub-agent the user
+    // never saw start could edit files with no prompt at all, while SECURITY.md
+    // promised Sentinel "covers every tool including sub-agent edits".
+    //
+    // "Allow all" is a judgement the user made about work they could see. It does not
+    // transfer to an agent they did not know would run. A guarded child has no channel
+    // to ask through, so its mutating tools are refused and it reports back instead —
+    // which is the failing direction to pick.
+    guardAllowAll: false,
     // A child CANNOT reach the user. The spread above inherited the parent's approval
     // channel, so `ask_user` (which is read-only, and therefore offered even to a
     // read-only child) put a question on screen from an agent the user never saw start
@@ -173,7 +188,7 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
   };
   return {
     ...parent,
-    id: randomUUID(),
+    id,
     createdAt: Date.now(),
     transcript: [{ role: "user", content: SUBAGENT_PREAMBLE + task }],
     toolContext: childContext,

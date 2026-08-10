@@ -59,16 +59,44 @@ export function parseForbiddenMcpTools(text: string): string[] {
   return parseForbiddenCommands(text);
 }
 
+/**
+ * Compile one command pattern into a word-boundary matcher (pure).
+ *
+ * A bare substring test is what this used to do, and it over-blocks badly on short
+ * patterns: forbidding `rm` also refused `npm run warm` and `npm run format`, which
+ * reads as the agent being broken rather than as a rule firing.
+ *
+ * Two details make the boundary version actually work:
+ *
+ *  - The pattern is user text and can hold regex metacharacters (`c++`, `a|b`), so it
+ *    is escaped before it becomes a pattern.
+ *  - `\b` is defined between a word character and a non-word one, so a pattern that
+ *    starts or ends with something else (`-rf`, `./deploy`, `--force`) would never
+ *    match with `\b` glued on. The boundary is therefore applied only at an edge that
+ *    is itself a word character; other edges match anywhere, which is correct because
+ *    the neighbouring character is already punctuation.
+ */
+export function commandPatternRegExp(pattern: string): RegExp | null {
+  const pat = pattern.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!pat) return null;
+  const escaped = pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const left = /^\w/.test(pat) ? "\\b" : "";
+  const right = /\w$/.test(pat) ? "\\b" : "";
+  return new RegExp(`${left}${escaped}${right}`);
+}
+
 export function forbiddenCommandPatternReason(
   cfg: ForbiddenConfig | undefined,
   command: string,
 ): string | null {
   const commands = cfg?.commands;
   if (!commands || commands.length === 0) return null;
+  // Whitespace is collapsed on BOTH sides, so `tauri dev` still blocks
+  // `npm run tauri  dev` — the run of spaces in the command becomes one.
   const norm = command.toLowerCase().replace(/\s+/g, " ");
   for (const raw of commands) {
-    const pat = raw.toLowerCase().replace(/\s+/g, " ").trim();
-    if (pat && norm.includes(pat)) return raw;
+    const re = commandPatternRegExp(raw);
+    if (re && re.test(norm)) return raw;
   }
   return null;
 }
