@@ -7,6 +7,66 @@ Mindweave lands on npm and the numbering resets.
 
 ---
 
+## v1.9.9 (2026-08-09): the last three audits
+
+Compaction, session resume, and the governor were the only parts of the core never
+read end to end. They were left for last because none of them fails loudly: a bad
+summary replaces a session's history with something wrong and the model carries on as
+if it were true.
+
+Six defects, none of which could throw, all of which type-checked and passed the suite.
+Two were sitting under comments describing the safeguard that was missing, which is why
+reading the files had not been enough.
+
+### A refused summary could replace the conversation
+
+Before the older transcript is thrown away and a summary kept instead, the reply is
+checked for the ways it can be unusable. It checked one of them. A refusal, a context
+overflow, and an overloaded provider all returned text that passed every other check
+and became the session's record of itself.
+
+Only a cleanly finished reply is accepted now, so a new failure mode arriving with a
+future provider is rejected rather than admitted by omission. A reply is also checked
+for the numbered structure it was asked to produce, because a refusal is fluent, long,
+and shaped nothing like a summary — length alone could not tell them apart.
+
+### An image could be dropped while the model was still looking at it
+
+Old tool output is cleared on a window that deliberately spares whatever the model has
+not acted on yet. Attached images were cleared on a different window that did not,
+despite the code saying the two matched, so a screenshot could be evicted while every
+result around it was kept.
+
+### A sub-agent inherited "allow all"
+
+In the mode that asks before each action, answering "allow all" applies to the work in
+front of you. A sub-agent started afterwards inherited that answer, and since a
+sub-agent has no way to reach you, nothing would have asked. It now starts vigilant:
+its changes are refused and it reports back instead.
+
+### A rule's file patterns could rewrite the rule
+
+Rules and skills are stored with a small header, and every value written into it is
+flattened to one line first, because a line break starts what the loader reads as a new
+setting. Every value except the file patterns — the field that decides when a rule
+applies. Flattening now happens where the header is built, so a field added later
+cannot miss it.
+
+### Forbidding a command could block unrelated ones
+
+Forbidden commands matched anywhere in the text, so forbidding `rm` also refused
+`npm run warm` and `npm run format`. They match whole words now, and still match
+patterns that begin or end in punctuation such as `--force` or `./deploy`.
+
+### Also
+
+The security policy now states three things it did not: that forbidden paths are
+relative to the project root and do not extend into folders added with `/include`
+(built-in secret protection still covers every root), that "allow all" is not inherited
+by a sub-agent, and how forbidden commands match.
+
+---
+
 ## v1.9.8 (2026-08-09): DeepSeek can search the web
 
 Web search is a capability of the model's own provider rather than a service

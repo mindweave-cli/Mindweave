@@ -32,19 +32,27 @@ It is short, and it is the honest version.
 
 ## Coming up: Release 1
 
-Mindweave has been built in the open through the 1.x line and is close to the real thing.
+Mindweave has been built in the open through the 1.x line, and **that line is now
+finished**. v1.9.9 closed the last of it: every part of the core has been read end to
+end, and the audit queue is empty.
 
-The next milestone is the **official release: Mindweave 1**. That is when it lands on npm,
-installable in one command, with the numbering reset to match. Release 1 is the first
-version meant for people who were not watching it get built.
+**The next release is the official one: Mindweave 1.** It lands on npm, installable in
+one command, with the numbering reset to match. It is the first version meant for people
+who were not watching it get built, and it carries the most in a single release so far.
 
-**The new UI is fully designed and lands before then.** It was drawn from scratch rather
-than borrowed, because a terminal is not a small browser and pretending otherwise is why
-so many CLI tools feel busy. It is quieter than what ships today and it gets out of the
-way while the agent works.
+The headline is the interface. **The new UI is fully designed and ships with it** —
+drawn from scratch rather than borrowed, because a terminal is not a small browser and
+pretending otherwise is why so many CLI tools feel busy. It is quieter than what ships
+today and it gets out of the way while the agent works. For a tool that lives in a
+terminal, the interface is the product, which is why it is the thing gating the release
+rather than another feature.
 
-Between here and there, the work is whatever real use turns up, plus the capabilities the
-agent is still missing. See the [changelog](CHANGELOG.md).
+What the 1.x line built up to it: web search on both providers, seeing your app through
+a window capture, a plan you approve to start, sixty-odd defects found by auditing every
+tool, every shell path, and every store, and a security pass over everything that
+reaches outside your machine.
+
+See the [changelog](CHANGELOG.md) for the whole road here.
 
 ## Install
 
@@ -141,23 +149,20 @@ without bloating the shared core. Only the driver you are using is ever loaded.
 
 ## Recently
 
-**v1.9.8** gave DeepSeek web search. Search is a capability of your model's own
-provider rather than something Mindweave buys, so it worked on Claude models and
-reported itself unavailable on DeepSeek, which is the default. DeepSeek does have
-native search; it is served over a different protocol than the one used for chat.
+**v1.9.9 closes the 1.x line.** Compaction, session resume, and the governor were the
+last parts of the core never read end to end, and they were left for last because none
+of them fails loudly. Six defects came out of it, every one of which type-checked,
+passed the suite, and could never throw.
 
-It now searches, on DeepSeek's own servers, with the key you already have. No second
-key, no account, nothing to choose. Chat stays where it was and only the search call
-changes protocol, so the prompt cache and MCP support are untouched. Searching does
-cost more than an ordinary turn, because DeepSeek makes further requests to summarise
-what it finds.
+The worst: before the older conversation is thrown away and a summary kept instead, the
+reply is checked for the ways it can be unusable, and it checked one of the four. A
+refusal became the session's record of itself. Alongside that, an attached image could
+be dropped while the model was still looking at it, a sub-agent inherited an "allow all"
+answer you gave about different work, a rule's file patterns could rewrite the rule that
+contained them, and forbidding `rm` also refused `npm run warm`.
 
-That is the pattern for every provider added from here: each declares whether it has
-native search, and its driver routes that one call over whichever protocol carries it.
-
-Also fixed: a search result arriving without a title or an address reached the model as
-"undefined — undefined", and `--version` and `--help` were ignored — the interactive
-session started instead, and without a terminal attached it hung rather than exiting.
+Two of the six were sitting under comments describing the safeguard that was missing,
+which is why reading the files had not been enough to find them.
 
 Full detail in the [changelog](CHANGELOG.md).
 
