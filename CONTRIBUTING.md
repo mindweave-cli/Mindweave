@@ -38,7 +38,7 @@ If you have hands-on experience optimizing for a specific backend, open an issue
 
 | Provider | Driver Lead | Status |
 | --- | --- | --- |
-| DeepSeek | [@nimanni](https://github.com/Nimannns) (maintainer) | Taken |
+| DeepSeek | [Niman](https://github.com/nimanni) (maintainer) | Taken |
 | Anthropic (Claude) | Unclaimed | Shipped in v1.1, open to a lead |
 | OpenAI | Unclaimed | Wanted |
 | Qwen | Unclaimed | Wanted |
