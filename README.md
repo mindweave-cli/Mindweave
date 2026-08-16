@@ -30,31 +30,38 @@ reason about your code.
 How the project is run, what gets into the core and what does not: [PHILOSOPHY.md](PHILOSOPHY.md).
 It is short, and it is the honest version.
 
-> ## ⚠ Hold off on using Mindweave for now!
+> ## ⚠ Still worth waiting a little longer
 >
-> A deep audit of the agent as of lately 8/10 found real problems we want fixed
-> before anyone builds on this. We're telling you now rather than letting you
-> find out mid-session:
+> The audit findings we warned about here are **fixed**. They are not released
+> yet, so the version on npm is still the one the warning described. If you are
+> installing today, that is the thing to know.
 >
-> - **Token consumption is much higher than it should be.** Task-critical
->   context is re-sent uncached on every model step, and a few prefix blocks
->   (MINDWEAVE.md, the memory index) grow without a cap and can invalidate the
->   prompt cache mid-session. Even a short session costs noticeably more than
->   it needs to on premium providers, several times more.
-> - **File writes were not atomic.** A crash at exactly the wrong moment could
->   truncate a file being edited. The fix (temp file + fsync + rename) is
->   written and being verified.
-> - **Too many tools are advertised at once.** 39 always-on tools measurably
->   degrade the model's tool selection. We're moving rare tools behind the
->   same deferred pool MCP tools already use, and merging overlapping ones.
-> - Smaller issues from the same audit: process cleanup on POSIX, a
->   sub-agent result contract, and per-session cost instrumentation.
+> What the audit found, and where each one stands:
 >
-> None of this loses your data in normal use the worst finding needs a
-> crash at exactly the wrong moment but the token cost alone is reason to
-> wait. The fixes are in progress and will land as v1.10.x with the audit
-> notes in the changelog, as usual. If you want to try Mindweave anyway,
-> set spending limits (`MINDWEAVE_MAX_TASK_USD`) and know the above going in.
+> - **Token consumption was much higher than it should be.** Fixed. Task-critical
+>   context no longer rides in the cached prefix, and the blocks that grew without
+>   a cap (MINDWEAVE.md, the memory index) are capped and refreshed lazily instead
+>   of rewriting the prompt every turn. Measured on the same request: 12,521 to
+>   8,166 tokens.
+> - **File writes were not atomic.** Fixed: temp file, fsync, rename. Verified the
+>   hard way, by running a reader against the old code until it caught a file at
+>   0 bytes and again mid-truncation, then confirming the new path cannot.
+> - **Too many tools were advertised at once.** Fixed. Overlapping tools were
+>   merged and rare ones moved behind the same deferred pool MCP tools use: 29
+>   registered, around 20 offered at a time, the rest one search away.
+> - **Process cleanup on POSIX** and the **sub-agent result contract**: both fixed.
+> - **Per-session cost instrumentation**: not built, and no longer planned in this
+>   form. It was listed here as a fix, which was a promise we should not have made
+>   before deciding we wanted the feature.
+>
+> Still in progress, and the reason this box is still here: the terminal interface
+> has been rebuilt and needs real use before we call it done. Providers also grew
+> from two to six in the meantime.
+>
+> None of this ever lost data in normal use; the worst finding needed a crash at
+> exactly the wrong moment. The fixes land together, with the audit notes in the
+> changelog as usual. If you want to try Mindweave before then, set a spending
+> limit (`MINDWEAVE_MAX_TASK_USD`) and know the above going in.
 >
 > Niman
 
