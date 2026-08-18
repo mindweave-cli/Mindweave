@@ -2,8 +2,12 @@
  * todo.ts — the session task list.
  *
  * On a multi-step job a model drifts: it forgets a step, repeats one, or declares
- * done while something's unfinished. A visible, model-maintained checklist fixes
- * that — and it lets the user watch progress. The model rewrites the WHOLE list
+ * done while something's unfinished. A model-maintained checklist fixes that. It is
+ * NOT shown to the user (see the quiet flag on the result): the tool rows that carry
+ * meaning are the ones showing work happening, and a "list rewritten" row between
+ * them, repeated every time a single item changed state, was noise around the signal.
+ * The list still does its whole job unseen, because its reader is the model. The model
+ * rewrites the WHOLE list
  * each call (simplest correct model: no partial-update bugs); we store it on the
  * ToolContext and the engine injects it into the system prompt every turn, so the
  * plan is always in front of the model. Because it lives outside the transcript,
@@ -83,7 +87,14 @@ export const todoWrite: Tool = {
       : render(parsed);
     const output = [body, ...notes, "", "Keep the list updated as you work."].join("\n");
 
-    return { output, summary: summarize(parsed, allDone) };
+    // QUIET: the list never renders a row. It is the model's own scratch memory for
+    // staying on track across a long job, and the engine puts it back in front of the
+    // model every turn — so it works exactly as well unseen. On screen it was noise:
+    // a row that says a checklist was rewritten, printed again every time one item
+    // moved, in between the rows that show actual work.
+    //
+    // The model still gets the full output, including the one-at-a-time nudge.
+    return { output, summary: summarize(parsed, allDone), quiet: true };
   },
 };
 

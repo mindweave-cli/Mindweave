@@ -23,7 +23,7 @@ import {
 import type { Driver, DriverManifest, ModelChoice, ThinkLevel } from "./types.js";
 import { priceFor } from "../dynamo/pricing.js";
 import { sharpContextWindow } from "../dynamo/contextWindow.js";
-import { MODELS, thinkLevels, withModel } from "../dynamo/model.js";
+import { models, thinkLevels, withModel } from "../dynamo/model.js";
 
 /** Metadata every manifest must supply, without loading any wire code. */
 const MANIFEST_KEYS: (keyof DriverManifest)[] = [
@@ -99,7 +99,7 @@ test("core reads its numbers from the provider, not a private table", () => {
 
 test("the /model picker lists exactly what the providers declare", () => {
   assert.deepEqual(
-    MODELS.map((m) => m.id),
+    models().map((m) => m.id),
     allModels().map((m) => m.id),
   );
 });

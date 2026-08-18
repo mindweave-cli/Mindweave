@@ -1,5 +1,5 @@
 /**
- * editCore.ts — the pure matching/splice logic shared by edit_file and multi_edit.
+ * editCore.ts — the pure matching/splice logic shared by the edit tool.
  *
  * One source of truth for HOW a find-and-replace is applied, kept pure (string in,
  * string out — no fs, no EOL handling) so it's unit-tested once and both tools inherit

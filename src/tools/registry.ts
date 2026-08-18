@@ -5,44 +5,37 @@
  * to TOOLS. The engine reads from this registry and nowhere else, so it never
  * needs to change when tools come and go.
  */
-import type { Tool, ToolSchema } from "./types.js";
+import type { Tool, ToolContext, ToolSchema } from "./types.js";
 import { readFile } from "./readFile.js";
 import { writeFile } from "./writeFile.js";
-import { editFile } from "./editFile.js";
-import { multiEdit } from "./multiEdit.js";
+import { edit } from "./edit.js";
 import { runCommand } from "./runCommand.js";
-import { globTool } from "./glob.js";
-import { grepTool } from "./grep.js";
-import { listDir } from "./listDir.js";
+import { search } from "./search.js";
 import { outlineTool, definitionTool, referencesTool, relevantTool } from "./codeIntel.js";
 import { readSymbolTool } from "./readSymbol.js";
 import { replaceSymbolBody } from "./replaceSymbol.js";
 import { diagnosticsTool } from "./diagnostics.js";
-import { webFetch } from "./webFetch.js";
-import { webSearch } from "./webSearch.js";
+import { web } from "./web.js";
 import { screenshot } from "./screenshot.js";
 import { exitPlan } from "./exitPlan.js";
 import { todoWrite } from "./todo.js";
 import { useSkill } from "./useSkill.js";
-import { rememberRule, forbidPath, forbidCommand, forbidMcpTool, createSkill } from "./governorTools.js";
+import { governor, createSkill } from "./governorTools.js";
 import { saveMemoryTool } from "./saveMemory.js";
 import { askUserTool } from "./askUser.js";
-import { addDirectory, linkWorkspace } from "./workspace.js";
-import { shellOutput, killShell, listShells } from "./shellTools.js";
+import { workspaceTool } from "./workspace.js";
+import { shellsTool, killShell } from "./shellTools.js";
 import { spawnSubagent } from "./subagent.js";
-import { listSessionsTool, readSessionTool } from "./sessionTools.js";
-import { findMcpTools } from "./mcpSearch.js";
-import { listMcpResources, readMcpResource } from "./mcpResources.js";
+import { sessionsTool } from "./sessionTools.js";
+import { findTools } from "./mcpSearch.js";
+import { mcpResourceTool } from "./mcpResources.js";
 import { addMcpServer } from "./mcpAdd.js";
 
 export const TOOLS: Tool[] = [
   // Discovery (read-only)
-  listDir,
-  globTool,
-  grepTool,
+  search,
   readFile,
-  webSearch,
-  webFetch,
+  web,
   // Code intelligence (read-only, chassis-backed)
   outlineTool,
   definitionTool,
@@ -51,16 +44,13 @@ export const TOOLS: Tool[] = [
   readSymbolTool,
   diagnosticsTool,
   // Background shells (read-only: inspect long-running commands)
-  shellOutput,
-  listShells,
+  shellsTool,
   // External integrations (read-only: finds MCP tools, and reads the DATA servers expose
   // as opposed to the actions they perform)
-  findMcpTools,
-  listMcpResources,
-  readMcpResource,
+  findTools,
+  mcpResourceTool,
   // Own history (read-only: what this agent did in this project before)
-  listSessionsTool,
-  readSessionTool,
+  sessionsTool,
   // Skills (read-only: loads a procedure into context on demand)
   useSkill,
   // Clarification (read-only: asks the user a focused question, changes nothing)
@@ -71,22 +61,17 @@ export const TOOLS: Tool[] = [
   exitPlan,
   // Action (mutating)
   writeFile,
-  editFile,
-  multiEdit,
+  edit,
   replaceSymbolBody,
   spawnSubagent,
   runCommand,
   todoWrite,
-  addDirectory,
-  linkWorkspace,
+  workspaceTool,
   killShell,
   // Cross-session memory (mutating: persists what the model is asked to remember)
   saveMemoryTool,
   // Governor (mutating: persist a rule / forbidden path / skill for the project)
-  rememberRule,
-  forbidPath,
-  forbidCommand,
-  forbidMcpTool,
+  governor,
   addMcpServer,
   createSkill,
 ];
@@ -107,14 +92,24 @@ export function findTool(name: string): Tool | undefined {
  * so a stray mutating call is still refused — this just keeps the model from
  * reaching for one.
  */
-export function toolSchemas(opts: { planMode?: boolean; readOnlyOnly?: boolean } = {}): ToolSchema[] {
+export function toolSchemas(
+  opts: { planMode?: boolean; readOnlyOnly?: boolean; activated?: ReadonlySet<string>; ctx?: ToolContext } = {},
+): ToolSchema[] {
   const readOnly = opts.planMode || opts.readOnlyOnly;
   // `planOnly` runs the filter the other way: those tools exist BECAUSE planning is
   // happening, so they appear only in plan mode and are hidden the rest of the time.
   // A read-only sub-agent is not planning, so it does not get them either.
-  const tools = (readOnly ? TOOLS.filter((tool) => tool.readOnly) : TOOLS).filter((tool) =>
-    tool.planOnly ? opts.planMode === true : true,
-  );
+  //
+  // `deferred` is the third filter: occasional tools are held back until the model
+  // searches for one, then stay advertised for the rest of the session. See
+  // deferredNative.ts for what is held back and why.
+  const tools = (readOnly ? TOOLS.filter((tool) => tool.readOnly) : TOOLS)
+    .filter((tool) => (tool.planOnly ? opts.planMode === true : true))
+    .filter((tool) => !tool.deferred || opts.activated?.has(tool.name))
+    // `relevantWhen` needs the live session; with no ctx (a schema-shape test, a
+    // count) the tool is shown, because hiding it would be a false negative about
+    // what the registry contains.
+    .filter((tool) => !tool.relevantWhen || !opts.ctx || tool.relevantWhen(opts.ctx));
   return tools.map((tool) => ({
     type: "function",
     function: {
@@ -124,3 +119,4 @@ export function toolSchemas(opts: { planMode?: boolean; readOnlyOnly?: boolean }
     },
   }));
 }
+

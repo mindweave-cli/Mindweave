@@ -22,6 +22,7 @@ import { requestAgentDataAccess, requestForbiddenLift } from "./approval.js";
 import { recordWrite, relativize, resolvePath } from "./paths.js";
 import { writeDetail, withScope } from "./detail.js";
 import { applyEol, dirEol, fileEol } from "./eol.js";
+import { writeFileAtomic } from "./atomicWrite.js";
 
 export const writeFile: Tool = {
   name: "write_file",
@@ -41,10 +42,10 @@ export const writeFile: Tool = {
     "Line endings are handled for you: an existing file keeps its own, and a new file " +
     "matches the files around it. Always write plain LF and do not try to match a " +
     "project's style by hand. " +
-    "Prefer a targeted change to rewriting: use edit_file to change one place in a file, " +
-    "multi_edit for several places in the same file, and this only when the file is new " +
-    "or genuinely being replaced end to end. Rewriting a file to change part of it risks " +
-    "dropping code you didn't mean to touch.",
+    "Prefer a targeted change to rewriting: use edit to change an existing file, whether " +
+    "that's one place or several, and use this only when the file is new or genuinely " +
+    "being replaced end to end. Rewriting a file to change part of it risks dropping code " +
+    "you didn't mean to touch.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -104,10 +105,13 @@ export const writeFile: Tool = {
     }
 
     // Read-before-overwrite: refuse to blindly replace a file the model hasn't seen.
-    if (existed && !ctx.reads.has(filePath)) {
+    // A search that matched inside it is not seeing it — grep returns matching lines,
+    // never the file — so a search-sourced ledger entry does not open this gate.
+    const priorRead = ctx.reads.get(filePath);
+    if (existed && (!priorRead || priorRead.viaSearch)) {
       return fail(
         `${rawPath} already exists and hasn't been read this session. Read it ` +
-          `first if you really mean to replace it, or use edit_file to change part of it.`,
+          `first if you really mean to replace it, or use edit to change part of it.`,
       );
     }
 
@@ -137,7 +141,7 @@ export const writeFile: Tool = {
 
     try {
       await fs.mkdir(dirname(filePath), { recursive: true });
-      await fs.writeFile(filePath, outgoing, "utf8");
+      await writeFileAtomic(filePath, outgoing);
     } catch (error) {
       return fail(`could not write ${rawPath}: ${errText(error)}`);
     }
@@ -158,6 +162,7 @@ export const writeFile: Tool = {
         : `Created ${shown} (${lines} line${plural}).`,
       summary: existed ? `rewrote all of ${shown} · ${lines} line${plural}` : `created ${shown} · ${lines} line${plural}`,
       detail: withScope(scope, writeDetail(content)),
+      detailKind: "diff" as const,
     };
   },
 };

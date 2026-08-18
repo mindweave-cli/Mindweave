@@ -20,14 +20,16 @@
  * hosts so the tool can't be pointed at internal services.
  */
 import TurndownService from "turndown";
-import type { Tool, ToolResult } from "./types.js";
+import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { activeDriver } from "../drivers/registry.js";
 import { frameExternal } from "./untrusted.js";
+import { outputDetail } from "./detail.js";
+import { estimateTokens } from "../memory/compaction.js";
 
 const FETCH_TIMEOUT_MS = 20_000;
 const DOWNLOAD_CAP_BYTES = 3_000_000; // stop reading a response past ~3MB
 const CONTENT_CAP_CHARS = 12_000; // how much cleaned content we return / distill from
-const DISTILL_OVER_CHARS = 12_000; // above this, summarize via a model call (if a prompt is given)
+export const DISTILL_OVER_CHARS = 12_000; // above this, summarize via a model call (if a prompt is given)
 /** Redirect hops followed before giving up. Enough for shorteners and canonical
  *  redirects, short enough that a redirect loop cannot spin. */
 const MAX_REDIRECTS = 5;
@@ -35,7 +37,7 @@ const MAX_REDIRECTS = 5;
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
 turndown.remove(["script", "style", "noscript", "iframe"]);
 
-export const webFetch: Tool = {
+const webFetchTool: Tool = {
   name: "web_fetch",
   readOnly: true,
   // This description was already accurate, so only two things were added, both of
@@ -65,7 +67,7 @@ export const webFetch: Tool = {
     },
   },
 
-  async execute(args): Promise<ToolResult> {
+  async execute(args, ctx): Promise<ToolResult> {
     const rawUrl = typeof args.url === "string" ? args.url.trim() : "";
     const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
     if (!rawUrl) return fail("`url` is required.");
@@ -87,6 +89,7 @@ export const webFetch: Tool = {
           `This is binary/non-text content, which web_fetch can't read. ` +
           `If you need it, download it with run_command.`,
         summary: `fetched ${hostOf(url)} (non-text)`,
+        detail: fetchDetail(finalUrl, status, [`Content-Type: ${contentType || "unknown"} — not text, not read`]),
       };
     }
 
@@ -96,7 +99,7 @@ export const webFetch: Tool = {
     // Large page + a prompt → distill to the answer. Otherwise return content,
     // capped. Distillation is best-effort; failure falls back to truncation.
     if (content.length > DISTILL_OVER_CHARS && prompt) {
-      const distilled = await distill(content.slice(0, CONTENT_CAP_CHARS * 3), prompt);
+      const distilled = await distill(content.slice(0, CONTENT_CAP_CHARS * 3), prompt, ctx);
       if (distilled) {
         // Framed too. Distillation is a summary OF untrusted text, so an instruction
         // planted in the page can survive into it — passing it through unmarked would
@@ -107,6 +110,10 @@ export const webFetch: Tool = {
             `(focused on: ${prompt})${redirected}\n\n${distilled}`,
           ),
           summary: `fetched ${hostOf(url)} (summarized)`,
+          detail: fetchDetail(finalUrl, status, [
+            `Condensed against: "${prompt}"`,
+            ...(redirected ? [`Redirected from ${hostOf(url)}`] : []),
+          ]),
         };
       }
     }
@@ -127,9 +134,48 @@ export const webFetch: Tool = {
         `${redirected}${redirected ? "\n\n" : ""}${out}${footer}`,
       ),
       summary: `fetched ${hostOf(url)} (${out.length} chars${truncated ? ", truncated" : ""})`,
+      detail: fetchDetail(finalUrl, status, [
+        `Extracted ${estimateTokens(out).toLocaleString("en-US")} tokens${truncated ? ", truncated" : ""}`,
+        ...(pageTitle(body) ? [`Title: ${pageTitle(body)}`] : []),
+        ...(redirected ? [`Redirected from ${hostOf(url)}`] : []),
+      ], byteSize(body)),
     };
   },
 };
+
+/** The UI-only detail block under a Fetch row — never sent to the model
+ *  (`frameExternal`'s `output` is what the model sees). `bytes` is what came off the
+ *  wire, which is the number that says whether the page was worth the round trip. */
+export function fetchDetail(finalUrl: string, status: number, extra: string[], bytes?: number): string {
+  const lead = bytes === undefined ? `Received ${finalUrl}` : `Received ${formatBytes(bytes)} from ${finalUrl}`;
+  return outputDetail([`${lead} (HTTP ${status})`, ...extra].join("\n"));
+}
+
+/** Bytes as a person reads them: `412 B`, `24.8 KB`, `1.3 MB`. */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The transferred size — byte length, not character count, since a page of non-ASCII
+ *  text is meaningfully larger on the wire than its `.length` suggests. */
+function byteSize(body: string): number {
+  return Buffer.byteLength(body, "utf8");
+}
+
+/**
+ * A page's `<title>`, when it has one worth showing.
+ *
+ * What the page calls itself is the fastest way to tell "I fetched the right doc" from
+ * "I fetched a login wall", and it is the one fact a URL alone cannot give.
+ */
+export function pageTitle(body: string): string {
+  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(body);
+  if (!m) return "";
+  const text = m[1]!.replace(/\s+/g, " ").trim();
+  return text.length > 80 ? text.slice(0, 79) + "…" : text;
+}
 
 // ── fetch ─────────────────────────────────────────────────────────────────────
 
@@ -253,16 +299,20 @@ function htmlToMarkdown(html: string): string {
 }
 
 /** One cheap model call to answer `prompt` from the page. null on any failure. */
-async function distill(content: string, prompt: string): Promise<string | null> {
+async function distill(content: string, prompt: string, ctx?: ToolContext): Promise<string | null> {
   try {
-    const { content: answer } = await activeDriver().toolTurn({
+    const turn = await activeDriver().toolTurn({
       system:
         "You extract information from a web page to answer the user's request. " +
         "Answer only from the content provided; be concise and include relevant " +
         "code or quotes. If the answer isn't present, say so.",
       messages: [{ role: "user", content: `Web page content:\n---\n${content}\n---\n\nRequest: ${prompt}` }],
     });
-    return answer.trim() || null;
+    // A distillation is a real model call on the user's key, made on the agent's
+    // initiative rather than the user's. Reporting it keeps the meter from being
+    // short by exactly the work nobody could see.
+    if (turn.usage) ctx?.reportUsage?.(turn.usage);
+    return turn.content.trim() || null;
   } catch {
     return null;
   }
@@ -410,3 +460,9 @@ function hostOf(u: string | URL): string {
 function fail(message: string): ToolResult {
   return { output: `Error: ${message}`, isError: true, summary: message };
 }
+
+/** The fetch half of the merged `web` tool. Logic unchanged. */
+export const fetchWeb = webFetchTool.execute;
+
+/** Kept for tests that assert on the fetch description/flags directly. */
+export const webFetch = webFetchTool;

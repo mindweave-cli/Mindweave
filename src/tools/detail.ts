@@ -50,7 +50,7 @@ export function editDetail(oldStr: string, newStr: string): string {
   return capLines(lines, 30);
 }
 
-/** A stacked +/- diff for a sequence of edits (multi_edit), one block per edit. */
+/** A stacked +/- diff for a sequence of edits (the edit tool), one block per edit. */
 export function multiEditDetail(edits: { oldString: string; newString: string }[]): string {
   const lines: string[] = [];
   for (const e of edits) {
@@ -66,10 +66,85 @@ export function writeDetail(content: string): string {
   return capLines(stripTrailingNewline(content).split("\n").map((l) => `+ ${l}`), 20);
 }
 
+const ESC = String.fromCharCode(27);
+// SGR colour codes, plus the cursor/erase sequences a progress-printing command emits.
+const ANSI_RE = new RegExp(`${ESC}\\[[0-9;?]*[a-zA-Z]|${ESC}\\][^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)`, "g");
+
+/**
+ * Strip ANSI escapes from captured text.
+ *
+ * A command's output is captured from a pipe, and plenty of programs colour their
+ * output anyway. Those bytes are meaningless in a display block that applies its own
+ * colour, and they corrupt width measurement — an escape sequence counts as visible
+ * characters when wrapping, so a coloured line wraps early and the block goes ragged.
+ */
+export function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, "");
+}
+
+/**
+ * Blank-line noise from a command's own formatting, collapsed.
+ *
+ * PowerShell's table output leads with a blank line, separates directory groups with
+ * two, and trails one. Reproduced verbatim in a display block those blanks are most of
+ * the block's height and carry nothing. Runs collapse to a single blank (which still
+ * separates the groups) and the leading/trailing ones go.
+ */
+export function collapseBlanks(lines: string[]): string[] {
+  const out: string[] = [];
+  for (const line of lines) {
+    if (line.trim() === "" && (out.length === 0 || out[out.length - 1]!.trim() === "")) continue;
+    out.push(line);
+  }
+  while (out.length > 0 && out[out.length - 1]!.trim() === "") out.pop();
+  return out;
+}
+
 /** A command's output for inline display (plain lines, no diff prefixes). */
 export function outputDetail(body: string): string {
   if (!body) return "";
-  return capLines(body.split("\n"), 18);
+  return capLines(collapseBlanks(stripAnsi(body).split("\n")), 18);
+}
+
+/**
+ * A command's output with its outcome as the last line (pure).
+ *
+ *   ✓ Exit code 0
+ *   ✖ Exit code 1
+ *   ✖ Timed out after 30s — killed
+ *   ✖ Terminated by SIGTERM
+ *
+ * Shown for a SUCCESS too, not only a failure. A row that says nothing when a command
+ * passed and something when it failed makes the absence of a line the signal, and an
+ * absence is easy to read past — especially under a wall of build output. The reference
+ * design puts the exit code on every command for the same reason.
+ *
+ * `exitCode` is null when a process was ended by a signal and never reported one; that
+ * case is named by the signal instead, because reporting it as "exit 0" made a killed
+ * command read as a command that worked.
+ */
+export function withOutcome(
+  body: string,
+  timedOut: boolean,
+  exitCode: number | null,
+  signal: string | null,
+  timeoutMs: number,
+  pid?: number,
+): string {
+  const line = timedOut
+    ? `✖ Timed out after ${Math.round(timeoutMs / 1000)}s — killed`
+    : signal
+      ? `✖ Terminated by ${signal}`
+      : exitCode === null
+        ? "✖ Ended without an exit code"
+        : `${exitCode === 0 ? "✓" : "✖"} Exit code ${exitCode}`;
+  // Which process was killed, and by what. Only when something WAS killed: on an
+  // ordinary exit the pid is trivia, but after a timeout it is the thing the user needs
+  // in order to check whether it actually died or is still holding a port.
+  const killed = timedOut || signal !== null;
+  const detail =
+    killed && pid !== undefined ? `\n  Signal: ${signal ?? "SIGTERM"} sent to process (PID ${pid})` : "";
+  return (body ? `${body}\n${line}` : line) + detail;
 }
 
 function stripTrailingNewline(s: string): string {

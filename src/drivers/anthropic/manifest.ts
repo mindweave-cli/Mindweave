@@ -5,40 +5,145 @@
  * data and pure functions. The wire code (and the SDK) live in `client.ts`, which
  * only loads once a Claude model is actually selected.
  *
- * v1 ships the two models on Anthropic's current request surface: `claude-opus-5`
- * (most capable) and `claude-sonnet-5` (the default here — near-Opus quality on
- * coding and agentic work at a lower rate). Both take adaptive thinking plus an
- * `effort` level, and both reject the older `budget_tokens` and sampling
- * parameters. Haiku 4.5 is deliberately NOT offered yet: it predates that surface
- * and would need a second, legacy request path (fixed thinking budgets, no
- * effort), which is complexity this driver doesn't need to carry to be useful.
+ * Five models across two request surfaces, and the difference is the reason this
+ * file carries a table instead of a pair of constants:
+ *
+ *   - The CURRENT surface (Fable 5, Opus 5, Opus 4.8, Sonnet 5) takes adaptive
+ *     thinking plus an `effort` rung, and rejects the older fixed thinking budget
+ *     and the sampling parameters outright.
+ *   - The LEGACY surface (Haiku 4.5) predates both: it takes a thinking budget in
+ *     tokens and rejects `effort`.
+ *
+ * Two models add a rule of their own on top of that. Fable 5 cannot be asked NOT
+ * to think — an explicit no-thinking request is rejected at any effort — and Opus 5
+ * accepts one only at effort `high` or below. Those are wire facts, not preferences,
+ * so `SURFACES` below is the single place they are written down: `normalize` reads
+ * it to keep a saved config legal, and `client.ts` reads the same rows to decide
+ * what to put on the wire. One table, so the two cannot drift apart.
  */
 import type { DriverManifest, Effort, ModelChoice, ModelConfig, ModelId, ModelPrice, ThinkLevel } from "../types.js";
 
+export const FABLE = "claude-fable-5";
 export const OPUS = "claude-opus-5";
+export const OPUS_48 = "claude-opus-4-8";
 export const SONNET = "claude-sonnet-5";
+export const HAIKU = "claude-haiku-4-5";
 
 /** The model used when nothing is saved and no env override is set. */
 export const DEFAULT_MODEL = SONNET;
 
-/** The models offered by `/model`. First entry is this provider's default. */
+/**
+ * The models offered by `/model`. First entry is this provider's default, which is
+ * also where `/provider` lands when someone switches to Anthropic.
+ *
+ * Descriptions say what the model is FOR, not what it scores. Someone reading the
+ * picker is choosing between five things they are about to pay for, and the useful
+ * distinction is the kind of work each one earns its rate on.
+ */
 export const MODELS: ModelChoice[] = [
   { id: SONNET, label: "Claude Sonnet 5", description: "fast, strong at code — the default" },
-  { id: OPUS, label: "Claude Opus 5", description: "most capable, for the hardest work" },
+  { id: OPUS, label: "Claude Opus 5", description: "deep reasoning for long, complex work" },
+  { id: OPUS_48, label: "Claude Opus 4.8", description: "the previous Opus — proven and steady" },
+  { id: FABLE, label: "Claude Fable 5", description: "the toughest challenges, at the highest rate" },
+  { id: HAIKU, label: "Claude Haiku 4.5", description: "cheapest and quickest, for simple work" },
 ];
 
 /**
- * The reasoning levels offered by `/think`.
+ * The wire facts that differ between these models.
  *
- * Anthropic separates "does it think" from "how hard": thinking is adaptive (the
- * model decides depth per request) and `effort` sets the overall budget. Both
- * models take the same rungs, so one table serves them.
- *
- * Standard deliberately pairs no-thinking with `high` rather than a lower rung:
- * on Opus 5 thinking may only be turned off at effort `high` or below, so this is
- * the setting that keeps a no-thinking request legal on both models.
+ * Everything here is something the API enforces. Nothing here is a judgment call
+ * except `window`, which is called out where it is set.
  */
-export function thinkLevels(_model: ModelId): ThinkLevel[] {
+export interface ModelSurface {
+  /** False when the model rejects an explicit no-thinking request (Fable 5). */
+  canDisableThinking: boolean;
+  /** False when the model predates `output_config.effort` and rejects it (Haiku 4.5). */
+  takesEffort: boolean;
+  /** Highest effort at which thinking may be turned OFF; null when there is no cap. */
+  maxDisabledEffort: Effort | null;
+  /** Usable context window — see `contextWindow` for why this is not the storage cap. */
+  window: number;
+  /**
+   * The server-side search tool version this model accepts. The newer one filters
+   * results before they reach the context window, which the older models cannot do;
+   * sending it to one of them is an error, not a graceful downgrade.
+   */
+  searchTool: "web_search_20260209" | "web_search_20250305";
+}
+
+const CURRENT = {
+  canDisableThinking: true,
+  takesEffort: true,
+  maxDisabledEffort: null,
+  // Every model on this surface STORES 1M tokens, but this is deliberately the
+  // sharp window rather than the storage cap: on BYOK every token in the window is
+  // the user's money on every turn, so anchoring compaction at 1M would mean
+  // carrying an enormous prompt long after it stopped earning its cost.
+  window: 200_000,
+  searchTool: "web_search_20260209",
+} as const satisfies ModelSurface;
+
+const SURFACES: Record<string, ModelSurface> = {
+  // Thinking is always on and any explicit `thinking` config is rejected — see
+  // `client.ts`, which omits the field entirely for this model.
+  [FABLE]: { ...CURRENT, canDisableThinking: false },
+  // Thinking may be turned off, but only at effort `high` or below.
+  [OPUS]: { ...CURRENT, maxDisabledEffort: "high" },
+  [OPUS_48]: { ...CURRENT },
+  [SONNET]: { ...CURRENT },
+  // The legacy surface. No `effort` rungs, thinking is a token budget, and the
+  // window here is the model's real maximum rather than a judgment call — Haiku
+  // stores 200K, it does not store 1M.
+  [HAIKU]: {
+    canDisableThinking: true,
+    takesEffort: false,
+    maxDisabledEffort: null,
+    window: 200_000,
+    searchTool: "web_search_20250305",
+  },
+};
+
+/** The surface a model runs on, falling back to the default model's for unknown ids. */
+export function surfaceOf(model: ModelId): ModelSurface {
+  return SURFACES[model] ?? SURFACES[DEFAULT_MODEL]!;
+}
+
+/**
+ * The reasoning levels offered by `/think`, which depend on the model's surface.
+ *
+ * Three shapes, one per surface rule:
+ *
+ *   - Fable 5 has no "answer directly" rung at all, because there is no such
+ *     request to make. Offering one would be a switch that silently did nothing —
+ *     or, worse, a 400. The choice on this model is only how much it thinks.
+ *   - Haiku 4.5 has no effort ladder, so it gets the plain on/off pair. The stored
+ *     `effort` is inert for it and `normalize` pins it so nothing odd persists.
+ *   - The rest get the full four rungs.
+ *
+ * The current-surface "Standard" deliberately pairs no-thinking with `high` rather
+ * than a lower rung: on Opus 5 thinking may only be turned off at effort `high` or
+ * below, so this is the one setting that keeps a no-thinking request legal on every
+ * model that offers it.
+ */
+export function thinkLevels(model: ModelId): ThinkLevel[] {
+  const surface = surfaceOf(model);
+
+  if (!surface.canDisableThinking) {
+    return [
+      { label: "Standard", description: "always thinks — lighter budget", thinking: true, effort: "medium" },
+      { label: "Thinking", description: "think first, then answer", thinking: true, effort: "high" },
+      { label: "Deep", description: "more reasoning, more tool work", thinking: true, effort: "xhigh" },
+      { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
+    ];
+  }
+
+  if (!surface.takesEffort) {
+    return [
+      { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" },
+      { label: "Thinking", description: "think first, then answer", thinking: true, effort: "high" },
+    ];
+  }
+
   return [
     { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" },
     { label: "Thinking", description: "think first, then answer", thinking: true, effort: "high" },
@@ -54,8 +159,11 @@ export function thinkLevels(_model: ModelId): ThinkLevel[] {
  * estimate doesn't start under-reporting the moment that ends.
  */
 const PRICES: Record<string, ModelPrice> = {
-  [SONNET]: { cacheHit: 0.3, cacheMiss: 3, output: 15 },
+  [FABLE]: { cacheHit: 1, cacheMiss: 10, output: 50 },
   [OPUS]: { cacheHit: 0.5, cacheMiss: 5, output: 25 },
+  [OPUS_48]: { cacheHit: 0.5, cacheMiss: 5, output: 25 },
+  [SONNET]: { cacheHit: 0.3, cacheMiss: 3, output: 15 },
+  [HAIKU]: { cacheHit: 0.1, cacheMiss: 1, output: 5 },
 };
 
 /** Cache-aware list price for a model, falling back to the default model's. */
@@ -63,24 +171,19 @@ export function price(model: ModelId): ModelPrice {
   return PRICES[model] ?? PRICES[DEFAULT_MODEL]!;
 }
 
-/**
- * The model's USABLE context window. Both models STORE 1M tokens, but this is
- * deliberately the sharp window rather than the storage cap: on BYOK every token
- * in the window is the user's money on every turn, so anchoring compaction at 1M
- * would mean carrying an enormous prompt long after it stopped earning its cost.
- */
-export function contextWindow(_model: ModelId): number {
-  return 200_000;
+/** The model's USABLE context window — see `ModelSurface.window`. */
+export function contextWindow(model: ModelId): number {
+  return surfaceOf(model).window;
 }
 
 /**
  * The ceiling this driver puts on a single buffered (non-streaming) call.
  *
- * Both models accept 128K output, but a non-streaming request that runs that long
+ * Every model here accepts far more, but a non-streaming request that runs long
  * risks an HTTP timeout, so the buffered path — core's small internal calls, like
- * a compaction summary — is deliberately capped far lower. `client.ts` sends this
- * value and `dynamo/contextWindow.ts` reserves it; keeping one exported constant
- * means the request and the reservation cannot drift apart.
+ * a compaction summary — is deliberately capped low. `client.ts` sends this value
+ * and `dynamo/contextWindow.ts` reserves it; keeping one exported constant means
+ * the request and the reservation cannot drift apart.
  *
  * The streaming ceiling is a separate, much larger number and lives in `client.ts`,
  * because nothing in core needs to reserve room for it.
@@ -91,19 +194,11 @@ export function bufferedOutputTokens(_model: ModelId): number {
   return BUFFERED_OUTPUT_TOKENS;
 }
 
-/** Effort rungs both models accept, in order. */
+/** Effort rungs the current surface accepts, weakest first. */
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
 /**
- * Coerce a stored or unknown config onto a model this provider actually serves.
- *
- * The one hard rule to enforce: on Opus 5, thinking may only be DISABLED at
- * effort `high` or below — pairing no-thinking with `xhigh` or `max` is rejected
- * by the API. Rather than let that reach the wire, a no-thinking config steps its
- * effort down to `high` here.
- */
-/**
- * Both models offered here read images. Anthropic accepts JPEG, PNG, GIF and WebP,
+ * Every model offered here reads images. Anthropic accepts JPEG, PNG, GIF and WebP,
  * and downscales anything oversized itself, so this driver takes what core sends and
  * adds no resizing of its own.
  */
@@ -111,12 +206,64 @@ export function acceptsImages(_model: ModelId): boolean {
   return true;
 }
 
+/**
+ * Coerce a stored or unknown config onto a model this provider actually serves, and
+ * keep the reasoning intent legal for it.
+ *
+ * Four corrections. The first three enforce rules the API would otherwise reject:
+ *   - Fable 5 always thinks, so a no-thinking config becomes a thinking one.
+ *   - Haiku 4.5 takes no effort rung, so the stored value is pinned to `high`
+ *     (inert for it, and the rung every other model treats as the safe default).
+ *   - Opus 5 rejects no-thinking above `high`, so such a config steps its effort
+ *     down rather than reaching the wire.
+ *
+ * The fourth is about the UI rather than the wire: the result is snapped onto a
+ * rung the target model's `/think` ladder actually OFFERS. A legal-but-unlisted
+ * setting is the failure this catches — Fable's lightest rung is `medium`, which
+ * every current-surface model accepts happily, so carrying it to Sonnet produced a
+ * config that worked but that `/think` could not show as selected, leaving the user
+ * in a state with no tick beside it and no way to name what they were running.
+ *
+ * All four matter most on a MODEL SWITCH: `/model` carries the current reasoning
+ * intent across, so every level of every model has to land somewhere real on every
+ * other model.
+ */
 export function normalize(config: ModelConfig): ModelConfig {
-  const model: ModelId = config.model === OPUS ? OPUS : SONNET;
-  const thinking = config.thinking === true;
+  const model: ModelId = SURFACES[config.model] ? config.model : DEFAULT_MODEL;
+  const surface = surfaceOf(model);
+
+  const thinking = surface.canDisableThinking ? config.thinking === true : true;
+
   let effort: Effort = EFFORTS.includes(config.effort) ? config.effort : "high";
-  if (!thinking && (effort === "xhigh" || effort === "max")) effort = "high";
-  return { model, thinking, effort };
+  if (!surface.takesEffort) effort = "high";
+  const cap = surface.maxDisabledEffort;
+  if (!thinking && cap && EFFORTS.indexOf(effort) > EFFORTS.indexOf(cap)) effort = cap;
+
+  return { model, thinking, effort: snapToOfferedRung(model, thinking, effort) };
+}
+
+/**
+ * Move an effort onto the nearest rung this model's `/think` ladder offers.
+ *
+ * Ties break DOWNWARD: an unlisted setting resolves to the cheaper neighbour, never
+ * the dearer one, because silently spending more of the user's money than the level
+ * they were on is the worse of the two ways to be wrong.
+ */
+function snapToOfferedRung(model: ModelId, thinking: boolean, effort: Effort): Effort {
+  const offered = thinkLevels(model).filter((l) => l.thinking === thinking);
+  if (offered.length === 0) return effort;
+  if (offered.some((l) => l.effort === effort)) return effort;
+
+  const want = EFFORTS.indexOf(effort);
+  let best = offered[0]!;
+  for (const level of offered) {
+    const d = Math.abs(EFFORTS.indexOf(level.effort) - want);
+    const bestD = Math.abs(EFFORTS.indexOf(best.effort) - want);
+    if (d < bestD || (d === bestD && EFFORTS.indexOf(level.effort) < EFFORTS.indexOf(best.effort))) {
+      best = level;
+    }
+  }
+  return best.effort;
 }
 
 /** The cheap metadata half of this driver — see `index.ts` for the wire half. */

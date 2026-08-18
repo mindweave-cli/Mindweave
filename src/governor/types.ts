@@ -92,4 +92,11 @@ export interface Governance {
   rules: Rule[];
   skills: SkillMeta[];
   forbidden: ForbiddenConfig;
+  /**
+   * One-shot, user-facing lines from a governance DECISION rather than a tool
+   * result — today just "a forbidden pattern was lifted for this session."
+   * Pushed by approval.ts, drained by the UI the same way MCP's manager drains
+   * its own `notices` (see mcp/manager.ts's `takeNotices`); each is shown once.
+   */
+  notices?: string[];
 }

@@ -49,6 +49,9 @@ export type SymbolKind =
   // Markup kinds (HTML/CSS): a CSS class rule is "class", an `id`/`#id` is "id",
   // so a landing page's structure and cross-language wires live in the same graph.
   | "id"
+  // A JSX element carrying a className/id, keyed by that name — the same key its CSS
+  // rule uses, which is what wires a component's markup to the stylesheet that styles it.
+  | "element"
   | "other";
 
 /** A defined symbol — one node in the graph. */
@@ -115,6 +118,13 @@ export interface CodeDiagnostic {
   readonly severity: "error" | "warning" | "info" | "hint";
   readonly message: string;
   readonly source?: string; // e.g. "ts", "eslint"
+  /**
+   * The column the failing token ENDS at (1-based, exclusive), same line only.
+   * Present whenever the server's range didn't cross a line break — enough to
+   * draw a caret under the exact token (`~~~~~~~~`) instead of just a marker
+   * under its first character. Absent for a genuinely multi-line span.
+   */
+  readonly endColumn?: number;
 }
 
 /** What the chassis can tell you about its own readiness. */

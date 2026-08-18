@@ -21,6 +21,8 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
   return { cwd: process.cwd(), reads: new Map(), todos: [], ...overrides } as ToolContext;
 }
 
+const IS_WINDOWS = process.platform === "win32";
+
 // ── parseWindowList ──────────────────────────────────────────────────────────
 
 test("parseWindowList reads handles, titles and the focus marker", () => {
@@ -109,8 +111,19 @@ test("safeName turns a window title into a usable filename", () => {
 });
 
 // ── the tool's refusal paths ─────────────────────────────────────────────────
+//
+// The two permission-flow tests below are Windows-specific by construction, not by
+// accident. Off Windows the tool refuses at its FIRST line — capture is a Win32
+// path and there is nothing to fall back to — so the approval channel and the
+// window matcher are never reached and neither assertion can hold. Running them
+// anyway produced a red suite on Linux that said nothing about the product. The
+// non-Windows behaviour gets its own test rather than being left uncovered.
 
-test("screenshot refuses when there is no way to ask permission", async () => {
+test("screenshot refuses when there is no way to ask permission", async (t) => {
+  if (!IS_WINDOWS) {
+    t.skip("the approval path is only reached on Windows; see the platform-refusal test");
+    return;
+  }
   // A sub-agent or a non-interactive run has no approval channel. It must not
   // inherit permission to photograph the desktop by default.
   const result = await screenshot.execute({ window: "anything" }, ctx());
@@ -118,7 +131,11 @@ test("screenshot refuses when there is no way to ask permission", async () => {
   assert.match(result.output, /needs their approval/);
 });
 
-test("screenshot does not capture when the user says no", async () => {
+test("screenshot does not capture when the user says no", async (t) => {
+  if (!IS_WINDOWS) {
+    t.skip("window matching is only reached on Windows; see the platform-refusal test");
+    return;
+  }
   let captured = false;
   const result = await screenshot.execute(
     { window: "definitely-no-such-window-xyzzy" },
@@ -133,6 +150,28 @@ test("screenshot does not capture when the user says no", async () => {
   // ordering that matters: no window is named to the user before it is resolved.
   assert.equal(captured, false);
   assert.equal(result.isError, true);
+});
+
+test("off Windows, screenshot degrades before asking for anything", async (t) => {
+  if (IS_WINDOWS) {
+    t.skip("this is the non-Windows path");
+    return;
+  }
+  let asked = false;
+  const result = await screenshot.execute(
+    { window: "anything" },
+    ctx({
+      requestApproval: async () => {
+        asked = true;
+        return "Yes";
+      },
+    }),
+  );
+  // Degrading, not erroring: an unsupported platform is a fact about the machine,
+  // not a mistake the model should retry or work around.
+  assert.equal(asked, false, "the user must not be prompted for a capture that cannot happen");
+  assert.equal(result.isError, undefined);
+  assert.match(result.output, /Windows-only/);
 });
 
 test("screenshot is offered as a read-only tool", () => {

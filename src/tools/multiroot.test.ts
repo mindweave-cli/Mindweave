@@ -12,8 +12,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { canonicalRoot, relativize, resolvePath, rootsOf, searchUnits, anchorOf } from "./paths.js";
-import { addDirectory, addRoot, linkWorkspace, removeRoot } from "./workspace.js";
-import { grepTool } from "./grep.js";
+import { addRoot, removeRoot, workspaceTool } from "./workspace.js";
+import { grepDef } from "./grep.js";
 import type { ToolContext } from "./types.js";
 
 function ctx(cwd: string, roots: string[]): ToolContext {
@@ -69,7 +69,7 @@ test("grep spans both roots and labels every hit", async () => {
     await fs.writeFile(join(b, "sub", "b.txt"), "another needle there\n");
 
     const c = ctx(a, [a, b]);
-    const res = await grepTool.execute({ pattern: "needle", output_mode: "files_with_matches" }, c);
+    const res = await grepDef.execute({ pattern: "needle", output_mode: "files_with_matches" }, c);
     assert.ok(!res.isError);
     assert.ok(res.output.includes(`${basename(a)}/a.txt`), res.output);
     assert.ok(res.output.includes(`${basename(b)}/sub/b.txt`), res.output);
@@ -138,7 +138,7 @@ test("the same folder cannot be added twice under different spellings", async ()
 test("a proactive add with no way to ask does not add", async () => {
   await twoRoots(async (a, b) => {
     const c = ctx(a, [a]); // no requestApproval
-    const r = await addDirectory.execute({ path: b, proactive: true }, c);
+    const r = await workspaceTool.execute({ path: b, proactive: true }, c);
     assert.deepEqual(c.roots, [a], "the workspace was widened without consent");
     assert.match(r.output, /no way to ask/i);
     assert.notEqual(r.isError, true, "it is a refusal to act, not a failure to retry");
@@ -149,7 +149,7 @@ test("an explicit add still works without a channel — consent was already give
   // The distinction the `proactive` flag exists to draw: the user asked for this one.
   await twoRoots(async (a, b) => {
     const c = ctx(a, [a]);
-    await addDirectory.execute({ path: b }, c);
+    await workspaceTool.execute({ path: b }, c);
     assert.deepEqual(c.roots, [a, await canonicalRoot(b)]);
   });
 });
@@ -165,7 +165,7 @@ test("link_workspace with no way to ask adds nothing and reports what it found",
 
     const c = ctx(primary, [primary]); // no requestApproval
     const before = [...rootsOf(c)];
-    const r = await linkWorkspace.execute({}, c);
+    const r = await workspaceTool.execute({}, c);
     assert.deepEqual(c.roots, before, "a bulk add happened with nobody asked");
     if (/related folder/i.test(r.output)) assert.match(r.output, /no way to ask/i);
   });

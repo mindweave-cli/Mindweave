@@ -14,9 +14,11 @@ import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
 import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
 import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
 
-const MAX_RESULTS = 100;
+/** Cap on paths returned. Exported for the merged `search` tool's description. */
+export const GLOB_MAX_RESULTS = 100;
+const MAX_RESULTS = GLOB_MAX_RESULTS;
 
-export const globTool: Tool = {
+export const globDef: Tool = {
   name: "glob",
   readOnly: true,
   // Same failure as grep had: the model reads "No files found." as "this project does

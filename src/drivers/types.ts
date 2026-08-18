@@ -97,6 +97,18 @@ export interface Turn {
   /** Why generation stopped. Absent means the driver didn't report one; treat
    *  that as `end`, which is what every provider means by saying nothing. */
   stop?: StopReason;
+  /**
+   * Token accounting, when the provider reported it.
+   *
+   * Present on BUFFERED turns as well as streamed ones, and that is the point: the
+   * buffered path is core's own internal calls — the compaction summary, the session
+   * memory notes, the web-page distillation — and those spend real tokens on the
+   * user's key. Without this they were invisible, so the figure on screen was short
+   * by exactly the work the user never asked for and could not see.
+   *
+   * Optional because a provider may report nothing, which is not the same as zero.
+   */
+  usage?: Usage;
 }
 
 /**
@@ -250,8 +262,54 @@ export interface DriverManifest {
   /** Where a user gets a key, shown on the setup screen. */
   keysUrl: string;
 
-  /** The models this provider offers, in `/model` order. The first is its default. */
+  /**
+   * The models this provider offers, in `/model` order. The first is its default.
+   *
+   * For most providers this is the whole truth: a vendor serves a lineup known when
+   * the driver is written. For a DISCOVERED provider (see `discoverModels`) it is
+   * instead the fallback shown before discovery has run — often empty, since a local
+   * runtime serves whatever the user has pulled and a router's catalogue changes
+   * weekly. Read it through the registry's `modelsOf`, never directly, or a
+   * discovered provider will look empty forever.
+   */
   models: ModelChoice[];
+
+  /**
+   * Optional: fetch the live model list. Its PRESENCE is what marks a provider as
+   * discovered rather than fixed.
+   *
+   * This exists because the fixed `models` array encodes an assumption that is true
+   * of every vendor API and false of two important cases: a local runtime, where the
+   * list is whatever has been pulled onto this machine, and a router, where it is
+   * hundreds of models across every vendor. Both are legitimate providers, and
+   * neither can state its lineup at build time.
+   *
+   * Called by the registry, whose cache is the only place a result is kept — a
+   * driver must not memoize its own, or the list would go stale exactly when a user
+   * pulls a new model and reopens the picker to find it.
+   *
+   * Rejecting is fine and expected: a local runtime that is not running should fail
+   * here rather than throw somewhere less obvious. The registry keeps the previous
+   * list on failure, so a discovery blip never empties a working picker.
+   */
+  discoverModels?(): Promise<ModelChoice[]>;
+
+  /**
+   * Optional: claim a model id that is not in the list yet.
+   *
+   * The active provider is DERIVED from the current model id rather than stored
+   * beside it, deliberately — a second copy of the same fact is a second thing to
+   * keep in sync. That derivation works by finding the manifest whose list contains
+   * the id, which breaks for a discovered provider in the window before discovery
+   * has run: a saved config naming a local model would be attributed to whichever
+   * provider happens to be the fallback, and the session would open on the wrong
+   * one.
+   *
+   * So a discovered provider states how to recognise its own ids without a list —
+   * in practice a namespace prefix. Consulted only after the lists are searched, so
+   * it can never take a model another provider actually serves.
+   */
+  ownsModel?(model: ModelId): boolean;
 
   /** The reasoning levels `/think` offers for one of this provider's models. */
   thinkLevels(model: ModelId): ThinkLevel[];

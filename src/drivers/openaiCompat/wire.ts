@@ -1,0 +1,544 @@
+/**
+ * wire.ts — the shared OpenAI-compatible wire layer.
+ *
+ * A growing number of providers serve chat over OpenAI's `/chat/completions`
+ * shape: same request body, same `tools[]` → `tool_calls`, same SSE framing, same
+ * fragmented tool-call arguments. Written per provider, that is ~250 lines of
+ * identical stream plumbing copied N times, and N places for the same bug to be
+ * fixed once and missed elsewhere. So the plumbing lives here ONCE and each
+ * provider supplies only the handful of facts that genuinely differ.
+ *
+ * What a provider still owns, via `CompatProvider` below:
+ *   - where it lives (base URL) and which key opens it,
+ *   - how it spells REASONING, which is the field every provider invents
+ *     differently (a toggle, a budget, an effort rung, or nothing at all),
+ *   - which of its `finish_reason` values are not in the OpenAI vocabulary,
+ *   - where it reports cached-token counts, which is also unstandardised.
+ *
+ * What this module deliberately does NOT do: change what the model is asked. The
+ * system prompt is the same bytes through here as through any other driver. This
+ * is an envelope, not a craft decision.
+ */
+import type {
+  ChatMessage,
+  ModelConfig,
+  ModelRequest,
+  StreamEvent,
+  StreamResult,
+  StopReason,
+  ToolCall,
+  Turn,
+  Usage,
+} from "../types.js";
+
+/** The facts one OpenAI-compatible provider has to supply. */
+export interface CompatProvider {
+  /** Human-readable name, used only in error messages. */
+  label: string;
+  /** Root of the OpenAI-compatible API, with no trailing slash. */
+  baseUrl: string;
+  /** Environment variable holding the key, e.g. `DASHSCOPE_API_KEY`. */
+  apiKeyEnv: string;
+  /** Model used when a request carries no explicit selection. */
+  defaultModel: string;
+
+  /**
+   * The provider-specific fields that express a reasoning selection.
+   *
+   * This is the one part no two providers agree on: DeepSeek takes
+   * `thinking: {type}` plus `reasoning_effort`, Qwen takes `enable_thinking` plus
+   * `thinking_budget`, others take a bare `reasoning_effort` or nothing. Returning
+   * a fragment of the body — rather than accepting a flag — means a provider can
+   * express any of those without this module learning about it.
+   *
+   * Returning an EMPTY object is meaningful and must be deliberate: it leaves the
+   * provider's own default in force, which for several of these is "think hard,
+   * and bill for it". Say so explicitly rather than defaulting into it.
+   */
+  reasoningFields(config: ModelConfig | undefined): Record<string, unknown>;
+
+  /**
+   * Map a `finish_reason` this provider invented onto the shared set. Return
+   * `undefined` for anything the OpenAI vocabulary already covers, which is
+   * handled below. Optional: most providers add nothing.
+   */
+  extraStop?(reason: string): StopReason | undefined;
+
+  /**
+   * Pull the cache hit/miss split out of a usage object. Optional, because the
+   * field names are unstandardised and some providers report nothing at all —
+   * which is why the fallback treats the whole prompt as fresh rather than
+   * inventing a split that would quietly under-report cost.
+   */
+  cacheSplit?(usage: Record<string, unknown>): { hit: number; miss: number } | undefined;
+
+  /**
+   * Output ceiling for a BUFFERED (non-streaming) call — core's small internal
+   * ones, like a compaction summary.
+   *
+   * This must agree with what the manifest reports as `bufferedOutputTokens`,
+   * because core reserves exactly that much room below the context window. A
+   * manifest that declares a ceiling while the request sends none is the failure
+   * this field exists to prevent: the provider's own default applies, which is
+   * typically far larger than the reservation, and a long summary then overruns
+   * the room set aside for it. Omit BOTH or set BOTH.
+   */
+  bufferedMaxTokens?: number;
+
+  /** Output ceiling for a streamed turn. Omitted leaves the provider's default. */
+  streamMaxTokens?: number;
+
+  /**
+   * Sampling fields (`temperature`, `top_p`, …) for this request. Optional, and
+   * omitting it — which every provider but DeepSeek does — sends nothing and leaves
+   * the provider's own defaults in force.
+   *
+   * It takes the config rather than being a constant because whether sampling has
+   * any effect at all can depend on the reasoning selection: DeepSeek documents that
+   * thinking mode IGNORES temperature and top_p, silently, without an error. Sending
+   * them anyway would be inert rather than harmful, but it would also be a claim in
+   * the request body that is not true of the call, and the next person to read it
+   * would reasonably conclude the numbers were doing something.
+   */
+  sampling?(config: ModelConfig | undefined): Record<string, unknown>;
+
+  /**
+   * Repair a provider's own damage to the assembled reply, before anything else
+   * sees it. Optional, and most providers need nothing.
+   *
+   * This exists because "OpenAI-compatible" describes the request, not the model's
+   * discipline about honouring it. DeepSeek intermittently emits tool calls as
+   * MARKUP inside the text channel instead of as `tool_calls`, so the reply arrives
+   * carrying a call that will never run and prose full of tags. Recovering the call
+   * and stripping the tags is a repair, not a format decision — which is why it
+   * takes the assembled content AND the structured calls, and may return both
+   * changed: the two are one decision (a recovered call is only recovered because
+   * the structured list was empty).
+   *
+   * Applied identically on the buffered and streamed paths, so a turn cannot be
+   * clean one way and corrupt the other.
+   */
+  repairContent?(content: string, toolCalls: ToolCall[]): { content: string; toolCalls: ToolCall[] };
+}
+
+/**
+ * The error thrown when a provider returns a non-2xx response.
+ *
+ * `status` and `detail` ride on the object rather than being formatted into the
+ * message, because something upstream has to tell an account refusal (401/402/403/
+ * 429) apart from a malformed request, and re-parsing a human sentence to recover a
+ * number we already had is the kind of thing that quietly stops working. See
+ * `drivers/providerError.ts`. Both SDK-backed drivers expose `status` the same way,
+ * so one classifier serves every provider.
+ */
+export class ProviderHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly detail: string,
+    label: string,
+    statusText: string,
+  ) {
+    super(`${label} API error ${status}: ${detail || statusText}`);
+    this.name = "ProviderHttpError";
+  }
+}
+
+/**
+ * The cache split as most OpenAI-compatible providers report it:
+ * `prompt_tokens_details.cached_tokens`, where `prompt_tokens` is the FULL prompt
+ * including the cached part — so the miss side is the remainder, not a second
+ * figure to add.
+ *
+ * Shared because this exact shape is what Qwen, GLM, xAI, Mistral, Groq and
+ * Cerebras all return, and six copies of six lines is six places for the same
+ * arithmetic to drift. A provider that reports something else supplies its own.
+ *
+ * Returning `undefined` when nothing is reported is load-bearing, not tidiness. The
+ * caller then counts the whole prompt as fresh, and on a multi-step turn that means
+ * every step's prompt is counted again — which is exactly the inflation the token
+ * meter exists to avoid. So a provider that DOES cache must be wired to this, or
+ * its turns silently report several times what they cost.
+ */
+export function standardCacheSplit(usage: Record<string, unknown>): { hit: number; miss: number } | undefined {
+  const details = usage.prompt_tokens_details as { cached_tokens?: number } | undefined;
+  const hit = typeof details?.cached_tokens === "number" ? details.cached_tokens : 0;
+  if (hit === 0) return undefined;
+  const prompt = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
+  return { hit, miss: Math.max(0, prompt - hit) };
+}
+
+/** Apply a provider's content repair, or pass the turn through untouched. */
+function repair(
+  provider: CompatProvider,
+  content: string,
+  toolCalls: ToolCall[],
+): { content: string; toolCalls: ToolCall[] } {
+  return provider.repairContent ? provider.repairContent(content, toolCalls) : { content, toolCalls };
+}
+
+/**
+ * Render a ModelRequest to OpenAI-shape messages: the stable system prompt, the
+ * stable conversation, then the volatile context as a trailing block.
+ *
+ * Keeping `context` strictly LAST is what preserves the cacheable prefix — an
+ * OpenAI-compatible provider caches the longest identical prefix from token 0, so
+ * anything volatile must come after everything worth caching. This is the property
+ * the whole ModelRequest split exists to guarantee.
+ */
+export function renderMessages(req: ModelRequest): ChatMessage[] {
+  const messages: ChatMessage[] = [{ role: "system", content: req.system }, ...req.messages];
+  if (req.context && req.context.trim()) {
+    // A trailing USER message is the most universally accepted shape here: a
+    // non-leading system message is not guaranteed to be honored. It is clearly
+    // framed as current context rather than as the human talking.
+    messages.push({ role: "user", content: `<current_context>\n${req.context}\n</current_context>` });
+  }
+  return messages;
+}
+
+/**
+ * Build the request body shared by the buffered and streaming paths.
+ *
+ * `maxTokens` is the output ceiling for THIS path, and is omitted from the body
+ * when the provider declares none — leaving its own default in force, which is the
+ * documented behaviour rather than an oversight.
+ */
+export function buildBody(
+  provider: CompatProvider,
+  req: ModelRequest,
+  maxTokens?: number,
+): Record<string, unknown> {
+  const tools = req.tools ?? [];
+  const body: Record<string, unknown> = {
+    model: req.model?.model ?? provider.defaultModel,
+    messages: renderMessages(req),
+    ...provider.reasoningFields(req.model),
+    ...(provider.sampling?.(req.model) ?? {}),
+  };
+  if (maxTokens !== undefined) body.max_tokens = maxTokens;
+  if (tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
+  return body;
+}
+
+/**
+ * Map an OpenAI-shaped `finish_reason` onto the shared stop reason.
+ *
+ * `stop` and `tool_calls` are both a normal finish; `length` means the answer was
+ * cut off mid-sentence, which the engine has to be able to tell apart from a real
+ * ending. A provider's own vocabulary gets first refusal via `extraStop`, so a
+ * non-standard value can never fall through to `"end"` and report an incomplete
+ * reply as a clean one.
+ */
+export function toStop(provider: CompatProvider, reason: string | null | undefined): StopReason {
+  if (!reason) return "end";
+  const extra = provider.extraStop?.(reason);
+  if (extra) return extra;
+  switch (reason) {
+    case "length":
+      return "truncated";
+    case "content_filter":
+      return "refused";
+    default:
+      return "end";
+  }
+}
+
+/** The slice of a streaming chunk we read (OpenAI-compatible SSE shape). */
+interface StreamChunk {
+  choices?: {
+    finish_reason?: string | null;
+    delta?: {
+      content?: string | null;
+      /** Reasoning channel. Providers disagree on the name; both are read. */
+      reasoning_content?: string | null;
+      reasoning?: string | null;
+      tool_calls?: {
+        index?: number;
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }[];
+    };
+  }[];
+  usage?: Record<string, unknown>;
+}
+
+/**
+ * Read an SSE response into a finished turn, emitting each delta along the way.
+ *
+ * Every `data:` line is a chunk whose `choices[0].delta` carries some of `content`,
+ * a reasoning field, or `tool_calls`. Tool calls are FRAGMENTED — the first
+ * fragment for an index brings the id and name, later ones append `arguments` text
+ * — so they are accumulated by index and only assembled at the end.
+ */
+export async function consumeStream(
+  provider: CompatProvider,
+  response: Pick<Response, "body">,
+  onEvent?: (event: StreamEvent) => void,
+): Promise<StreamResult> {
+  let content = "";
+  // Tool calls under construction, keyed by streaming index. `started` guards the
+  // one-time tool_start emit, fired when the name first appears.
+  const tools = new Map<number, { id: string; name: string; args: string; started: boolean }>();
+  let usage: Usage | undefined;
+  let finishReason: string | null | undefined;
+
+  for await (const data of sseLines(response)) {
+    if (data === "[DONE]") break;
+    let chunk: StreamChunk;
+    try {
+      chunk = JSON.parse(data) as StreamChunk;
+    } catch {
+      continue; // ignore keep-alive comments / malformed lines
+    }
+
+    if (chunk.usage) usage = toUsage(provider, chunk.usage);
+    finishReason = chunk.choices?.[0]?.finish_reason ?? finishReason;
+
+    const delta = chunk.choices?.[0]?.delta;
+    if (!delta) continue;
+
+    const reasoning = delta.reasoning_content ?? delta.reasoning;
+    if (typeof reasoning === "string" && reasoning) {
+      onEvent?.({ type: "reasoning", delta: reasoning });
+    }
+    if (typeof delta.content === "string" && delta.content) {
+      content += delta.content;
+      onEvent?.({ type: "text", delta: delta.content });
+    }
+    for (const tc of delta.tool_calls ?? []) {
+      const index = tc.index ?? 0;
+      let acc = tools.get(index);
+      if (!acc) {
+        acc = { id: "", name: "", args: "", started: false };
+        tools.set(index, acc);
+      }
+      if (tc.id) acc.id = tc.id;
+      // The name usually arrives whole in the first fragment, but append
+      // defensively in case a provider splits it.
+      if (tc.function?.name) acc.name += tc.function.name;
+      if (!acc.started && acc.name) {
+        acc.started = true;
+        onEvent?.({ type: "tool_start", index, id: acc.id, name: acc.name });
+      }
+      const argFragment = tc.function?.arguments;
+      if (argFragment) {
+        acc.args += argFragment;
+        onEvent?.({ type: "tool_args", index, delta: argFragment });
+      }
+    }
+  }
+
+  const assembled: ToolCall[] = [...tools.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, t]) => ({ id: t.id, name: t.name, arguments: t.args || "{}" }));
+
+  const repaired = repair(provider, content, assembled);
+  return { ...repaired, usage, stop: toStop(provider, finishReason) };
+}
+
+/**
+ * Fold a usage object into the shared shape.
+ *
+ * The cache split is asked of the provider because the field names are
+ * unstandardised. When it reports none, the prompt counts as entirely fresh —
+ * an over-estimate, deliberately, since the alternative is inventing a discount
+ * the user did not receive.
+ */
+export function toUsage(provider: CompatProvider, raw: Record<string, unknown>): Usage {
+  const num = (key: string): number => (typeof raw[key] === "number" ? (raw[key] as number) : 0);
+  const promptTokens = num("prompt_tokens");
+  const completionTokens = num("completion_tokens");
+  const split = provider.cacheSplit?.(raw);
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: num("total_tokens") || promptTokens + completionTokens,
+    cacheHitTokens: split?.hit ?? 0,
+    cacheMissTokens: split?.miss ?? promptTokens,
+  };
+}
+
+/** Pull a finished (non-streamed) response into a turn. */
+export function toTurn(provider: CompatProvider, data: unknown): Turn {
+  const parsed = data as {
+    choices?: {
+      message?: { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] };
+      finish_reason?: string | null;
+    }[];
+    usage?: Record<string, unknown>;
+  };
+  const message = parsed.choices?.[0]?.message;
+  const content = typeof message?.content === "string" ? message.content : "";
+  const toolCalls = (message?.tool_calls ?? []).map((tc) => ({
+    id: tc.id,
+    name: tc.function.name,
+    arguments: tc.function.arguments || "{}",
+  }));
+  const repaired = repair(provider, content, toolCalls);
+  return {
+    ...repaired,
+    stop: toStop(provider, parsed.choices?.[0]?.finish_reason),
+    // Buffered calls are core's internal ones and spend real tokens; without this
+    // they are invisible to the meter. Absent when the provider reports nothing,
+    // which is not the same as zero.
+    usage: parsed.usage ? toUsage(provider, parsed.usage) : undefined,
+  };
+}
+
+/**
+ * Yield each SSE `data:` payload from a streamed response body.
+ *
+ * Frames are separated by a blank line and may carry more than one `data:` line.
+ * Decoding is incremental and a payload is only emitted once a FULL frame has
+ * arrived, so one split across network packets is never parsed half-formed.
+ */
+export async function* sseLines(response: Pick<Response, "body">): AsyncGenerator<string> {
+  const body = response.body;
+  if (!body) return;
+  const decoder = new TextDecoder();
+  let buffer = "";
+  // `response.body` is a web ReadableStream; Node exposes it as async-iterable.
+  for await (const piece of body as unknown as AsyncIterable<Uint8Array>) {
+    buffer += decoder.decode(piece, { stream: true });
+    let sep: number;
+    while ((sep = firstFrameEnd(buffer)) !== -1) {
+      const frame = buffer.slice(0, sep).trim();
+      buffer = buffer.slice(sep).replace(/^(\r?\n)+/, "");
+      const payload = frameData(frame);
+      if (payload !== null) yield payload;
+    }
+  }
+}
+
+/** Index just past the first frame separator (blank line) in `buf`, or -1. */
+function firstFrameEnd(buf: string): number {
+  const lf = buf.indexOf("\n\n");
+  const crlf = buf.indexOf("\r\n\r\n");
+  if (lf === -1) return crlf === -1 ? -1 : crlf + 4;
+  if (crlf === -1) return lf + 2;
+  return Math.min(lf + 2, crlf + 4);
+}
+
+/** Join the `data:` lines of one SSE frame into its payload, or null if none. */
+function frameData(frame: string): string | null {
+  const parts: string[] = [];
+  for (const line of frame.split(/\r?\n/)) {
+    if (line.startsWith("data:")) parts.push(line.slice(5).trimStart());
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+
+/** The provider's API key, or a clear setup error if it isn't configured yet. */
+export function requireApiKey(provider: CompatProvider): string {
+  const apiKey = process.env[provider.apiKeyEnv];
+  if (!apiKey) {
+    throw new Error(
+      `No ${provider.apiKeyEnv} found. Add your key to the global config so Mindweave works ` +
+        "in every project:\n" +
+        `  ~/.mindweave/.env  →  ${provider.apiKeyEnv}=your-key-here\n` +
+        "(A per-project .env or an exported shell variable also works.)",
+    );
+  }
+  return apiKey;
+}
+
+/** POST to chat/completions, returning the parsed JSON body. */
+async function post(provider: CompatProvider, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}` },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new ProviderHttpError(response.status, detail, provider.label, response.statusText);
+  }
+  return response.json();
+}
+
+/** POST a streaming request, returning the raw response for SSE reading. */
+async function postStream(
+  provider: CompatProvider,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}` },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new ProviderHttpError(response.status, detail, provider.label, response.statusText);
+  }
+  return response;
+}
+
+/** One entry from an OpenAI-compatible `GET /models` listing. */
+export interface ListedModel {
+  id: string;
+  /** Some providers report it here; most do not. Absent means "ask the manifest". */
+  context_window?: number;
+  owned_by?: string;
+}
+
+/**
+ * List the models this provider currently serves.
+ *
+ * The OpenAI-compatible `/models` endpoint, which is what makes a DISCOVERED
+ * provider possible: a fast-inference host rotates its catalogue often enough that
+ * a list compiled into the driver is wrong within weeks, and the endpoint is the
+ * only thing that is never wrong.
+ *
+ * Deliberately THROWS rather than returning an empty list on failure. The registry
+ * treats the two differently and must be able to: an empty list means "serving
+ * nothing right now", while a throw means "could not ask", and only the first
+ * should replace what the picker is showing.
+ */
+export async function listModels(provider: CompatProvider): Promise<ListedModel[]> {
+  const response = await fetch(`${provider.baseUrl}/models`, {
+    headers: { Authorization: `Bearer ${requireApiKey(provider)}` },
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new ProviderHttpError(response.status, detail, provider.label, response.statusText);
+  }
+  const body = (await response.json()) as { data?: ListedModel[] };
+  return (body.data ?? []).filter((m) => typeof m.id === "string" && m.id.length > 0);
+}
+
+/** Ask the model for one turn. */
+export async function compatToolTurn(
+  provider: CompatProvider,
+  req: ModelRequest,
+  signal?: AbortSignal,
+): Promise<Turn> {
+  const body = { ...buildBody(provider, req, provider.bufferedMaxTokens), stream: false };
+  return toTurn(provider, await post(provider, body, signal));
+}
+
+/**
+ * Ask the model for one turn, STREAMING.
+ *
+ * `stream_options.include_usage` asks for a final chunk carrying the token counts.
+ * Providers that don't honour it simply never send one, and usage stays undefined —
+ * which the caller already treats as "not reported" rather than as zero.
+ */
+export async function compatStreamTurn(
+  provider: CompatProvider,
+  req: ModelRequest,
+  onEvent?: (event: StreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<StreamResult> {
+  const body = {
+    ...buildBody(provider, req, provider.streamMaxTokens),
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  return consumeStream(provider, await postStream(provider, body, signal), onEvent);
+}

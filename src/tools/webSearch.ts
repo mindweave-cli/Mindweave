@@ -20,11 +20,12 @@ import type { Tool, ToolResult } from "./types.js";
 import type { SearchResult } from "../drivers/types.js";
 import { activeDriver } from "../drivers/registry.js";
 import { frameExternal } from "./untrusted.js";
+import { outputDetail } from "./detail.js";
 
 /** Sources listed per answer. Enough to judge the answer, short enough to read. */
 const MAX_SOURCES = 8;
 
-export const webSearch: Tool = {
+const webSearchTool: Tool = {
   name: "web_search",
   readOnly: true,
   description:
@@ -66,7 +67,12 @@ export const webSearch: Tool = {
     }
 
     try {
+      // Timed here rather than inside the driver: the wait is the same wait whichever
+      // provider serves it, and measuring it at the one call site keeps every driver
+      // free of display bookkeeping.
+      const startedAt = Date.now();
       const result = await driver.webSearch(query, { signal: ctx.abortSignal });
+      const elapsedMs = Date.now() - startedAt;
       if (!result.answer && result.sources.length === 0) {
         return {
           output: `No results for "${query}". Try different wording, or a narrower query.`,
@@ -76,6 +82,7 @@ export const webSearch: Tool = {
       return {
         output: formatSearch(query, result),
         summary: `searched "${query}" (${result.sources.length} source${result.sources.length === 1 ? "" : "s"})`,
+        detail: formatSearchDetail(result, driver.label, elapsedMs),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -113,6 +120,39 @@ export function formatSearch(query: string, result: SearchResult): string {
   return frameExternal({ tag: "web_search", attrs: { query }, what: "a web search" }, lines.join("\n"));
 }
 
+/**
+ * The UI-only detail block: a numbered source list, never sent to the model
+ * (that's `formatSearch`'s job, with its own framing/injection defense) — this
+ * is purely what the transcript row shows under the search. Empty when there
+ * are no sources, so a bare-answer result shows just its summary line.
+ */
+export function formatSearchDetail(result: SearchResult, engine?: string, elapsedMs?: number): string {
+  if (result.sources.length === 0) return "";
+  const shown = result.sources.slice(0, MAX_SOURCES);
+  const lines: string[] = [];
+  // Which service answered and how long it took. Both are omitted rather than guessed
+  // when unknown — a search row is one of the few places where the cost of the call is
+  // not otherwise visible, and an invented number would be worse than no number.
+  if (engine) lines.push(`Engine: ${engine}`);
+  if (elapsedMs !== undefined) lines.push(`Query time: ${formatElapsed(elapsedMs)}`);
+  lines.push(`Found ${result.sources.length} source${result.sources.length === 1 ? "" : "s"}`);
+  for (const [i, source] of shown.entries()) lines.push(`${i + 1}. ${source.title}`);
+  const hidden = result.sources.length - shown.length;
+  if (hidden > 0) lines.push(`(+${hidden} more)`);
+  return outputDetail(lines.join("\n"));
+}
+
+/** A wait, at the precision it is worth reading: `310ms`, `1.4s`. */
+export function formatElapsed(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 function fail(message: string): ToolResult {
   return { output: `Error: ${message}`, isError: true, summary: message };
 }
+
+/** The search half of the merged `web` tool. Logic unchanged. */
+export const searchWeb = webSearchTool.execute;
+
+/** Kept for tests that assert on the search description/flags directly. */
+export const webSearch = webSearchTool;

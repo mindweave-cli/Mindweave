@@ -20,233 +20,189 @@ function projectRoot(ctx: { cwd: string; governance?: { forbidden: { root: strin
   return ctx.governance?.forbidden.root ?? ctx.cwd;
 }
 
-export const rememberRule: Tool = {
-  name: "remember_rule",
+// ── the four actions, as plain functions ──────────────────────────────────────
+// They were four TOOLS until an audit measured what that cost: four near-identical
+// schemas, one domain, one approval flow, ~1000 advertised tokens on every uncached
+// request, and four overlapping descriptions for the model to choose between. The
+// logic below is unchanged; only the way it is offered to the model is.
+
+type Ctx = Parameters<Tool["execute"]>[1];
+
+async function doRememberRule(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
+  const body = typeof args.value === "string" ? args.value.trim() : "";
+  if (!body) return fail("`value` is required — the rule text.");
+  const name = (typeof args.name === "string" && args.name.trim()) || deriveRuleName(body);
+  const globs = parseGlobs(typeof args.globs === "string" ? args.globs : undefined);
+
+  const saved = await writeRule(projectRoot(ctx), name, body, "", globs);
+  // Mirror into the live session so the rule is in the very next prompt.
+  //
+  // Deduplicate by SLUG, not by the display name. The rule FILE is `<slug>.md`, so
+  // "Use pnpm" and "use pnpm!" are one rule on disk and were two in memory: the
+  // session showed both, the next session showed one, and the user watched a rule
+  // they had just set disappear on restart. Matching how the file is keyed is what
+  // keeps the live list and the disk agreeing.
+  if (ctx.governance) {
+    const slug = slugify(saved.name);
+    ctx.governance.rules = [...ctx.governance.rules.filter((r) => slugify(r.name) !== slug), saved];
+  }
+  const scope = globs.length > 0 ? ` (scoped to ${globs.join(", ")})` : "";
+  return {
+    output: `Saved rule '${saved.name}'${scope}. It now applies to this project (this session and future ones).`,
+    summary: `saved rule '${saved.name}'`,
+  };
+}
+
+async function doForbidPath(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
+  const pattern = typeof args.value === "string" ? args.value.trim() : "";
+  if (!pattern) return fail("`value` is required — the path glob to forbid.");
+
+  const result = await appendForbidden(projectRoot(ctx), pattern);
+  if (!result.pattern) return fail("the pattern is empty after normalization.");
+
+  // Mirror into the live forbidden config (new array → matcher recompiles).
+  if (ctx.governance && result.added) {
+    ctx.governance.forbidden = {
+      ...ctx.governance.forbidden,
+      patterns: [...ctx.governance.forbidden.patterns, result.pattern],
+    };
+  }
+  return {
+    output: result.added
+      ? `Forbidden '${result.pattern}'. I won't modify it or run commands against it.`
+      : `'${result.pattern}' was already forbidden.`,
+    summary: result.added ? `forbade '${result.pattern}'` : `'${result.pattern}' already forbidden`,
+  };
+}
+
+async function doForbidCommand(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
+  const pattern = typeof args.value === "string" ? args.value.trim() : "";
+  if (!pattern) return fail("`value` is required — the command to forbid.");
+
+  const result = await appendForbiddenCommand(projectRoot(ctx), pattern);
+  if (!result.pattern) return fail("the pattern is empty after normalization.");
+
+  // Mirror into the live forbidden config (new array → enforced this turn on).
+  if (ctx.governance && result.added) {
+    ctx.governance.forbidden = {
+      ...ctx.governance.forbidden,
+      commands: [...(ctx.governance.forbidden.commands ?? []), result.pattern],
+    };
+  }
+  return {
+    output: result.added
+      ? `Forbidden the command '${result.pattern}'. I won't run it (or anything containing it) unless you lift it.`
+      : `'${result.pattern}' was already forbidden.`,
+    summary: result.added ? `forbade command '${result.pattern}'` : `'${result.pattern}' already forbidden`,
+  };
+}
+
+async function doForbidMcpTool(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
+  const name = typeof args.value === "string" ? args.value.trim() : "";
+  if (!name) return fail("`value` is required — the full MCP tool name.");
+  // Guarding the shape matters: a bare tool name would be written to disk, never
+  // match anything, and look like the ban silently failed.
+  if (!isMcpToolName(name)) {
+    return fail(`'${name}' is not an MCP tool name. Use the full name from your tool list, e.g. 'mcp__github__create_issue'.`);
+  }
+
+  const result = await appendForbiddenMcpTool(projectRoot(ctx), name);
+  if (!result.pattern) return fail("the name is empty after normalization.");
+
+  // Mirror into the live config AND the live pool, so the ban takes effect on the
+  // next step rather than the next session.
+  if (ctx.governance && result.added) {
+    ctx.governance.forbidden = {
+      ...ctx.governance.forbidden,
+      mcpTools: [...(ctx.governance.forbidden.mcpTools ?? []), result.pattern],
+    };
+    ctx.mcp?.setForbidden(ctx.governance.forbidden.mcpTools ?? []);
+  }
+  return {
+    output: result.added
+      ? `Forbidden the MCP tool '${result.pattern}'. It's no longer available to me unless you lift it.`
+      : `'${result.pattern}' was already forbidden.`,
+    summary: result.added ? `forbade '${result.pattern}'` : `'${result.pattern}' already forbidden`,
+  };
+}
+
+const ACTIONS = {
+  remember_rule: doRememberRule,
+  forbid_path: doForbidPath,
+  forbid_command: doForbidCommand,
+  forbid_mcp_tool: doForbidMcpTool,
+} as const;
+
+export type GovernorAction = keyof typeof ACTIONS;
+
+export const governor: Tool = {
+  name: "governor",
+  deferred: true,
   readOnly: false,
-  // A rule costs prompt space on EVERY turn for the life of the project, and that
-  // was nowhere in the text — so the thing the model most needs to weigh was absent.
+  // Each action keeps the ONE warning that changes what the model does, and loses the
+  // rest. The dropped prose explained things the tool already reports in its own reply
+  // (that a duplicate is harmless, that a refusal can be lifted), which is a worse
+  // place to learn it than the reply itself and was being paid for every turn.
   description:
-    "Save a standing rule for THIS project: a directive to follow here, such as 'use " +
-    "pnpm, never npm'. It persists across sessions. Use it when the user says to make " +
-    "something a rule, or clearly states a durable preference about how work is done " +
-    "here — not for a one-off instruction that applies to the task in hand.\n" +
-    "An always-on rule is injected into your context every single turn from now on, so " +
-    "prefer few, sharp rules over many. If it only matters for certain files, pass " +
-    "`globs` ('src/api/**') and it will be injected only when the work touches them.\n" +
-    "Write it as a standing instruction, not a note about now: 'Use pnpm, never npm', " +
-    "not 'the user said to use pnpm'. Re-saving under a name that reduces to the same " +
-    "slug REPLACES the earlier rule, so reuse the name to revise one and choose a " +
-    "clearly different name for a new one.",
+    "Record a standing decision for THIS project. Persists across sessions and takes " +
+    "effect immediately. Pass `action` and `value`:\n" +
+    "- remember_rule — a durable directive to follow here ('Use pnpm, never npm'). " +
+    "Injected into your context EVERY turn from now on, so prefer few sharp rules; " +
+    "pass `globs` to scope one to matching files instead. Write it as a standing " +
+    "instruction, not a note about now. Reusing a `name` replaces that rule.\n" +
+    "- forbid_path — a file/folder/glob that must never be MODIFIED ('src/legacy/**'). " +
+    "It can still be read and searched; this protects against changes, not against " +
+    "looking.\n" +
+    "- forbid_command — a command that must never be RUN ('git push --force'). Matched " +
+    "as a case-insensitive substring, so a short pattern catches far more than it " +
+    "looks like: forbid the specific command the user meant, not a word from it.\n" +
+    "- forbid_mcp_tool — one MCP tool, by its FULL 'mcp__server__tool' name; a bare " +
+    "name is rejected rather than silently matching nothing.\n" +
+    "Use it when the user states a durable preference or says not to touch/run " +
+    "something — not for a one-off instruction about the task in hand.",
   parameters: {
     type: "object",
     additionalProperties: false,
-    required: ["rule"],
+    required: ["action", "value"],
     properties: {
-      rule: {
+      action: {
         type: "string",
-        description: "The rule, imperative and self-contained (e.g. 'Use pnpm, never npm').",
+        enum: ["remember_rule", "forbid_path", "forbid_command", "forbid_mcp_tool"],
+        description: "What to record.",
+      },
+      value: {
+        type: "string",
+        description:
+          "The rule text, path glob, command fragment, or full MCP tool name — whichever the action takes.",
       },
       name: {
         type: "string",
-        description: "Optional short name for the rule; one is derived from the text if omitted.",
+        description: "remember_rule only: short name for the rule; derived from the text if omitted.",
       },
       globs: {
         type: "string",
         description:
-          "Optional comma-separated path globs that scope the rule to matching files " +
-          "(e.g. 'src/api/**, src/routes/**'). Omit for an always-on rule.",
+          "remember_rule only: comma-separated path globs that scope the rule to matching files " +
+          "(e.g. 'src/api/**'). Omit for an always-on rule.",
       },
     },
   },
 
   async execute(args, ctx): Promise<ToolResult> {
-    const body = typeof args.rule === "string" ? args.rule.trim() : "";
-    if (!body) return fail("`rule` is required.");
-    const name = (typeof args.name === "string" && args.name.trim()) || deriveRuleName(body);
-    const globs = parseGlobs(typeof args.globs === "string" ? args.globs : undefined);
-
-    const saved = await writeRule(projectRoot(ctx), name, body, "", globs);
-    // Mirror into the live session so the rule is in the very next prompt.
-    //
-    // Deduplicate by SLUG, not by the display name. The rule FILE is `<slug>.md`, so
-    // "Use pnpm" and "use pnpm!" are one rule on disk and were two in memory: the
-    // session showed both, the next session showed one, and the user watched a rule
-    // they had just set disappear on restart. Matching how the file is keyed is what
-    // keeps the live list and the disk agreeing.
-    if (ctx.governance) {
-      const slug = slugify(saved.name);
-      ctx.governance.rules = [
-        ...ctx.governance.rules.filter((r) => slugify(r.name) !== slug),
-        saved,
-      ];
+    const action = typeof args.action === "string" ? args.action.trim() : "";
+    const handler = ACTIONS[action as GovernorAction];
+    // Naming the valid set beats a bare "invalid action": the model corrects in one
+    // step instead of guessing at the spelling.
+    if (!handler) {
+      return fail(`\`action\` must be one of: ${Object.keys(ACTIONS).join(", ")}.`);
     }
-    const scope = globs.length > 0 ? ` (scoped to ${globs.join(", ")})` : "";
-    return {
-      output: `Saved rule '${saved.name}'${scope}. It now applies to this project (this session and future ones).`,
-      summary: `saved rule '${saved.name}'`,
-    };
-  },
-};
-
-export const forbidPath: Tool = {
-  name: "forbid_path",
-  readOnly: false,
-  // Sharpened on the one distinction that decides whether the model reaches for this
-  // tool or the wrong one: forbidding is about WRITING, not about seeing.
-  description:
-    "Forbid a path in THIS project: a file, folder or glob, relative to the project " +
-    "root, that must never be MODIFIED or used as the target of a command. Enforced by " +
-    "the tools themselves and persists across sessions. Use it when the user says not " +
-    "to touch something — 'src/legacy/**', 'config/prod.json'.\n" +
-    "This protects against changes, not against reading: a forbidden path can still be " +
-    "read and searched, which is deliberate, because understanding code you must not " +
-    "edit is normal and often the point. Secrets are a separate matter and are already " +
-    "refused everywhere without any rule being set.\n" +
-    "Adding the same pattern twice is harmless and says so. A forbidden path is not a " +
-    "dead end when the task genuinely needs it: the attempt asks the user, who can lift " +
-    "it for the session.",
-  parameters: {
-    type: "object",
-    additionalProperties: false,
-    required: ["pattern"],
-    properties: {
-      pattern: {
-        type: "string",
-        description: "Path glob relative to the project root (e.g. 'src/legacy/**' or 'deploy.sh').",
-      },
-    },
-  },
-
-  async execute(args, ctx): Promise<ToolResult> {
-    const pattern = typeof args.pattern === "string" ? args.pattern.trim() : "";
-    if (!pattern) return fail("`pattern` is required.");
-
-    const result = await appendForbidden(projectRoot(ctx), pattern);
-    if (!result.pattern) return fail("the pattern is empty after normalization.");
-
-    // Mirror into the live forbidden config (new array → matcher recompiles).
-    if (ctx.governance && result.added) {
-      ctx.governance.forbidden = {
-        ...ctx.governance.forbidden,
-        patterns: [...ctx.governance.forbidden.patterns, result.pattern],
-      };
-    }
-    return {
-      output: result.added
-        ? `Forbidden '${result.pattern}'. I won't modify it or run commands against it.`
-        : `'${result.pattern}' was already forbidden.`,
-      summary: result.added ? `forbade '${result.pattern}'` : `'${result.pattern}' already forbidden`,
-    };
-  },
-};
-
-export const forbidCommand: Tool = {
-  name: "forbid_command",
-  readOnly: false,
-  // The matcher is a plain substring, which cuts both ways, and only one of those
-  // ways was stated. Over-broad patterns are the failure mode here.
-  description:
-    "Forbid a command in THIS project: a command or fragment that must NEVER be run, " +
-    "such as 'tauri dev', 'git push', 'npm run deploy'. run_command then refuses any " +
-    "command containing it, and it persists across sessions. Use it when the user says " +
-    "never to run something, or to stop you reopening or redeploying their app.\n" +
-    "The match is a case-insensitive substring, with runs of whitespace treated as one " +
-    "space, so 'git  push' still matches 'git push'. Being a substring, a short pattern " +
-    "catches far more than it looks like: 'push' would block 'git push', but also " +
-    "'npm run push-check' and any command with that word anywhere in it. Forbid the " +
-    "specific command the user meant, not a word from it.",
-  parameters: {
-    type: "object",
-    additionalProperties: false,
-    required: ["pattern"],
-    properties: {
-      pattern: {
-        type: "string",
-        description: "The command or fragment to forbid (e.g. 'tauri dev', 'git push --force').",
-      },
-    },
-  },
-
-  async execute(args, ctx): Promise<ToolResult> {
-    const pattern = typeof args.pattern === "string" ? args.pattern.trim() : "";
-    if (!pattern) return fail("`pattern` is required.");
-
-    const result = await appendForbiddenCommand(projectRoot(ctx), pattern);
-    if (!result.pattern) return fail("the pattern is empty after normalization.");
-
-    // Mirror into the live forbidden config (new array → enforced this turn on).
-    if (ctx.governance && result.added) {
-      ctx.governance.forbidden = {
-        ...ctx.governance.forbidden,
-        commands: [...(ctx.governance.forbidden.commands ?? []), result.pattern],
-      };
-    }
-    return {
-      output: result.added
-        ? `Forbidden the command '${result.pattern}'. I won't run it (or anything containing it) unless you lift it.`
-        : `'${result.pattern}' was already forbidden.`,
-      summary: result.added ? `forbade command '${result.pattern}'` : `'${result.pattern}' already forbidden`,
-    };
-  },
-};
-
-export const forbidMcpTool: Tool = {
-  name: "forbid_mcp_tool",
-  readOnly: false,
-  description:
-    "Forbid one MCP tool in THIS project by its full name, e.g. " +
-    "'mcp__github__delete_repo'. It stops being offered and stops being callable, from " +
-    "the next step onward rather than the next session, and stays that way across " +
-    "sessions — without disabling the rest of that server. Use it when the user says " +
-    "one specific external action is off-limits.\n" +
-    "It must be the full `mcp__server__tool` name exactly as it appears in your tool " +
-    "list; a bare tool name is rejected rather than written down, because a name that " +
-    "matches nothing would look like a ban that quietly did nothing. A forbidden tool " +
-    "also disappears from find_mcp_tools, so searching will not bring it back.",
-  parameters: {
-    type: "object",
-    additionalProperties: false,
-    required: ["name"],
-    properties: {
-      name: {
-        type: "string",
-        description: "The full MCP tool name, as it appears in your tool list (mcp__server__tool).",
-      },
-    },
-  },
-
-  async execute(args, ctx): Promise<ToolResult> {
-    const name = typeof args.name === "string" ? args.name.trim() : "";
-    if (!name) return fail("`name` is required.");
-    // Guarding the shape matters: a bare tool name would be written to disk, never
-    // match anything, and look like the ban silently failed.
-    if (!isMcpToolName(name)) {
-      return fail(`'${name}' is not an MCP tool name. Use the full name from your tool list, e.g. 'mcp__github__create_issue'.`);
-    }
-
-    const result = await appendForbiddenMcpTool(projectRoot(ctx), name);
-    if (!result.pattern) return fail("the name is empty after normalization.");
-
-    // Mirror into the live config AND the live pool, so the ban takes effect on the
-    // next step rather than the next session.
-    if (ctx.governance && result.added) {
-      ctx.governance.forbidden = {
-        ...ctx.governance.forbidden,
-        mcpTools: [...(ctx.governance.forbidden.mcpTools ?? []), result.pattern],
-      };
-      ctx.mcp?.setForbidden(ctx.governance.forbidden.mcpTools ?? []);
-    }
-    return {
-      output: result.added
-        ? `Forbidden the MCP tool '${result.pattern}'. It's no longer available to me unless you lift it.`
-        : `'${result.pattern}' was already forbidden.`,
-      summary: result.added ? `forbade '${result.pattern}'` : `'${result.pattern}' already forbidden`,
-    };
+    return handler(args, ctx);
   },
 };
 
 export const createSkill: Tool = {
   name: "create_skill",
+  deferred: true,
   readOnly: false,
   // Two things the model could not have known: the name is normalised (so the
   // invocation it announces may not be the name it passed), and creating over an

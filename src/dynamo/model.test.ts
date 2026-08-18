@@ -19,9 +19,9 @@ process.env.HOME = FAKE_HOME;
 
 const {
   DEFAULT_MODEL_CONFIG,
-  MODELS,
+  models,
   loadModelConfig,
-  modelsOf,
+  modelsOfProvider,
   providerOf,
   saveModelConfig,
   thinkLabel,
@@ -50,24 +50,24 @@ test("a keyless provider falls back to one that has a key", () => {
 test("with no keys at all there is no fallback — the prompt is the right answer", () => {
   // Genuine first run: falling back to another keyless provider would just move the
   // problem, so the setup gate should stay.
-  assert.equal(usableFallback(MODELS[0]!.id, () => false), null);
+  assert.equal(usableFallback(models()[0]!.id, () => false), null);
 });
 
 // ── provider scoping (what /provider and /model each list) ────────────────────
 test("every model is offered by its own provider's list", () => {
   // If this breaks, /model stops showing the model you are currently on.
-  for (const m of MODELS) {
+  for (const m of models()) {
     assert.ok(
-      modelsOf(m.id).some((c) => c.id === m.id),
+      modelsOfProvider(m.id).some((c) => c.id === m.id),
       `${m.id} is missing from its own provider's model list`,
     );
   }
 });
 
 test("a provider's list contains only that provider's models", () => {
-  for (const m of MODELS) {
+  for (const m of models()) {
     const owner = providerOf(m.id).id;
-    for (const sibling of modelsOf(m.id)) {
+    for (const sibling of modelsOfProvider(m.id)) {
       assert.equal(providerOf(sibling.id).id, owner, `${sibling.id} leaked into ${owner}'s list`);
     }
   }
@@ -103,23 +103,28 @@ test("switching provider clamps reasoning to what the new one accepts", () => {
   }
 });
 
-test("Flash offers 2 reasoning levels, Pro offers 3", () => {
-  assert.equal(thinkLevels("deepseek-v4-flash").length, 2);
+test("both DeepSeek models offer the same 3 reasoning levels", () => {
+  // Flash used to be given 2. That was an assumption, not a documented limit.
+  assert.equal(thinkLevels("deepseek-v4-flash").length, 3);
   assert.equal(thinkLevels("deepseek-v4-pro").length, 3);
 });
 
 test("thinkLabel reflects the config", () => {
   assert.equal(thinkLabel({ model: "deepseek-v4-flash", thinking: false, effort: "high" }), "Standard");
-  assert.equal(thinkLabel({ model: "deepseek-v4-flash", thinking: true, effort: "high" }), "Reasoning");
+  assert.equal(thinkLabel({ model: "deepseek-v4-flash", thinking: true, effort: "high" }), "High");
+  assert.equal(thinkLabel({ model: "deepseek-v4-flash", thinking: true, effort: "max" }), "Maximum");
   assert.equal(thinkLabel({ model: "deepseek-v4-pro", thinking: true, effort: "max" }), "Maximum");
 });
 
-test("withModel clamps Pro-Maximum down to Flash-high (Flash has no maximum tier)", () => {
+test("withModel carries Maximum across Pro → Flash, because Flash has that tier too", () => {
+  // Was the reverse: Flash was assumed to have no maximum tier, so this switch
+  // silently demoted the user's reasoning choice. DeepSeek documents low/high/max
+  // for V4 Flash as well — see the deepseek manifest's thinkLevels.
   const proMax = { model: "deepseek-v4-pro", thinking: true, effort: "max" } as const;
   const onFlash = withModel(proMax, "deepseek-v4-flash");
   assert.equal(onFlash.model, "deepseek-v4-flash");
   assert.equal(onFlash.thinking, true);
-  assert.equal(onFlash.effort, "high"); // clamped
+  assert.equal(onFlash.effort, "max"); // preserved, not clamped
 });
 
 test("save → load roundtrips the config; missing file falls back to default", async () => {

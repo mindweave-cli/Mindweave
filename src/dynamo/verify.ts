@@ -11,12 +11,7 @@
 
 /** True if a tool call changed files on disk (an edit or a write). */
 export function isFileMutation(toolName: string): boolean {
-  return (
-    toolName === "edit_file" ||
-    toolName === "write_file" ||
-    toolName === "multi_edit" ||
-    toolName === "replace_symbol_body"
-  );
+  return toolName === "edit" || toolName === "write_file" || toolName === "replace_symbol_body";
 }
 
 /** File extensions whose content has no runtime surface — prose/docs, not code or
@@ -133,7 +128,7 @@ export function reScopeCheck(
 /**
  * Background-poll guard (pure). A background shell's completion is pushed to the
  * model automatically (see backgroundEventNotes), so re-reading a still-running
- * shell with shell_output/list_shells accomplishes nothing — it just spends a step
+ * shell with the `shells` tool accomplishes nothing — it just spends a step
  * and narrates "still running" to the user, the exact spam a wait-loop produces.
  * This detects a step whose ONLY work was polling background shells that are still
  * running. A step that does any real work alongside (an edit, a file read, a real
@@ -143,11 +138,11 @@ export function isBackgroundPollStep(
   stepResults: readonly { name: string; summary?: string }[],
 ): boolean {
   if (stepResults.length === 0) return false;
-  const isStatusRead = (name: string) => name === "shell_output" || name === "list_shells";
+  const isStatusRead = (name: string) => name === "shells";
   if (!stepResults.every((r) => isStatusRead(r.name))) return false;
   // At least one polled shell must still be RUNNING — a poll that finds the shell
   // already finished is legitimate (the model reads the result and reports it).
-  // shell_output summary reads "shell #1 (running)"; list_shells reads "N running,
+  // A read summary is "shell #1 (running)"; a listing is "N running,
   // M total" (N≥1 only when something is actually running — avoids "0 running").
   return stepResults.some((r) => /\(running\)|[1-9]\d* running/i.test(r.summary ?? ""));
 }
@@ -293,15 +288,24 @@ export function repeatFailureNudge(opts: {
 export const SAME_FILE_EDIT_LIMIT = 2;
 
 /**
- * Count `edit_file` calls per file in a step (pure).
+ * Count ONE-AT-A-TIME edits per file in a step (pure).
  *
- * Only `edit_file` counts. A `multi_edit` is the batched form already, and `write_file`
- * is a different decision entirely.
+ * Only single-edit calls count. An `edit` call carrying several edits IS the batched
+ * form this nudge is asking for, so counting it would scold the model for doing the
+ * right thing. `write_file` is a different decision entirely and never counts.
+ *
+ * This used to key on the tool NAME, back when `edit_file` and `multi_edit` were
+ * separate tools and the name alone told you which shape had been used. With one
+ * merged tool the shape is in the arguments, so that is where it is read from.
  */
 export function sameFileEditCounts(results: readonly { name: string; args?: Record<string, unknown> }[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const r of results) {
-    if (r.name !== "edit_file") continue;
+    if (r.name !== "edit") continue;
+    const edits = r.args?.edits;
+    // Anything other than exactly one edit is either already batched or malformed;
+    // neither is the pattern being discouraged.
+    if (!Array.isArray(edits) || edits.length !== 1) continue;
     const path = typeof r.args?.path === "string" ? r.args.path.trim() : "";
     if (!path) continue;
     counts.set(path, (counts.get(path) ?? 0) + 1);
@@ -314,7 +318,7 @@ export function sameFileEditCounts(results: readonly { name: string; args?: Reco
  *
  * Why this is mechanical rather than a line in a tool description: measured against a
  * real model, the same task with the same descriptions routed correctly on one run and
- * made three separate `edit_file` calls to one file on another. Prose can bias a choice;
+ * made three separate one-edit calls to one file on another. Prose can bias a choice;
  * it cannot make it hold. Anything that must be true for EVERY provider has to be
  * enforced by the harness, which is the same reasoning behind the verify gate and the
  * repeat-failure breaker.
@@ -330,10 +334,10 @@ export function overusedSingleEdits(
 /** The one-shot nudge injected when a turn keeps editing one file a change at a time. */
 export function batchEditNudge(path: string, count: number): string {
   return (
-    `You've made ${count} separate edit_file calls to ${path} in this turn. When one file needs several ` +
-    `changes, put them in a single multi_edit call for that file instead: they apply in order, each sees the ` +
-    `result of the last, and if any fails to match the file is left untouched rather than half-edited. ` +
-    `Keep it to one call per file — don't try to cover several files in one call. ` +
+    `You've made ${count} separate one-edit calls to ${path} in this turn. When one file needs several ` +
+    `changes, put them in the SAME edit call as several entries in \`edits\` instead: they apply in order, ` +
+    `each sees the result of the last, and if any fails to match the file is left untouched rather than ` +
+    `half-edited. Keep it to one call per file — don't try to cover several files in one call. ` +
     `(This reminder fires once per turn.)`
   );
 }
@@ -418,5 +422,125 @@ export function narrationNudge(fault: { kind: "length" | "restating"; sentences:
     `That was ${fault.sentences} sentences between tool calls, where the budget is ${NARRATION_SENTENCES}. ` +
     `The user can see every call you make, so say only what you learned and what you are doing next. ` +
     `Spend more only when they would act differently for knowing. (This reminder fires once per turn.)`
+  );
+}
+
+/**
+ * Levenshtein distance — the edit cost between two tool names. Small and iterative
+ * (two rolling rows) because it runs over the whole registry on a rare path.
+ */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      row[j] = Math.min(row[j - 1]! + 1, prev[j]! + 1, prev[j - 1]! + cost);
+    }
+    prev = row;
+  }
+  return prev[b.length]!;
+}
+
+/**
+ * The registered tools closest to a name the model invented.
+ *
+ * A model occasionally calls a tool that does not exist (seen live: `index_results`).
+ * The bare "unknown tool" error tells it nothing it can act on, so it either gives up
+ * or guesses again. Naming the near misses turns the dead end into a correction it can
+ * make on the next step.
+ *
+ * Returns nothing when nothing is genuinely close. A suggestion has to be plausibly
+ * what was meant — past roughly a third of the name's length the "nearest" match is
+ * just whichever registered name happens to be shortest, and pointing at that is worse
+ * than pointing at nothing.
+ */
+export function nearestTools(name: string, known: readonly string[], max = 2): string[] {
+  return known
+    .map((k) => ({ k, d: editDistance(name, k) }))
+    .filter(({ k, d }) => d <= Math.max(2, Math.floor(Math.max(name.length, k.length) / 3)))
+    .sort((a, b) => a.d - b.d || a.k.localeCompare(b.k))
+    .slice(0, max)
+    .map((s) => s.k);
+}
+
+/** The error handed back for a tool that does not exist, with a way forward. */
+export function unknownToolError(name: string, known: readonly string[]): string {
+  const near = nearestTools(name, known);
+  const hint = near.length > 0
+    ? `Did you mean ${near.map((n) => `'${n}'`).join(" or ")}?`
+    : `Call find_tools to see what is available.`;
+  return `Error: unknown tool '${name}'. Mindweave has no tool by that name. ${hint}`;
+}
+
+/**
+ * Lines of plain prose a reply that REPORTS FINISHED WORK may spend.
+ *
+ * The same budget REPLY_STYLE states in the prompt. It is repeated here because this
+ * is the copy that holds: the prompt has asked for it in three different wordings and
+ * the model still answers a two-word confirmation with a page.
+ */
+export const REPLY_LINES = 4;
+
+export interface ReplyFault {
+  kind: "length" | "shape";
+  lines: number;
+  /** What specifically blew the budget, named for the rewrite instruction. */
+  detail: string;
+}
+
+/**
+ * Whether the reply ending this turn is over budget.
+ *
+ * Only WORK turns are gated. A turn that answered a question, explained something, or
+ * changed nothing is exactly where a long answer is the right answer, and cutting
+ * those would trade one bad habit for a worse one. After work, though, the user has
+ * watched every tool call and can read the diff, so a recap is the model narrating
+ * something already on screen.
+ *
+ * Fenced code is not counted — a snippet or a diff in the reply is content, never
+ * padding. Headings and a second question are refused at any length: a four-line
+ * answer that needs a heading is not a four-line answer.
+ */
+export function replyFault(text: string, didWork: boolean): ReplyFault | null {
+
+  if (!didWork) return null;
+  const prose = text.trim();
+  if (!prose) return null;
+
+  const withoutFences = prose.replace(/```[\s\S]*?```/g, "");
+  const lines = withoutFences.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  const headings = lines.filter((l) => /^#{1,6}\s/.test(l)).length;
+  const labels = lines.filter((l) => /^\*\*[^*]+\*\*:?$/.test(l)).length;
+  const questions = (withoutFences.match(/\?/g) ?? []).length;
+
+  const shape: string[] = [];
+  if (headings > 0) shape.push(`${headings} heading${headings === 1 ? "" : "s"}`);
+  if (labels > 0) shape.push(`${labels} bold section label${labels === 1 ? "" : "s"}`);
+  if (questions > 1) shape.push(`${questions} questions`);
+  if (shape.length > 0) return { kind: "shape", lines: lines.length, detail: shape.join(" and ") };
+
+  if (lines.length > REPLY_LINES) return { kind: "length", lines: lines.length, detail: `${lines.length} lines` };
+  return null;
+}
+
+/**
+ * The instruction that replaces an over-budget reply.
+ *
+ * Addressed to the model as a rewrite of text it can still see, so nothing it worked
+ * out is lost — only the scaffolding around it. Deliberately names the fault, because
+ * "be shorter" produces a shorter version of the same shape.
+ */
+export function replyRewrite(fault: ReplyFault): string {
+  const cause =
+    fault.kind === "shape"
+      ? `That reply used ${fault.detail}, to report work the user watched you do.`
+      : `That reply ran to ${fault.detail}, where the budget after doing work is ${REPLY_LINES}.`;
+  return (
+    `${cause} Write it again in ${REPLY_LINES} lines or fewer of plain prose: no headings, no bold ` +
+    `section labels, at most one question, and no recap of the changes — the user saw every call and ` +
+    `can read the diff. Keep any fact they could not have seen. Reply with the rewrite only, nothing else.`
   );
 }

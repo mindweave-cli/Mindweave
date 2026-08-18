@@ -57,8 +57,10 @@ Read-only:
 Mutating:
 
 - `write_file` (`writeFile.ts`) — create a file, or overwrite one already read.
-- `edit_file` (`editFile.ts`) — exact `old_string`→`new_string` replace, gated
-  by read-before-edit, must-exist, and unique-match.
+- `edit` (`edit.ts`) — `old_string`→`new_string` replacements in one file, one or
+  many per call, gated by read-before-edit, must-exist, and unique-match. Was two
+  tools (`edit_file`/`multi_edit`) until the shape the model had to choose between
+  turned out to be the only difference between them.
 - `run_command` (`runCommand.ts`) — run a shell command (PowerShell on Windows,
   POSIX `sh` elsewhere). cwd persists across calls; whole process tree is killed
   on timeout (2 min default, 10 min max).

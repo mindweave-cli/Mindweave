@@ -40,28 +40,29 @@ export const MODELS: ModelChoice[] = [
 const ACCEPTED_EFFORTS = new Set<Effort>(["low", "high", "max"]);
 
 /**
- * The reasoning levels offered by `/think`, which depend on the chosen model.
- * DeepSeek V4 exposes thinking as a toggle on the same model id plus a
- * `reasoning_effort` budget, so the whole space is:
+ * The reasoning levels offered by `/think`. DeepSeek V4 exposes thinking as a toggle
+ * on the same model id plus a `reasoning_effort` budget, so the whole space is:
  *
- *   Flash → Standard (no thinking) · Reasoning (thinking, high effort)
- *   Pro   → Standard · High (thinking, high) · Maximum (thinking, max effort)
+ *   Standard (no thinking) · High (thinking, high) · Maximum (thinking, max)
  *
  * Pro's Maximum sends `max`. It previously sent `xhigh`, which DeepSeek does not
  * accept, so that level had never done anything — the rung had leaked in from the
  * shared type when a second provider was added.
+ *
+ * FLASH HAS A MAXIMUM TIER TOO, and used to be denied one here. The fix that removed
+ * `xhigh` also scoped Maximum to Pro, on the assumption that the cheaper model had a
+ * shorter ladder. It does not: DeepSeek documents `reasoning_effort` as low/high/max
+ * for V4 Flash as well, unscoped by model. Withholding it meant the DEFAULT model —
+ * the one most sessions run — silently could not reach its top reasoning setting.
+ *
+ * The ladder is identical for both, so it is built once. What differs between Flash
+ * and Pro is the size of the model underneath, not the settings it accepts.
  */
-export function thinkLevels(model: ModelId): ThinkLevel[] {
-  if (model === PRO) {
-    return [
-      { label: "Standard", description: "answer directly", thinking: false, effort: "high" },
-      { label: "High", description: "deeper step-by-step reasoning", thinking: true, effort: "high" },
-      { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
-    ];
-  }
+export function thinkLevels(_model: ModelId): ThinkLevel[] {
   return [
     { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" },
-    { label: "Reasoning", description: "think first, then answer", thinking: true, effort: "high" },
+    { label: "High", description: "think first, then answer", thinking: true, effort: "high" },
+    { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
   ];
 }
 
@@ -120,9 +121,12 @@ export function contextWindow(model: ModelId): number {
 
 /**
  * Coerce a stored or unknown config onto a model this driver actually serves, and
- * keep the reasoning intent valid. DeepSeek accepts three of the five shared
- * effort rungs (`low`, `high`, `max`), so anything else clamps to `high`; and only
- * Pro has a maximum tier, so a Maximum choice steps down when moving to Flash.
+ * keep the reasoning intent valid. DeepSeek accepts three of the five shared effort
+ * rungs (`low`, `high`, `max`), so anything else clamps to `high`.
+ *
+ * No model-scoped step-down any more: both models take the same three rungs, so
+ * switching between them preserves the user's reasoning choice instead of quietly
+ * demoting it. See thinkLevels for why the old Pro-only Maximum was wrong.
  */
 // No `acceptsImages` here, and that is the current fact rather than an omission:
 // neither model DeepSeek documents takes image input, so an attached image is named
@@ -133,10 +137,9 @@ export function normalize(config: ModelConfig): ModelConfig {
   const model: ModelId = config.model === PRO ? PRO : FLASH;
   const thinking = config.thinking === true;
   // Anything outside DeepSeek's accepted set becomes `high`. That covers a config
-  // saved by an older build (which stored `xhigh`), a rung belonging to another
-  // provider, and `max` on Flash, which offers no maximum tier.
-  let effort: Effort = ACCEPTED_EFFORTS.has(config.effort) ? config.effort : "high";
-  if (effort === "max" && model !== PRO) effort = "high";
+  // saved by an older build (which stored `xhigh`) and a rung belonging to another
+  // provider. `max` is accepted on BOTH models and is no longer stepped down.
+  const effort: Effort = ACCEPTED_EFFORTS.has(config.effort) ? config.effort : "high";
   return { model, thinking, effort };
 }
 

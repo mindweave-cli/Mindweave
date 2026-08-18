@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { allModels } from "../drivers/registry.js";
 
 const SRC = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -32,9 +33,51 @@ const SRC = join(fileURLToPath(new URL(".", import.meta.url)), "..");
  * (`deepseek-v4-flash`, `claude-sonnet-5`, `gpt-4o`), and requiring one is what
  * keeps this from firing on a product name like "Claude Code" — which core is
  * allowed to mention, because the agent-data guard names other tools on purpose.
+ *
+ * This list is a SAFETY NET, not the authority. It has to stay hand-written to
+ * cover ids for providers that are not installed (a half-finished driver, a model
+ * name pasted into a comment), but a hand-written list is exactly what rots: three
+ * providers were once added without extending it, and the guard went on reporting
+ * green while covering half the lineup. The authority is `allModels()` below, and
+ * the coverage test keeps the two honest.
  */
-const MODEL_ID =
-  /\b(deepseek-[a-z0-9.-]*\d[a-z0-9.-]*|claude-[a-z0-9.-]*\d[a-z0-9.-]*|gpt-\d[a-z0-9.-]*|gemini-[a-z0-9.-]*\d[a-z0-9.-]*)\b/i;
+const VENDOR_PREFIXES = [
+  "deepseek-",
+  "claude-",
+  "gemini-",
+  "qwen",
+  "kimi-",
+  "glm-",
+  "moonshot-v",
+  "grok-",
+  "mistral-",
+  "ministral-",
+  "llama-",
+  "gpt-oss-",
+  "gpt-",
+];
+
+const MODEL_ID = new RegExp(`\\b(${VENDOR_PREFIXES.join("|")})[a-z0-9./-]*\\d[a-z0-9./-]*\\b`, "i");
+
+/**
+ * Every model id an installed provider actually serves.
+ *
+ * Read from the registry rather than transcribed, so adding a provider extends
+ * this guard automatically instead of silently narrowing it. Sorted longest-first
+ * so a report names the most specific id that matched rather than a prefix of it.
+ */
+const REGISTERED_IDS: string[] = allModels()
+  .map((m) => m.id)
+  .sort((a, b) => b.length - a.length);
+
+/** Whether a line names a model id, by either route. Returns the id when it does. */
+function namesModel(line: string): string | null {
+  const lower = line.toLowerCase();
+  for (const id of REGISTERED_IDS) {
+    if (lower.includes(id.toLowerCase())) return id;
+  }
+  return line.match(MODEL_ID)?.[0] ?? null;
+}
 
 /** Directories under src/ that MAY name models. */
 const ALLOWED = ["drivers"];
@@ -69,6 +112,33 @@ test("the detector actually catches the strings that shipped broken", () => {
   // deliberately, so matching them here would be a false positive.
   assert.ok(!MODEL_ID.test("* This is the Claude-Code split: the model sees the bytes"));
   assert.ok(!MODEL_ID.test('{ test: /(^|\\/)\\.claude(\\/|$)/i, what: "Claude Code" },'));
+  // A provider's BRAND name carries no version digit and must not trip the guard,
+  // or a comment explaining the driver seam would become an offender.
+  for (const brand of ["Qwen", "Kimi", "GLM", "DeepSeek", "OpenAI", "Anthropic"]) {
+    assert.ok(!MODEL_ID.test(`// the ${brand} driver owns this`), `${brand} is a brand, not an id`);
+  }
+});
+
+test("the detector covers every model every INSTALLED provider serves", () => {
+  // The meta-guard, and the one that would have caught the real regression: three
+  // providers were added and the hand-written pattern was not extended, so ids like
+  // `qwen3.7-plus` sailed past a guard that still reported green. Adding a provider
+  // now fails HERE until it is genuinely covered.
+  const missed = allModels()
+    .map((m) => m.id)
+    .filter((id) => namesModel(`const model = "${id}";`) === null);
+  assert.deepEqual(missed, [], `these model ids would leak into core undetected:\n${missed.join("\n")}`);
+});
+
+test("the shape pattern alone covers every installed provider, not just the id list", () => {
+  // `REGISTERED_IDS` catches exact ids; the shape pattern is what catches a
+  // NEIGHBOURING id of the same provider — a model we do not offer, a dated
+  // snapshot, a typo'd variant. Both routes have to work, or dropping a model from
+  // a manifest would quietly reopen the hole for that whole family.
+  const missed = allModels()
+    .map((m) => m.id)
+    .filter((id) => !MODEL_ID.test(id));
+  assert.deepEqual(missed, [], `the shape pattern does not recognise:\n${missed.join("\n")}`);
 });
 
 test("no core source file names a concrete model id", () => {
@@ -79,8 +149,7 @@ test("no core source file names a concrete model id", () => {
     if (rel.includes(".test.")) continue;
     const text = readFileSync(path, "utf8");
     text.split(/\r?\n/).forEach((line, i) => {
-      const m = line.match(MODEL_ID);
-      if (m) offenders.push(`${rel}:${i + 1}  ${line.trim().slice(0, 100)}`);
+      if (namesModel(line)) offenders.push(`${rel}:${i + 1}  ${line.trim().slice(0, 100)}`);
     });
   }
   assert.deepEqual(

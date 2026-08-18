@@ -15,7 +15,7 @@
 import type { Tool, ToolResult } from "./types.js";
 import { APPROVAL_DISMISSED } from "./approval.js";
 
-export const askUserTool: Tool = {
+const askUserDef: Tool = {
   name: "ask_user",
   readOnly: true,
   // The old text promised "the user's choice is returned to you" with no account of the
@@ -92,6 +92,25 @@ export const askUserTool: Tool = {
       output: `The user chose: ${choice}`,
       summary: `asked: ${clip(question)} → ${clip(choice)}`,
     };
+  },
+};
+
+/**
+ * Never renders a row.
+ *
+ * The user has just been shown the question in the approval box and answered it — a
+ * row afterwards restating "asked: which database? → SQLite" tells them something they
+ * did a second ago. The model still gets the full result, which is the half that
+ * matters: it needs the answer, the user does not need the receipt.
+ *
+ * Wrapped at the export rather than flagged at each `return`, so a new return site
+ * cannot start rendering again by omission — the same shape `navigational()` uses for
+ * the code-intel lookups.
+ */
+export const askUserTool: Tool = {
+  ...askUserDef,
+  async execute(args, ctx) {
+    return { ...(await askUserDef.execute(args, ctx)), quiet: true };
   },
 };
 

@@ -21,6 +21,7 @@
  */
 import { sanitizeStreamText } from "../drivers/registry.js";
 import type { ToolKind } from "./toolDisplay.js";
+import type { CompactionReport } from "./compaction.js";
 
 export type ToolStatus = "running" | "ok" | "error";
 
@@ -36,6 +37,18 @@ export interface ToolGroupItem {
   note?: string;
 }
 
+/** One delegated worker inside a subagent block. */
+export interface AgentEntry {
+  agentId: string;
+  task: string;
+  readOnly: boolean;
+  status: ToolStatus;
+  /** The closing line once done ("3 steps · read-only"), red on failure. */
+  summary?: string;
+  /** Its own tool calls, streamed live as compact rail items. */
+  items: ToolGroupItem[];
+}
+
 export type Block =
   | { kind: "user"; id: number; done: boolean; text: string }
   | { kind: "assistant"; id: number; done: boolean; text: string }
@@ -48,6 +61,8 @@ export type Block =
       name: string;
       /** The telling argument (a filename, a search pattern, a command). */
       arg?: string;
+      /** A dim qualifier after the name, e.g. a non-default command timeout. */
+      meta?: string;
       /** Action category, for the row's dot colour. */
       action?: ToolKind;
       status: ToolStatus;
@@ -55,31 +70,38 @@ export type Block =
       summary?: string;
       /** Rich block under the row — an edit diff, file preview, or output. */
       detail?: string;
+      /** Whether `detail` is a genuine +/- diff (colour it) or ordinary text (do not).
+       *  Absent means text. See ToolResult.detailKind for why this is not inferred. */
+      detailKind?: "diff" | "text" | "shell";
+      /** Does this row belong to the turn still in progress? Drives the VERB only
+       *  ("Reading" vs "Read"), and is cleared for every row at once by `endTurn`. */
+      live?: boolean;
     }
   /** A consolidated group of consecutive discovery calls (reads/searches/maps),
-   *  shown as one updating row ("Exploring… (9)") then a compact list. */
-  | { kind: "tools"; id: number; done: boolean; items: ToolGroupItem[] }
-  /** A spawned sub-agent: its own nested block, keyed by `agentId`. Its tool calls
-   *  stream live as compact rail items while it works, then it collapses to a
-   *  one-line summary. Distinct violet identity — a separate mind, in the transcript. */
-  | {
-      kind: "subagent";
-      id: number;
-      done: boolean;
-      agentId: string;
-      task: string;
-      readOnly: boolean;
-      status: ToolStatus;
-      /** The closing line once done ("3 steps · read-only"), red on failure. */
-      summary?: string;
-      items: ToolGroupItem[];
-    }
+   *  shown as one row naming the burst with a compact list of what it found. */
+  | { kind: "tools"; id: number; done: boolean; items: ToolGroupItem[]; live?: boolean }
+  /** Sub-agent work, as ONE block however many are delegated at once.
+   *
+   *  Read-only workers fan out in parallel (see subagent.ts), so two or three can be
+   *  live together. As separate blocks they interleaved into an unreadable stripe —
+   *  each one's rows landing between the others'. Grouped, the shape of the delegation
+   *  is visible: who is doing what, and how far along. Distinct violet identity either
+   *  way — these are separate minds working inside the transcript. */
+  | { kind: "subagent"; id: number; done: boolean; agents: AgentEntry[] }
   | { kind: "error"; id: number; done: boolean; text: string }
   | { kind: "completion"; id: number; done: boolean; text: string }
   /** A dim meta line (a tool-less activity note or a command header). */
   | { kind: "note"; id: number; done: boolean; text: string }
   /** A set-off, dim context line (compaction / context trimming). */
-  | { kind: "context"; id: number; done: boolean; text: string };
+  | { kind: "context"; id: number; done: boolean; text: string }
+  /** A titled block of plain FACTS, on a rail — what an approval is actually about
+   *  ("Action: Shell execution / Command: $ git push --force"). Distinct from an
+   *  assistant block because Mindweave did not say it: it is a statement of what is
+   *  about to happen, and it must not read as chat the user can skim past. */
+  | { kind: "notice"; id: number; done: boolean; title: string; body: string }
+  /** A compaction pass, with the before/after bars. See cli/compaction.ts for why this
+   *  one piece of context machinery is shown when the rest stays invisible. */
+  | { kind: "compaction"; id: number; done: boolean; report: CompactionReport };
 
 export interface TranscriptState {
   /** Finished, append-only → <Static> (terminal scrollback). */
@@ -104,20 +126,41 @@ export interface TranscriptState {
 export type Action =
   | { type: "user"; text: string }
   | { type: "token"; delta: string }
-  | { type: "toolStart"; toolId: string; name: string; arg?: string; action?: ToolKind; group?: boolean }
-  | { type: "toolEnd"; toolId: string; ok: boolean; summary?: string; detail?: string; quiet?: boolean }
+  | { type: "toolStart"; toolId: string; name: string; arg?: string; meta?: string; action?: ToolKind; group?: boolean }
+  | {
+      type: "toolEnd";
+      toolId: string;
+      ok: boolean;
+      summary?: string;
+      detail?: string;
+      detailKind?: "diff" | "text" | "shell";
+      quiet?: boolean;
+      /** Override the row's category/name — set when the RESULT (not the call) is
+       *  what makes this a governor decision rather than an ordinary tool outcome,
+       *  discovered only once the call actually runs (see ToolResult.displayKind). */
+      action?: ToolKind;
+      name?: string;
+    }
   // A sub-agent's nested lifecycle: a start opens its rail block, its tool calls fold
   // in as rail items (subTool*), and end collapses it to a summary. Keyed by agentId.
   | { type: "subagentStart"; agentId: string; task: string; readOnly: boolean }
   | { type: "subToolStart"; agentId: string; toolId: string; name: string; arg?: string; action?: ToolKind }
   | { type: "subToolEnd"; agentId: string; toolId: string; ok: boolean; summary?: string }
   | { type: "subagentEnd"; agentId: string; ok: boolean; summary?: string }
+  // The turn is over: every tool row still marked `live` drops to its past-tense
+  // verb. Nothing else about the rows changes — see endTurn's case below.
+  | { type: "endTurn" }
+  // The reply gate rejected the draft buffered so far — drop it, so the rewrite that
+  // follows streams into a clean block instead of being appended to the draft.
+  | { type: "resetReply" }
   | { type: "sealNarration" } // reveal the open narration block (NOT the reply)
   | { type: "finishReply" } // seal the open assistant block AS the turn's reply
   | { type: "error"; text: string }
   | { type: "completion"; text: string }
   | { type: "note"; text: string } // dim meta line (committed directly)
   | { type: "context"; text: string } // a set-off context/compaction line
+  | { type: "notice"; title: string; body: string } // titled facts on a rail
+  | { type: "compaction"; report: CompactionReport } // a compaction pass, with bars
   | { type: "say"; text: string }; // an assistant markdown block, NOT recorded as the reply
 
 export function initialState(): TranscriptState {
@@ -274,6 +317,7 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
             kind: "tools",
             id: gid,
             done: false,
+            live: true,
             items: [{ toolId: a.toolId, name: a.name, arg: a.arg, kind: a.action, status: "running" }],
           }),
         };
@@ -290,9 +334,11 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
           kind: "tool",
           id,
           done: false,
+          live: true,
           toolId: a.toolId,
           name: a.name,
           arg: a.arg,
+          meta: a.meta,
           action: a.action,
           status: "running",
         }),
@@ -322,7 +368,10 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
           status: a.ok ? "ok" : "error",
           summary: a.summary,
           detail: a.detail,
+          detailKind: a.detailKind,
           done: true,
+          ...(a.action ? { action: a.action } : {}),
+          ...(a.name ? { name: a.name } : {}),
         }),
       );
     }
@@ -331,6 +380,20 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
       const id = sealed.seq + 1;
       return drain({ ...sealed, seq: id, tail: sealed.tail.concat({ kind: "error", id, done: true, text: a.text }) });
     }
+    case "endTurn": {
+      // The one moment a tool row is allowed to change after it appears, and it
+      // changes by exactly one word: "Reading 2 files" → "Read 2 files". Committed
+      // rows are patched as well as tail ones — every block is re-rendered each
+      // frame (there is no <Static>), so a row that has already scrolled up still
+      // settles into the past tense with the rest of the turn.
+      const clear = (b: Block): Block =>
+        (b.kind === "tool" || b.kind === "tools") && b.live ? ({ ...b, live: false } as Block) : b;
+      return { ...s, committed: s.committed.map(clear), tail: s.tail.map(clear) };
+    }
+    case "resetReply":
+      // Only the buffer, never a committed block: text accumulates into `raw` and is
+      // revealed whole on seal, so a draft rejected before it seals was never on screen.
+      return { ...s, raw: "" };
     case "sealNarration":
       return sealAssistant(closeToolGroup(s), false);
     case "finishReply":
@@ -355,53 +418,85 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
       const id = c.seq + 1;
       return drain({ ...c, seq: id, tail: c.tail.concat({ kind: "assistant", id, done: true, text: a.text }) });
     }
+    case "notice": {
+      const c = closeToolGroup(s);
+      const id = c.seq + 1;
+      return drain({ ...c, seq: id, tail: c.tail.concat({ kind: "notice", id, done: true, title: a.title, body: a.body }) });
+    }
+    case "compaction": {
+      const c = closeToolGroup(s);
+      const id = c.seq + 1;
+      return drain({ ...c, seq: id, tail: c.tail.concat({ kind: "compaction", id, done: true, report: a.report }) });
+    }
     case "subagentStart": {
-      // A new nested block: seal any narration, close any open discovery group, then
-      // open the worker's rail. Left LIVE (done:false) so its tool calls can join it.
+      const entry: AgentEntry = {
+        agentId: a.agentId,
+        task: a.task,
+        readOnly: a.readOnly,
+        status: "running",
+        items: [],
+      };
+      // A worker starting while another is still going JOINS that block rather than
+      // opening its own. Read-only workers fan out in parallel, and as separate blocks
+      // their rows interleaved into a stripe nobody could follow.
+      const open = s.tail.find((b) => b.kind === "subagent" && !b.done);
+      if (open && open.kind === "subagent") {
+        return patchTail(s, open.id, { agents: [...open.agents, entry] } as Partial<Block>);
+      }
+      // Otherwise a new nested block: seal any narration, close any open discovery
+      // group, then open it. Left LIVE (done:false) so more workers and their tool
+      // calls can join it.
       const sealed = closeToolGroup(sealAssistant(s, false));
       const id = sealed.seq + 1;
       return drain({
         ...sealed,
         seq: id,
-        tail: sealed.tail.concat({
-          kind: "subagent",
-          id,
-          done: false,
-          agentId: a.agentId,
-          task: a.task,
-          readOnly: a.readOnly,
-          status: "running",
-          items: [],
-        }),
+        tail: sealed.tail.concat({ kind: "subagent", id, done: false, agents: [entry] }),
       });
     }
     case "subToolStart": {
-      const blk = openSubagent(s, a.agentId);
-      if (!blk) return s;
       const item: ToolGroupItem = { toolId: a.toolId, name: a.name, arg: a.arg, kind: a.action, status: "running" };
-      return patchTail(s, blk.id, { items: [...blk.items, item] } as Partial<Block>);
+      return patchAgent(s, a.agentId, (ag) => ({ ...ag, items: [...ag.items, item] }));
     }
     case "subToolEnd": {
-      const blk = openSubagent(s, a.agentId);
-      if (!blk) return s;
-      return patchTail(s, blk.id, {
-        items: blk.items.map((it) =>
+      return patchAgent(s, a.agentId, (ag) => ({
+        ...ag,
+        items: ag.items.map((it) =>
           it.toolId === a.toolId ? { ...it, status: a.ok ? "ok" : "error", note: a.summary } : it,
         ),
-      } as Partial<Block>);
+      }));
     }
     case "subagentEnd": {
-      const blk = openSubagent(s, a.agentId);
-      if (!blk) return s;
-      return drain(
-        patchTail(s, blk.id, { status: a.ok ? "ok" : "error", summary: a.summary, done: true } as Partial<Block>),
-      );
+      // The BLOCK is done only when every worker in it is. One finishing while another
+      // is mid-flight must not commit the block and strand the other's rows.
+      const next = patchAgent(s, a.agentId, (ag) => ({
+        ...ag,
+        status: a.ok ? "ok" : "error",
+        summary: a.summary,
+      }));
+      const blk = findAgentBlock(next, a.agentId);
+      if (!blk) return next;
+      const allDone = blk.agents.every((ag) => ag.status !== "running");
+      return allDone ? drain(patchTail(next, blk.id, { done: true } as Partial<Block>)) : next;
     }
   }
 }
 
-/** The open (still-running) sub-agent block for an agentId, if one is in the tail. */
-function openSubagent(s: TranscriptState, agentId: string): (Block & { kind: "subagent" }) | undefined {
-  const blk = s.tail.find((b) => b.kind === "subagent" && b.agentId === agentId && !b.done);
+/** The open sub-agent block containing this worker, if one is in the tail. */
+function findAgentBlock(s: TranscriptState, agentId: string): (Block & { kind: "subagent" }) | undefined {
+  const blk = s.tail.find((b) => b.kind === "subagent" && !b.done && b.agents.some((ag) => ag.agentId === agentId));
   return blk && blk.kind === "subagent" ? blk : undefined;
+}
+
+/** Apply a change to ONE worker inside its block, leaving its siblings untouched. */
+function patchAgent(
+  s: TranscriptState,
+  agentId: string,
+  change: (agent: AgentEntry) => AgentEntry,
+): TranscriptState {
+  const blk = findAgentBlock(s, agentId);
+  if (!blk) return s;
+  return patchTail(s, blk.id, {
+    agents: blk.agents.map((ag) => (ag.agentId === agentId ? change(ag) : ag)),
+  } as Partial<Block>);
 }

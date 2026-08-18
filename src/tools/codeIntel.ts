@@ -31,7 +31,7 @@ function caveat(confidence: Confidence): string {
     : "";
 }
 
-export const outlineTool: Tool = {
+const outlineDef: Tool = {
   name: "outline",
   readOnly: true,
   // Two things were missing, and the second one matters more than it looks. A directory
@@ -121,7 +121,7 @@ export const outlineTool: Tool = {
   },
 };
 
-export const definitionTool: Tool = {
+const definitionDef: Tool = {
   name: "definition",
   readOnly: true,
   // "the exact file:line" was an overclaim: a name defined in two files returns BOTH,
@@ -164,7 +164,7 @@ export const definitionTool: Tool = {
   },
 };
 
-export const referencesTool: Tool = {
+const referencesDef: Tool = {
   name: "references",
   readOnly: true,
   // The old description read as if this were full semantic resolution. It is not, and
@@ -207,7 +207,7 @@ export const referencesTool: Tool = {
   },
 };
 
-export const relevantTool: Tool = {
+const relevantDef: Tool = {
   name: "relevant",
   readOnly: true,
   // This tool was effectively invisible. The old description said it showed "the code
@@ -302,3 +302,30 @@ function degraded(): ToolResult {
 function fail(message: string): ToolResult {
   return { output: `Error: ${message}`, isError: true, summary: message };
 }
+
+/**
+ * These four never render a row.
+ *
+ * Outlining a file, resolving a definition, finding call sites, ranking what's
+ * relevant — that is the agent reading its way around the code, not work done
+ * TO the project. A row per lookup filled the transcript with the agent's own
+ * navigation while saying nothing the user could act on; the answers show up in
+ * what it goes on to say and do. The model still receives every result in full.
+ *
+ * Applied as a wrapper rather than a `quiet: true` on each return, because these
+ * four tools have eleven return sites between them and the next one added would
+ * silently start rendering again.
+ */
+function navigational(tool: Tool): Tool {
+  return {
+    ...tool,
+    async execute(args, ctx) {
+      return { ...(await tool.execute(args, ctx)), quiet: true };
+    },
+  };
+}
+
+export const outlineTool = navigational(outlineDef);
+export const definitionTool = navigational(definitionDef);
+export const referencesTool = navigational(referencesDef);
+export const relevantTool = navigational(relevantDef);

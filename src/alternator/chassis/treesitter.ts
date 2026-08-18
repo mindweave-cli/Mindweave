@@ -16,6 +16,11 @@ import Parser from "web-tree-sitter";
 import type { SymbolKind } from "./types.js";
 import { pickNearest, type LineSpan } from "../../tools/spanCore.js";
 import { extractDomRefs } from "./domRefs.js";
+import { IN_WORKER, isolatedExtract, isolatedSpan } from "./isolation.js";
+
+// Inside the isolation worker every grammar runs in-process ON PURPOSE — that is where
+// a fatal compile, and the memory a parse retains, are allowed to accumulate and die.
+// `IN_WORKER` (owned by isolation.ts) is what breaks the recursion.
 
 // web-tree-sitter is pinned to the 0.20.x era to match tree-sitter-wasms' grammar
 // ABI (its grammars are built with tree-sitter-cli 0.20.8). Newer runtimes use a
@@ -203,6 +208,23 @@ const SWIFT_QUERY = `
 (call_expression (simple_identifier) @reference)
 `;
 
+/**
+ * The JSX half, appended to the TS/JS query for the grammars that have JSX nodes.
+ *
+ * A component file's render body has no DECLARATIONS in it, so a declaration-only query
+ * goes silent over exactly the part most likely to be edited: measured on a 1,381-line
+ * React component, the outline's last entry was L1128 and the entire render — 18% of the
+ * file, and where the change actually had to go — did not exist in the graph at all. The
+ * model had nothing to navigate by, guessed an offset, missed, and read again.
+ *
+ * The whole attribute node is captured and read in JS rather than matched by grammar
+ * sub-node names, the same choice `markup.ts` makes and for the same reason: the shape
+ * of a `jsx_attribute` differs between grammars and versions, its text does not.
+ */
+const JSX_QUERY = `
+(jsx_attribute) @jsx.attribute
+`;
+
 const KOTLIN_QUERY = `
 (function_declaration (simple_identifier) @definition.function)
 (class_declaration (type_identifier) @definition.class)
@@ -214,11 +236,11 @@ const LANGS: Record<string, LangDef> = {
   ".ts": { grammar: "tree-sitter-typescript.wasm", query: TS_QUERY },
   ".mts": { grammar: "tree-sitter-typescript.wasm", query: TS_QUERY },
   ".cts": { grammar: "tree-sitter-typescript.wasm", query: TS_QUERY },
-  ".tsx": { grammar: "tree-sitter-tsx.wasm", query: TS_QUERY },
+  ".tsx": { grammar: "tree-sitter-tsx.wasm", query: TS_QUERY + JSX_QUERY },
   ".js": { grammar: "tree-sitter-javascript.wasm", query: JS_QUERY },
   ".mjs": { grammar: "tree-sitter-javascript.wasm", query: JS_QUERY },
   ".cjs": { grammar: "tree-sitter-javascript.wasm", query: JS_QUERY },
-  ".jsx": { grammar: "tree-sitter-javascript.wasm", query: JS_QUERY },
+  ".jsx": { grammar: "tree-sitter-javascript.wasm", query: JS_QUERY + JSX_QUERY },
   ".py": { grammar: "tree-sitter-python.wasm", query: PY_QUERY },
   ".pyi": { grammar: "tree-sitter-python.wasm", query: PY_QUERY },
   ".go": { grammar: "tree-sitter-go.wasm", query: GO_QUERY },
@@ -408,6 +430,9 @@ export async function treeSitterSpan(
 ): Promise<LineSpan | null> {
   const def = LANGS[extname(absPath).toLowerCase()];
   if (!def) return null;
+  // NO grammar parses in this process. See treeSitterExtract for why the old
+  // size-based exemption was wrong.
+  if (!IN_WORKER) return isolatedSpan(def.grammar, absPath, code, name, nearLine);
   try {
     await ensureInit();
     const { language, query } = await loadLang(def);
@@ -518,6 +543,17 @@ const KIND_OF: Record<string, SymbolKind> = {
 export async function treeSitterExtract(absPath: string, code: string): Promise<Extraction | null> {
   const def = LANGS[extname(absPath).toLowerCase()];
   if (!def) return null;
+  // NO grammar parses in this process.
+  //
+  // This used to exempt anything under 4.5 MB of grammar wasm, on the theory that only
+  // the oversized grammars were dangerous. Measurement killed that theory: a parse
+  // RETAINS memory that `tree.delete()` does not return, roughly 57-70 MB for one 54 KB
+  // JSX file, and tsx (2.41 MB) and typescript (2.34 MB) sat comfortably under the
+  // threshold while being the two most-used grammars in the product. Grammar file size
+  // predicts the cost of COMPILING a grammar; it says nothing about what a parse keeps.
+  // Indexing 120 ordinary files under the old rule peaked at 1.9 GB in the main
+  // process, where there is nothing to contain it.
+  if (!IN_WORKER) return isolatedExtract(def.grammar, absPath, code);
   try {
     await ensureInit();
     const { language, query } = await loadLang(def);
@@ -529,6 +565,8 @@ export async function treeSitterExtract(absPath: string, code: string): Promise<
     const defs: ExtractedDef[] = [];
     const refs: ExtractedRef[] = [];
     const imports: ExtractedImport[] = [];
+    // One per FILE: a landmark named twice in the same component is one symbol.
+    const jsxSeen = new Set<string>();
     for (const cap of query.captures(tree.rootNode)) {
       const name = cap.node.text;
       const line = cap.node.startPosition.row + 1;
@@ -548,6 +586,27 @@ export async function treeSitterExtract(absPath: string, code: string): Promise<
           signature: (lines[line - 1] ?? "").trim().slice(0, 200),
           doc: extractDoc(lines, line),
         });
+      } else if (cap.name === "jsx.attribute") {
+        // A JSX landmark: `className="sidebar-header"` / `id="editor"`. The FIRST place a
+        // name appears in the file is its definition (so it lands in the outline and the
+        // render body stops being a blank stretch), every later one a reference — the
+        // same rule the stylesheet tier uses, so a class defined in CSS and used in JSX
+        // meet on the graph's name key and `references` finds both sides.
+        for (const landmark of jsxLandmarks(cap.node.text)) {
+          const key = `${landmark.kind}:${landmark.name}`;
+          if (jsxSeen.has(key)) {
+            refs.push({ name: landmark.name, line });
+            continue;
+          }
+          jsxSeen.add(key);
+          defs.push({
+            name: landmark.name,
+            kind: "element",
+            line,
+            endLine: jsxElementEnd(cap.node),
+            signature: (lines[line - 1] ?? "").trim().slice(0, 200),
+          });
+        }
       } else if (cap.name === "reference") {
         refs.push({ name, line });
       }
@@ -562,6 +621,45 @@ export async function treeSitterExtract(absPath: string, code: string): Promise<
   } catch {
     return null;
   }
+}
+
+/**
+ * The last line of the JSX element an attribute belongs to.
+ *
+ * `enclosingSpan` is for declarations and climbs to the nearest one, which from inside a
+ * render body is the whole component — it reported a 227-line span for a single `<div>`'s
+ * opening tag, which would then be what `read_symbol` handed back. The element's own
+ * extent is the honest answer, and it is one or two parents up.
+ */
+function jsxElementEnd(attribute: Parser.SyntaxNode): number {
+  let node: Parser.SyntaxNode | null = attribute.parent;
+  while (node) {
+    if (node.type === "jsx_element" || node.type === "jsx_self_closing_element") {
+      return node.endPosition.row + 1;
+    }
+    // Stop at the opening tag's own boundary rather than climbing into the component.
+    if (node.type !== "jsx_opening_element") break;
+    node = node.parent;
+  }
+  return attribute.endPosition.row + 1;
+}
+
+/**
+ * The navigable names in one JSX attribute, or none.
+ *
+ * Only `className` and `id` with a plain string value: those are what a person searches
+ * for and what a stylesheet names, so they are the landmarks worth putting on the map.
+ * `className={cx(...)}` and every other attribute are deliberately skipped — capturing
+ * every `<div>` would bury the outline it is supposed to make readable.
+ */
+function jsxLandmarks(attributeText: string): { name: string; kind: "class" | "id" }[] {
+  const m = /^(className|id)\s*=\s*["']([^"'{}]+)["']$/.exec(attributeText.trim());
+  if (!m) return [];
+  const kind = m[1] === "id" ? "id" : "class";
+  return m[2]!
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((name) => ({ name, kind }));
 }
 
 /** Strip surrounding quotes from a captured string-literal node's text. */

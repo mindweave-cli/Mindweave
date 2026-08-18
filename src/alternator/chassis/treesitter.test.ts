@@ -97,3 +97,79 @@ test("extracts Python definitions and references", async () => {
   }
   assert.ok(new Set(ex!.refs.map((r) => r.name)).has("bar"), "expected reference bar");
 });
+
+// ── JSX landmarks ────────────────────────────────────────────────────────────────
+// A declaration-only query goes silent over a component's render body, which is where
+// most UI edits land: measured on a 1,381-line React component, the outline's last entry
+// was L1128 and the whole render did not exist in the graph. The model had nothing to
+// navigate by, guessed an offset, missed, and read the file again.
+
+test("a JSX className becomes a navigable landmark, keyed like its CSS rule", async () => {
+  const code = [
+    'export function App() {', // 1
+    '  return (', // 2
+    '    <div className="app-shell">', // 3
+    '      <div className="sidebar-header">', // 4
+    '        <button className="home-btn" onClick={goHome}>Home</button>', // 5
+    '      </div>', // 6
+    '    </div>', // 7
+    '  );', // 8
+    '}', // 9
+  ].join("\n");
+
+  const ex = await treeSitterExtract("/p/App.tsx", code);
+  assert.ok(ex, "extraction failed");
+  const byName = new Map(ex!.defs.map((d) => [d.name, d]));
+
+  assert.ok(byName.has("sidebar-header"), `render body not in the graph: ${ex!.defs.map((d) => d.name).join(", ")}`);
+  assert.equal(byName.get("sidebar-header")!.kind, "element");
+  assert.equal(byName.get("sidebar-header")!.line, 4);
+  // The element's own extent, not the enclosing component: enclosingSpan climbs to the
+  // nearest DECLARATION, which from inside a render body is the whole function.
+  assert.equal(byName.get("sidebar-header")!.endLine, 6, "span should be the element, not the component");
+});
+
+test("a class on several elements is one definition and the rest references", async () => {
+  const code = [
+    'export function List() {', // 1
+    '  return (', // 2
+    '    <ul className="tree-item">', // 3
+    '      <li className="tree-item">a</li>', // 4
+    '      <li className="tree-item">b</li>', // 5
+    '    </ul>', // 6
+    '  );', // 7
+    '}', // 8
+  ].join("\n");
+
+  const ex = await treeSitterExtract("/p/List.tsx", code);
+  const defs = (ex?.defs ?? []).filter((d) => d.name === "tree-item");
+  const refs = (ex?.refs ?? []).filter((r) => r.name === "tree-item");
+  assert.equal(defs.length, 1, `defined ${defs.length} times, expected once`);
+  assert.equal(defs[0]!.line, 3);
+  assert.deepEqual(refs.map((r) => r.line), [4, 5], "later uses are references");
+});
+
+test("multiple classes on one element are all landmarks; dynamic ones are not", async () => {
+  const code = [
+    'export function Row() {', // 1
+    '  return (', // 2
+    '    <div className="row is-active">', // 3
+    '      <span className={cx("dynamic", x)}>hi</span>', // 4
+    '      <input id="search-box" />', // 5
+    '    </div>', // 6
+    '  );', // 7
+    '}', // 8
+  ].join("\n");
+
+  const ex = await treeSitterExtract("/p/Row.tsx", code);
+  const names = (ex?.defs ?? []).filter((d) => d.kind === "element" || d.kind === "id").map((d) => d.name).sort();
+  assert.deepEqual(names, ["is-active", "row", "search-box"]);
+  // Capturing every <div> would bury the outline this exists to make readable.
+  assert.ok(!names.includes("dynamic"), "a computed className is not a landmark");
+});
+
+test("a plain .ts file gets no JSX landmarks and still compiles its query", async () => {
+  const ex = await treeSitterExtract("/p/plain.ts", 'const className = "not-jsx";\nexport function go() {}\n');
+  assert.ok(ex, "the non-JSX query must still load");
+  assert.ok(!(ex!.defs ?? []).some((d) => d.kind === "element"), "no elements in a file with no JSX");
+});

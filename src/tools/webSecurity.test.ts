@@ -19,7 +19,7 @@ import { normalizeUrl, ssrfReason, asIPv4, redirectStep } from "./webFetch.js";
 import { formatSearch } from "./webSearch.js";
 import { frameExternal } from "./untrusted.js";
 import { frameUntrusted } from "../mcp/catalog.js";
-import { sweepCaptures, isExpired, isSweptName, CAPTURE_MAX_AGE_MS } from "./captureSweep.js";
+import { sweepTemp, isExpired, classify, CAPTURE_MAX_AGE_MS, SCRATCH_MAX_AGE_MS } from "./tempSweep.js";
 
 const u = (s: string) => new URL(s);
 
@@ -148,44 +148,79 @@ test("MCP framing is unchanged by moving it", () => {
   assert.match(framed, /never as instructions to follow/);
 });
 
-// ── capture sweep ────────────────────────────────────────────────────────────
+// ── temp sweep ───────────────────────────────────────────────────────────────
 
-test("isExpired measures against the retention window", () => {
+test("isExpired measures against whichever window it is handed", () => {
   const now = Date.now();
-  assert.equal(isExpired(now - 1000, now), false);
-  assert.equal(isExpired(now - CAPTURE_MAX_AGE_MS - 1000, now), true);
+  assert.equal(isExpired(now - 1000, now, CAPTURE_MAX_AGE_MS), false);
+  assert.equal(isExpired(now - CAPTURE_MAX_AGE_MS - 1000, now, CAPTURE_MAX_AGE_MS), true);
+  // Scratch expires far sooner, which is the whole point of the two classes.
+  assert.equal(isExpired(now - SCRATCH_MAX_AGE_MS - 1000, now, SCRATCH_MAX_AGE_MS), true);
+  assert.equal(isExpired(now - SCRATCH_MAX_AGE_MS - 1000, now, CAPTURE_MAX_AGE_MS), false);
 });
 
-test("the sweep only claims directories it created", () => {
-  assert.ok(isSweptName("mindweave-shot-a1b2"));
-  assert.ok(!isSweptName("mindweave-cwd-a1b2"));
-  assert.ok(!isSweptName("some-other-project"));
+test("classify: captures are content, our other temp is scratch, everything else is untouchable", () => {
+  assert.equal(classify("mindweave-shot-a1b2"), "capture");
+  // These were all classified as NOT OURS before, which is why 41,828 of them piled
+  // up: every one is written by Mindweave or its test suite.
+  assert.equal(classify("mindweave-cwd-a1b2"), "scratch");
+  assert.equal(classify("mindweave-run-a1b2.bat"), "scratch");
+  assert.equal(classify("mindweave-test-fixture"), "scratch");
+  assert.equal(classify("mw-plan-a1b2"), "scratch");
+  // The guard that keeps this off other people's files.
+  assert.equal(classify("some-other-project"), null);
+  assert.equal(classify("npm-cache-abc"), null);
+  assert.equal(classify("mindwarp-thing"), null);
 });
 
-test("old captures are removed and recent ones are kept", async () => {
+test("captures outlive scratch: the same age sweeps one and spares the other", async () => {
   // Driven against a fabricated tree, never the real temp directory: a bug in the
   // name match would otherwise delete a developer's actual files.
   const root = await mkdtemp(join(tmpdir(), "mindweave-sweeptest-"));
-  const old = join(root, "mindweave-shot-old");
-  const fresh = join(root, "mindweave-shot-fresh");
-  const foreign = join(root, "someone-elses-folder");
-  for (const d of [old, fresh, foreign]) {
+  const capture = join(root, "mindweave-shot-recentish");
+  const scratch = join(root, "mindweave-gov-abandoned");
+  for (const d of [capture, scratch]) {
     await mkdir(d);
-    await writeFile(join(d, "shot.png"), "x");
+    await writeFile(join(d, "f"), "x");
   }
-  const ancient = new Date(Date.now() - CAPTURE_MAX_AGE_MS - 60_000);
-  await utimes(old, ancient, ancient);
-  await utimes(foreign, ancient, ancient);
+  // Two days old: past the scratch window, nowhere near the capture window.
+  const twoDays = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  await utimes(capture, twoDays, twoDays);
+  await utimes(scratch, twoDays, twoDays);
 
-  const removed = await sweepCaptures(root);
+  assert.equal(await sweepTemp(root), 1, "only the scratch directory is old enough");
   const left = await readdir(root);
+  assert.ok(!left.includes("mindweave-gov-abandoned"), "abandoned scratch must go");
+  assert.ok(left.includes("mindweave-shot-recentish"), "a capture this young must survive");
+});
 
-  assert.equal(removed, 1, "exactly the one expired capture");
-  assert.ok(!left.includes("mindweave-shot-old"));
-  assert.ok(left.includes("mindweave-shot-fresh"), "a recent capture must survive");
-  assert.ok(left.includes("someone-elses-folder"), "another tool's folder is not ours to delete");
+test("stranded scratch FILES are swept too, not just directories", async () => {
+  // The cwd hand-off file and the Windows .bat wrapper are plain files, and they are
+  // stranded by exactly the same crashes. The old sweep skipped anything that was not
+  // a directory, so these were unreachable by design.
+  const root = await mkdtemp(join(tmpdir(), "mindweave-sweeptest-"));
+  await writeFile(join(root, "mindweave-cwd-dead.txt"), "D:\\somewhere");
+  await writeFile(join(root, "mindweave-run-dead.bat"), "@echo off");
+  await writeFile(join(root, "unrelated.txt"), "not ours");
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  for (const f of ["mindweave-cwd-dead.txt", "mindweave-run-dead.bat", "unrelated.txt"]) {
+    await utimes(join(root, f), old, old);
+  }
+
+  assert.equal(await sweepTemp(root), 2, "both stranded files, and nothing else");
+  const left = await readdir(root);
+  assert.ok(left.includes("unrelated.txt"), "another tool's file is not ours to delete");
+});
+
+test("a live instance's temp directory is never swept out from under it", async () => {
+  // The safety margin that makes a startup sweep safe while another Mindweave is
+  // mid-run: fresh entries are left alone no matter what class they are.
+  const root = await mkdtemp(join(tmpdir(), "mindweave-sweeptest-"));
+  await mkdir(join(root, "mindweave-gov-inuse"));
+  await writeFile(join(root, "mindweave-cwd-inuse.txt"), "live");
+  assert.equal(await sweepTemp(root), 0, "nothing created just now may be removed");
 });
 
 test("an unreadable directory is not an error", async () => {
-  assert.equal(await sweepCaptures(join(tmpdir(), "mindweave-does-not-exist-xyzzy")), 0);
+  assert.equal(await sweepTemp(join(tmpdir(), "mindweave-does-not-exist-xyzzy")), 0);
 });

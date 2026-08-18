@@ -74,7 +74,7 @@ export function rootsOf(ctx: ToolContext): string[] {
  * shifts `ctx.cwd` with `cd`, but the anchor stays put, so file tools resolve relative
  * paths against a fixed base instead of a shell cwd that may have wandered into a
  * subdirectory. File tools never follow the shell cwd;
- * without it, a `cd src-tauri` before a build makes a later `edit_file("App.css")`
+ * without it, a `cd src-tauri` before a build makes a later `edit("App.css")`
  * resolve to `…/src-tauri/App.css` and fail "file not found" on a file that plainly
  * exists — the exact bug this decoupling kills.
  */

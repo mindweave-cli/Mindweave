@@ -26,11 +26,26 @@ test("no approval channel → hard refusal (fail-closed)", async () => {
   assert.deepEqual(ctx.governance!.forbidden.patterns, ["secret.txt", "other"]);
 });
 
+test("no approval channel → tagged as a governor row, not an ordinary tool failure", async () => {
+  const ctx = ctxWith(undefined);
+  const res = await requestForbiddenLift(ctx, "secret.txt", "editing secret.txt", "it is protected.");
+  assert.equal(res!.displayKind, "governor");
+  assert.equal(res!.displayName, "Governor");
+});
+
 test("Allow → proceeds (null) and lifts the pattern for the session", async () => {
   const ctx = ctxWith(async (_q, opts) => opts[0]!); // first option = allow
   const res = await requestForbiddenLift(ctx, "secret.txt", "editing secret.txt", "protected.");
   assert.equal(res, null); // proceed
   assert.deepEqual(ctx.governance!.forbidden.patterns, ["other"]); // lifted just this one
+});
+
+test("Allow → records a one-shot notice for the UI to show as its own governor block", async () => {
+  const ctx = ctxWith(async (_q, opts) => opts[0]!); // allow
+  await requestForbiddenLift(ctx, "secret.txt", "editing secret.txt", "protected.");
+  assert.equal(ctx.governance!.notices?.length, 1);
+  assert.match(ctx.governance!.notices![0]!, /secret\.txt/);
+  assert.match(ctx.governance!.notices![0]!, /ALLOWED/);
 });
 
 test("Deny → keeps it protected", async () => {
@@ -39,6 +54,7 @@ test("Deny → keeps it protected", async () => {
   assert.ok(res && res.isError);
   assert.match(res!.output, /declined to lift/);
   assert.deepEqual(ctx.governance!.forbidden.patterns, ["secret.txt", "other"]);
+  assert.equal(res!.displayKind, "governor");
 });
 
 test("Defer → hands control back to the user", async () => {
@@ -46,6 +62,7 @@ test("Defer → hands control back to the user", async () => {
   const res = await requestForbiddenLift(ctx, "secret.txt", "editing secret.txt", "protected.");
   assert.ok(res && res.isError);
   assert.match(res!.output, /will tell you how to proceed/);
+  assert.equal(res!.displayKind, "governor");
 });
 
 // ── Another agent's data: ask first, remember the answer ───────────────────────

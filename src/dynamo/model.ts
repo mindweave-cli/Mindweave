@@ -15,13 +15,32 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { projectDir } from "../memory/store.js";
-import { allModels, allProviders, ensureDriver, manifestForModel, normalizeConfig } from "../drivers/registry.js";
+import {
+  allModels,
+  allProviders,
+  ensureDriver,
+  manifestForModel,
+  modelsOf,
+  normalizeConfig,
+  refreshModels,
+} from "../drivers/registry.js";
 import type { Effort, ModelChoice, ModelConfig, ModelId, ThinkLevel } from "../drivers/types.js";
 
 export type { Effort, ModelChoice, ModelConfig, ModelId, ThinkLevel };
+export { refreshModels };
 
-/** The models offered by `/model`, across every installed provider. */
-export const MODELS: ModelChoice[] = allModels();
+/**
+ * The models offered by `/model`, across every installed provider.
+ *
+ * A FUNCTION rather than the module-level constant it used to be. That constant was
+ * a snapshot taken at import time, which was correct while every provider declared a
+ * fixed lineup and silently wrong the moment one discovers its models at runtime: a
+ * locally-served model would never appear in a label lookup, however many times the
+ * list refreshed. Nothing may cache this result.
+ */
+export function models(): ModelChoice[] {
+  return allModels();
+}
 
 /**
  * The out-of-the-box choice: the first offered model, NO thinking.
@@ -33,7 +52,10 @@ export const MODELS: ModelChoice[] = allModels();
  * mechanically and the prompt states as a rule.
  */
 export const DEFAULT_MODEL_CONFIG: ModelConfig = normalizeConfig({
-  model: MODELS[0]!.id,
+  // The first model of the first provider. Read at import time on purpose: this is
+  // the out-of-the-box fallback, so it must resolve without any provider having been
+  // reached, which rules out anything a discovered provider could contribute.
+  model: allModels()[0]!.id,
   thinking: false,
   effort: "high",
 });
@@ -52,8 +74,8 @@ export function providerOf(model: ModelId): { id: string; label: string } {
  * The models `/model` offers: those of the provider currently in use, not every
  * model everywhere. Picking a provider is `/provider`'s job.
  */
-export function modelsOf(model: ModelId): ModelChoice[] {
-  return manifestForModel(model).models;
+export function modelsOfProvider(model: ModelId): ModelChoice[] {
+  return modelsOf(manifestForModel(model));
 }
 
 /**
@@ -71,7 +93,7 @@ export function modelsOf(model: ModelId): ModelChoice[] {
 export function usableFallback(model: ModelId, hasKey: (envVar: string) => boolean): ModelId | null {
   if (hasKey(manifestForModel(model).apiKeyEnv)) return null;
   for (const provider of allProviders()) {
-    const first = provider.models[0];
+    const first = modelsOf(provider)[0];
     if (first && hasKey(provider.apiKeyEnv)) return first.id;
   }
   return null;
@@ -90,9 +112,11 @@ export function thinkLabel(cfg: ModelConfig): string {
   return match?.label ?? "Standard";
 }
 
-/** The model's display name (for status lines / confirmations). */
+/** The model's display name (for status lines / confirmations). Reads the list
+ *  live, so a model that only exists after discovery still gets its real name
+ *  rather than falling back to its raw id. */
 export function modelLabel(model: ModelId): string {
-  return MODELS.find((m) => m.id === model)?.label ?? model;
+  return allModels().find((m) => m.id === model)?.label ?? model;
 }
 
 /**
@@ -113,8 +137,17 @@ function configPath(projectCwd: string): string {
  * Load the project's saved model config, or the default when none is saved, and
  * load the provider that serves it — this is where a session's provider gets
  * decided, and the only place its wire code comes off disk.
+ *
+ * Discovery runs FIRST, and the order is load-bearing. A discovered provider's
+ * models are unknown until it is asked, so normalizing a saved config before that
+ * would coerce a perfectly valid local model onto some other provider's default,
+ * and the user would find their choice silently changed on every launch. Discovery
+ * failing is harmless here: `ownsModel` still attributes the id correctly, and the
+ * config survives to be normalized against a list that arrives later.
  */
 export async function loadModelConfig(projectCwd: string): Promise<ModelConfig> {
+  await refreshModels();
+
   let config: ModelConfig;
   try {
     const raw = await fs.readFile(configPath(projectCwd), "utf8");

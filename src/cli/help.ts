@@ -49,5 +49,16 @@ export function formatHelp(sections: readonly HelpSection[]): string {
     "Also\n" +
       "  @path             attach a file to your message (Tab completes the path)\n" +
       "  Esc               stop what's running",
+    // Sub-agents are the one part of the machinery that visibly does something on
+    // screen without explaining itself: a rail of tool calls appears under a worker
+    // that is not the agent you were talking to. What it costs you and what it hands
+    // back is worth stating ONCE, here, rather than on every delegation.
+    "About sub-agents\n" +
+      "  Mindweave can hand a wide, self-contained job to a sub-agent — a sweeping\n" +
+      "  search, an inventory, a bounded refactor — and work from what it reports back.\n" +
+      "  Their raw tool loops and output never enter the main conversation, so a large\n" +
+      "  search costs you a summary instead of a hundred results. They return finished\n" +
+      "  work (a patch, an answer), compact their own context independently, and cannot\n" +
+      "  change files unless the job they were given is a job that changes files.",
   ].join("\n\n");
 }

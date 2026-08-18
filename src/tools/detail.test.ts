@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { capLines, editDetail, outputDetail, writeDetail, lineCount, rangeLabel, magnitude, withScope } from "./detail.js";
+import { capLines, editDetail, outputDetail, writeDetail, withOutcome, lineCount, rangeLabel, magnitude, withScope, stripAnsi, collapseBlanks } from "./detail.js";
 
 test("editDetail shows removed then added lines, prefixed", () => {
   const d = editDetail("a\nb", "a\nc");
@@ -50,4 +50,111 @@ test("magnitude uses a real minus sign, not the diff hyphen", () => {
 test("withScope prepends the scope header above the body", () => {
   assert.equal(withScope("L1-3 · −1 +2", "- a\n+ b\n+ c"), "L1-3 · −1 +2\n- a\n+ b\n+ c");
   assert.equal(withScope("new file · 2 lines", ""), "new file · 2 lines");
+});
+
+// ── a command's outcome ──────────────────────────────────────────────────────
+
+test("a command's exit code is shown on SUCCESS as well as failure", () => {
+  // If only failures carried a line, the absence of one would be the signal — and an
+  // absence is easy to read past under a wall of build output.
+  assert.match(withOutcome("build ok", false, 0, null, 120_000), /✓ Exit code 0$/);
+  assert.match(withOutcome("2 failing", false, 1, null, 120_000), /✖ Exit code 1$/);
+});
+
+test("the outcome is appended, never replaces the output", () => {
+  const out = withOutcome(["line one", "line two"].join("\n"), false, 0, null, 120_000);
+  assert.equal(out, ["line one", "line two", "✓ Exit code 0"].join("\n"));
+});
+
+test("a timeout says how long it waited, not just that it failed", () => {
+  assert.match(withOutcome("", true, null, null, 30_000), /Timed out after 30s — killed/);
+});
+
+test("a signalled process is named by its signal, never reported as exit 0", () => {
+  // A process ended by a signal reports no exit code. Treating that as "not non-zero"
+  // made a killed command read as a command that worked.
+  assert.match(withOutcome("", false, null, "SIGTERM", 120_000), /✖ Terminated by SIGTERM/);
+  assert.doesNotMatch(withOutcome("", false, null, "SIGTERM", 120_000), /Exit code 0/);
+  assert.match(withOutcome("", false, null, null, 120_000), /✖ Ended without an exit code/);
+});
+
+test("a command with no output still reports its outcome", () => {
+  assert.equal(withOutcome("", false, 0, null, 120_000), "✓ Exit code 0");
+});
+
+// ── A command's output, as it actually arrives ────────────────────────────────
+// These guard a defect that was on screen: `Get-ChildItem` rendered half red, because
+// the display coloured any detail line starting with `-` as a deleted line, and
+// PowerShell writes its column rule as `----` and its file rows as `-a----  …`. The
+// colouring fix lives in ToolLine (detailKind); these cover the text side of it.
+
+const ESC = String.fromCharCode(27);
+
+test("SGR colour codes are stripped from captured output", () => {
+  // A command coloured its own output. Those bytes mean nothing in a block that
+  // applies its own colour, and they break width measurement — an escape sequence
+  // counts as visible characters when wrapping, so the block goes ragged.
+  const coloured = `${ESC}[32mPASS${ESC}[0m src/app.test.ts`;
+  assert.equal(stripAnsi(coloured), "PASS src/app.test.ts");
+});
+
+test("cursor and erase sequences are stripped too, not just colours", () => {
+  assert.equal(stripAnsi(`building${ESC}[2K${ESC}[1Gdone`), "buildingdone");
+});
+
+test("text with no escapes is returned untouched", () => {
+  assert.equal(stripAnsi("plain output"), "plain output");
+});
+
+test("runs of blank lines collapse to one, and the edges go", () => {
+  const lines = ["", "", "Mode   LastWriteTime", "----   -------------", "", "", "d----- astra-backup", "", ""];
+  assert.deepEqual(collapseBlanks(lines), ["Mode   LastWriteTime", "----   -------------", "", "d----- astra-backup"]);
+});
+
+test("a blank line BETWEEN groups survives — it is what separates them", () => {
+  assert.deepEqual(collapseBlanks(["a", "", "b"]), ["a", "", "b"]);
+});
+
+test("output that is nothing but blank lines collapses to nothing", () => {
+  assert.deepEqual(collapseBlanks(["", "", ""]), []);
+});
+
+test("a real PowerShell listing survives with its shape intact and no wasted rows", () => {
+  // Copied from the screenshot that prompted the fix.
+  const body = [
+    "",
+    "    Directory: D:\astra-backup",
+    "",
+    "",
+    "Mode                 LastWriteTime         Length Name",
+    "----                 -------------         ------ ----",
+    "-a----          6/28/2026   4:20 AM          17914 astra.html",
+    "",
+  ].join("\n");
+  const rows = outputDetail(body).split("\n");
+  assert.equal(rows[0], "    Directory: D:\astra-backup", "leading blank gone");
+  assert.equal(rows[1], "", "one blank kept as the group separator");
+  assert.equal(rows.at(-1), "-a----          6/28/2026   4:20 AM          17914 astra.html", "trailing blank gone");
+  assert.equal(rows.length, 5, "eight source lines, five that carry anything");
+});
+
+test("a killed command names the signal and the process it went to", () => {
+  // After a timeout the pid is what lets the user check whether it actually died or is
+  // still holding a port. On an ordinary exit it is trivia, so it is not shown.
+  const out = withOutcome("running suite...", true, null, null, 30_000, 59_120);
+  assert.match(out, /✖ Timed out after 30s — killed/);
+  assert.match(out, /Signal: SIGTERM sent to process \(PID 59120\)/);
+});
+
+test("a command that exited normally gets NO signal line, pid or not", () => {
+  assert.doesNotMatch(withOutcome("done", false, 0, null, 30_000, 59_120), /Signal:/);
+  assert.doesNotMatch(withOutcome("boom", false, 1, null, 30_000, 59_120), /Signal:/);
+});
+
+test("a command killed by a signal names THAT signal, not a default", () => {
+  assert.match(withOutcome("", false, null, "SIGKILL", 30_000, 4242), /Signal: SIGKILL sent to process \(PID 4242\)/);
+});
+
+test("with no pid known the outcome line still stands alone", () => {
+  assert.equal(withOutcome("", true, null, null, 30_000), "✖ Timed out after 30s — killed");
 });

@@ -21,6 +21,7 @@ const SKIP = "No, don't";
 
 export const addMcpServer: Tool = {
   name: "add_mcp_server",
+  deferred: true,
   readOnly: false,
   // The credential guidance was WRONG, not merely thin. It told the model to reference
   // an environment variable, and the parameter example showed "$GITHUB_TOKEN" — but

@@ -25,6 +25,7 @@ import type { LineSpan } from "../../tools/spanCore.js";
 import { pickNearest } from "../../tools/spanCore.js";
 import { parseTree, type Extraction, type ExtractedDef, type ExtractedRef, type ExtractedImport } from "./treesitter.js";
 import { extractDomRefs } from "./domRefs.js";
+import { IN_WORKER, isolatedMarkup } from "./isolation.js";
 
 const HTML_EXTS = new Set([".html", ".htm"]);
 const CSS_EXTS = new Set([".css", ".scss", ".sass", ".less"]);
@@ -45,9 +46,14 @@ function isHtml(absPath: string): boolean {
 /** Extract defs/refs/imports from an HTML or CSS file. Null on failure (the caller
  *  degrades to grep/read), matching treeSitterExtract's contract. */
 export async function extractMarkup(absPath: string, code: string): Promise<Extraction | null> {
+  // Isolated like the code tier, and for the same measured reason. This tier had no
+  // guard at all before — not even the grammar-size one — while parsing the big nested
+  // pages that cost the most. Inside the worker this check is false and the real work
+  // below runs, which is what the child is for.
+  if (!IN_WORKER) return isolatedMarkup(absPath, code);
   try {
     if (isHtml(absPath)) return await extractHtml(code);
-    return { defs: await extractCssDefs(code, 0), refs: [], imports: [] };
+    return { ...(await extractCssDefs(code, 0)), imports: [] };
   } catch {
     return null;
   }
@@ -56,16 +62,30 @@ export async function extractMarkup(absPath: string, code: string): Promise<Extr
 // ── CSS ────────────────────────────────────────────────────────────────────────
 
 /**
- * Every class/id selector in a stylesheet, as a definition at its rule's line.
+ * Every class/id selector in a stylesheet: DEFINED once, at the first rule that names
+ * it, and REFERENCED at every rule after that.
+ *
  * Robust by design: instead of leaning on CSS grammar sub-node names, we take each
  * rule's whole selector text and pull `.class` / `#id` tokens from it — so
  * `.hero-stats .value { }` records BOTH `hero-stats` and `value` at that rule.
  * `lineOffset` shifts lines when the CSS is an embedded <style> block.
+ *
+ * WHY DEDUPED. A class is written once per rule that touches it, and a real stylesheet
+ * touches the same class from many rules: measured on a 2,045-line sheet, 439 symbols
+ * for 128 distinct names — 3.4x — with `.sepia` stored sixty-six separate times. That
+ * one file was then 83% of the whole project's symbol graph, which is what the ranking
+ * ranks over and what an outline lists. Nothing is lost by deduping: "every rule that
+ * styles this class" is a REFERENCES question, and it is now answered as one.
  */
-async function extractCssDefs(code: string, lineOffset: number): Promise<ExtractedDef[]> {
+async function extractCssDefs(
+  code: string,
+  lineOffset: number,
+  seen: Set<string> = new Set(),
+): Promise<{ defs: ExtractedDef[]; refs: ExtractedRef[] }> {
   const tree = await parseTree(CSS_GRAMMAR, code);
-  if (!tree) return [];
+  if (!tree) return { defs: [], refs: [] };
   const defs: ExtractedDef[] = [];
+  const refs: ExtractedRef[] = [];
   try {
     for (const rule of tree.rootNode.descendantsOfType("rule_set")) {
       const selectors = rule.namedChildren.find((c) => c.type === "selectors") ?? rule.namedChild(0);
@@ -73,12 +93,17 @@ async function extractCssDefs(code: string, lineOffset: number): Promise<Extract
       const line = rule.startPosition.row + 1 + lineOffset;
       const endLine = rule.endPosition.row + 1 + lineOffset;
       const sig = oneLine(selText);
-      const seen = new Set<string>();
+      const here = new Set<string>();
       for (const m of selText.matchAll(/([.#])([A-Za-z_][\w-]*)/g)) {
         const name = m[2]!;
         const kind = m[1] === "#" ? "id" : "class";
         const key = `${kind}:${name}`;
-        if (seen.has(key)) continue; // a class repeated in one selector counts once
+        if (here.has(key)) continue; // a class repeated in one selector counts once
+        here.add(key);
+        if (seen.has(key)) {
+          refs.push({ name, line });
+          continue;
+        }
         seen.add(key);
         defs.push({ name, kind, line, endLine, signature: sig });
       }
@@ -86,7 +111,7 @@ async function extractCssDefs(code: string, lineOffset: number): Promise<Extract
   } finally {
     tree.delete();
   }
-  return defs;
+  return { defs, refs };
 }
 
 // ── HTML ─────────────────────────────────────────────────────────────────────
@@ -122,9 +147,16 @@ async function extractHtml(code: string): Promise<Extraction> {
 
     // Embedded <style> → CSS defs; <script> → DOM refs. raw_text carries the inner
     // source; its start row shifts the reported lines to the enclosing file.
+    const cssSeen = new Set<string>();
     for (const style of root.descendantsOfType("style_element")) {
       const raw = style.namedChildren.find((c) => c.type === "raw_text");
-      if (raw) defs.push(...(await extractCssDefs(raw.text, raw.startPosition.row)));
+      if (raw) {
+        // One `seen` across every <style> block in the page, so a class defined in the
+        // first block is a reference in the second rather than a second definition.
+        const css = await extractCssDefs(raw.text, raw.startPosition.row, cssSeen);
+        defs.push(...css.defs);
+        refs.push(...css.refs);
+      }
     }
     for (const script of root.descendantsOfType("script_element")) {
       const raw = script.namedChildren.find((c) => c.type === "raw_text");

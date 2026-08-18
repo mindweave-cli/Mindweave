@@ -7,16 +7,21 @@
  * sessions existed and tell the user to run a command themselves — which is not an
  * answer, it is a deflection with a citation.
  *
- * Two tools fix that, and the split between them is the whole design:
+ * One tool fixes that, at two levels of specificity:
  *
- *  - `list_sessions` is cheap. Dates, opening prompt, last prompt, size. No
- *    transcript is opened, so the model can always afford to look.
- *  - `read_session` defaults to the NOTES, not the transcript. The notes are the
- *    session's own maintained summary of what it did and where it got to — already
- *    written, already compact, already the thing a human means by "what did we do".
- *    When a session kept no notes it falls back to the (clipped) transcript in the
- *    SAME call rather than asking the model to try again, so one call always answers.
- *    `full:true` forces the transcript when that is genuinely what's wanted.
+ *  - with NO id it lists, and listing is cheap. Dates, opening prompt, last prompt,
+ *    size. No transcript is opened, so the model can always afford to look.
+ *  - with an id it reads, defaulting to the NOTES rather than the transcript. The
+ *    notes are the session's own maintained summary of what it did and where it got
+ *    to — already written, already compact, already the thing a human means by "what
+ *    did we do". When a session kept no notes it falls back to the (clipped)
+ *    transcript in the SAME call rather than asking the model to try again, so one
+ *    call always answers. `full:true` forces the transcript when that is wanted.
+ *
+ * This was two tools, `list_sessions` and `read_session`. They shared a store, an
+ * access pattern, and a caller — reading was nearly always the direct follow-up to
+ * listing — so the split only ever gave the model a decision to get wrong, and cost
+ * two advertised schemas to describe one idea.
  *
  * Read-only, and scoped to THIS project's directory: these read the agent's own
  * saved work and nothing else. Another tool's data stays behind the ask-first gate
@@ -32,34 +37,64 @@ const DEFAULT_LIMIT = 10;
 /** Characters of transcript to return before clipping — a transcript is unbounded. */
 const MAX_TRANSCRIPT_CHARS = 20_000;
 
-export const listSessionsTool: Tool = {
-  name: "list_sessions",
+/**
+ * One tool, two levels of specificity: no `id` lists, an `id` reads.
+ *
+ * These were `list_sessions` and `read_session`. Same store, same access pattern, and
+ * the second was almost always a direct follow-up to the first — so the split bought
+ * the model a routing decision and cost two advertised schemas to describe one idea.
+ */
+export const sessionsTool: Tool = {
+  name: "sessions",
+  deferred: true,
   readOnly: true,
   description:
-    "List your own past sessions in this project, most recent first: when each ran, " +
-    "what the user opened with, what they last asked, and how long it went. Use this " +
-    "when the user refers to earlier work ('last session', 'what did we do', 'the bug " +
-    "we fixed yesterday') — you have this history, so look it up instead of guessing " +
-    "or saying you cannot see it. Cheap: no transcripts are opened. Follow up with " +
-    "read_session to get what actually happened in one.",
+    "Look at your own past sessions in this project. Use this whenever the user refers " +
+    "to earlier work ('last session', 'what did we do', 'the bug we fixed yesterday') — " +
+    "you have this history, so look it up instead of guessing or saying you cannot see " +
+    "it.\n" +
+    "With no `id` it LISTS past sessions, newest first: when each ran, what the user " +
+    "opened with, what they last asked, how long it went. Cheap — no transcripts are " +
+    "opened.\n" +
+    "With an `id` it READS that session, returning its maintained notes (its own running " +
+    "summary of the work and where it got to, which is what 'what did we do' means). If " +
+    "that session kept no notes you get its raw exchange instead, in the same call, so " +
+    "one call always answers. Pass `id: 'latest'` for the most recent past session, and " +
+    "`full: true` only when you specifically want the raw exchange over the notes.",
   parameters: {
     type: "object",
     additionalProperties: false,
     properties: {
+      id: {
+        type: "string",
+        description:
+          "A session id to read, or 'latest' for the most recent. Omit entirely to list sessions instead.",
+      },
       limit: {
         type: "integer",
         minimum: 1,
         maximum: 50,
-        description: `How many to list (default ${DEFAULT_LIMIT}, newest first).`,
+        description: `Listing only: how many to list (default ${DEFAULT_LIMIT}, newest first).`,
+      },
+      full: {
+        type: "boolean",
+        description: "Reading only: return the raw transcript instead of the notes. Large.",
       },
     },
   },
   async execute(args, ctx): Promise<ToolResult> {
+    // The dispatch: naming a session means read it, otherwise list what there is.
+    const wanted = typeof args.id === "string" ? args.id.trim() : "";
+    return wanted ? readOne(args, ctx, wanted) : listAll(args, ctx);
+  },
+};
+
+async function listAll(args: Record<string, unknown>, ctx: Parameters<Tool["execute"]>[1]): Promise<ToolResult> {
     const root = anchorOf(ctx);
     const all = await listSessions(root);
     const past = all.filter((m) => m.id !== ctx.sessionId);
     if (past.length === 0) {
-      return { output: "No earlier sessions are saved for this project.", summary: "no past sessions" };
+      return { output: "No earlier sessions are saved for this project.", summary: "no past sessions", quiet: true };
     }
     const limit = clampInt(args.limit, DEFAULT_LIMIT, 1, 50);
     const shown = past.slice(0, limit);
@@ -67,50 +102,33 @@ export const listSessionsTool: Tool = {
     const more = past.length > shown.length ? `\n\n(${past.length - shown.length} older, raise \`limit\` to see them.)` : "";
     return {
       output:
-        `Your past sessions in this project, newest first. Use read_session with an id ` +
-        `for what happened in one:\n\n${lines.join("\n\n")}${more}`,
+        `Your past sessions in this project, newest first. Call sessions again with an ` +
+        `id for what happened in one:\n\n${lines.join("\n\n")}${more}`,
       summary: `${past.length} past session${past.length === 1 ? "" : "s"}`,
+      // Looking up its own history is bookkeeping, not news — same call made for
+      // compaction/verification. The answer shows up in the reply itself.
+      quiet: true,
     };
-  },
-};
+}
 
-export const readSessionTool: Tool = {
-  name: "read_session",
-  readOnly: true,
-  description:
-    "Read what happened in one of your past sessions. By default returns that " +
-    "session's maintained notes — its own running summary of the work and where it " +
-    "got to, which is what someone means by 'what did we do'. If that session kept no " +
-    "notes you get its raw exchange instead, in the same call, so one call always " +
-    "answers. Pass full:true only when you specifically want the raw exchange over the " +
-    "notes. Get ids from list_sessions, or omit `id` for the most recent session.",
-  parameters: {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      id: {
-        type: "string",
-        description: "The session id from list_sessions. Omit for the most recent past session.",
-      },
-      full: {
-        type: "boolean",
-        description: "Return the raw transcript instead of the notes. Large — only when the notes don't answer it.",
-      },
-    },
-  },
-  async execute(args, ctx): Promise<ToolResult> {
+async function readOne(
+  args: Record<string, unknown>,
+  ctx: Parameters<Tool["execute"]>[1],
+  wanted: string,
+): Promise<ToolResult> {
     const root = anchorOf(ctx);
     const all = await listSessions(root);
     const past = all.filter((m) => m.id !== ctx.sessionId);
     if (past.length === 0) {
-      return { output: "No earlier sessions are saved for this project.", summary: "no past sessions" };
+      return { output: "No earlier sessions are saved for this project.", summary: "no past sessions", quiet: true };
     }
 
-    const wanted = typeof args.id === "string" ? args.id.trim() : "";
-    const meta = wanted ? past.find((m) => m.id === wanted) : past[0];
+    // "latest" is the explicit spelling of what used to be "omit the id". Omitting it
+    // now means LIST, so the shorthand needs a word of its own rather than a gap.
+    const meta = wanted === "latest" ? past[0] : past.find((m) => m.id === wanted);
     if (!meta) {
       return fail(
-        `no saved session with id '${wanted}'. Call list_sessions to see which ids exist.`,
+        `no saved session with id '${wanted}'. Call sessions with no id to see which ids exist.`,
       );
     }
 
@@ -120,6 +138,7 @@ export const readSessionTool: Tool = {
       return {
         output: `${header}\n\n${renderTranscript(transcript ?? [])}`,
         summary: `session ${short(meta.id)} (transcript)`,
+        quiet: true,
       };
     }
 
@@ -137,14 +156,17 @@ export const readSessionTool: Tool = {
           `${header}\n\nThat session kept no notes (it may have been short), so this is its ` +
           `raw exchange instead:\n\n${body}`,
         summary: `session ${short(meta.id)} (transcript, no notes)`,
+        quiet: true,
       };
     }
     return {
       output: `${header}\n\nWhat that session recorded about its own work:\n\n${notes}`,
       summary: `session ${short(meta.id)} (notes)`,
+      // Reading its own history is bookkeeping, not news — same as the listing above.
+      // The answer is what shows up, not the lookup itself.
+      quiet: true,
     };
-  },
-};
+}
 
 /** One session as a compact block: id, when, size, and the prompts that bracket it. */
 function describe(meta: SessionMeta): string {

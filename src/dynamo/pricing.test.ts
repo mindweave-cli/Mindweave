@@ -87,3 +87,43 @@ test("formatTokens and formatCost render compactly", () => {
   assert.equal(formatCost(0.018), "~$0.018");
   assert.equal(formatCost(1.42), "~$1.42");
 });
+
+// ── The number the status line shows ──────────────────────────────────────────
+
+test("billedTokens counts each token ONCE, however many tool rounds a turn took", () => {
+  // The defect this exists to prevent. A turn re-sends its whole prompt on every
+  // tool round, so summing per-call totals counts the same text once per step: the
+  // figure climbs with tool use rather than with work done, and a long turn looks
+  // catastrophically expensive when it was mostly cache reads.
+  const s = summarizeTask(
+    [u(40_000, 1000, 30_000, 10_000), u(45_000, 1000, 42_000, 3000), u(50_000, 2000, 47_000, 3000)],
+    "deepseek-v4-flash",
+  )!;
+  // Fresh input (16K) + everything generated (4K). Not 139K.
+  assert.equal(s.billedTokens, 16_000 + 4000);
+  assert.ok(s.billedTokens < s.totalTokens / 6, "the inflated total must not be what we show");
+});
+
+test("a turn with NO tool rounds reports the same either way", () => {
+  // A single call has nothing to double-count, so the honest number and the naive
+  // one agree. If they ever disagree here, the fix has broken the simple case.
+  const s = summarizeTask([u(1000, 200, 0, 1000)], "deepseek-v4-flash")!;
+  assert.equal(s.billedTokens, 1200);
+  assert.equal(s.billedTokens, s.totalTokens);
+});
+
+test("billedTokens grows when real work is done, not when the prompt is re-read", () => {
+  // Two turns, same number of steps. The second reads far more cache but does the
+  // same fresh work, and must not report a larger figure.
+  const light = summarizeTask([u(10_000, 500, 0, 10_000), u(11_000, 500, 10_000, 1000)], "deepseek-v4-flash")!;
+  const heavy = summarizeTask([u(90_000, 500, 80_000, 10_000), u(91_000, 500, 90_000, 1000)], "deepseek-v4-flash")!;
+  assert.equal(light.billedTokens, heavy.billedTokens, "cache reads must not inflate the figure");
+  assert.ok(heavy.totalTokens > light.totalTokens * 4, "the naive total does inflate, which is the point");
+});
+
+test("an unreported cache split still produces an honest billed figure", () => {
+  // Providers that report no split have the whole prompt counted as fresh, so the
+  // figure over-states rather than under-states. Never the other way round.
+  const s = summarizeTask([u(5000, 100, 0, 0)], "deepseek-v4-flash")!;
+  assert.equal(s.billedTokens, 5100);
+});

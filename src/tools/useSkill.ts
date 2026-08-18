@@ -14,6 +14,10 @@ import { findSkill, loadSkillBody, substituteSkillArgs } from "../governor/skill
 export const useSkill: Tool = {
   name: "use_skill",
   readOnly: true,
+  // Offered only where there is something to run. A project with no skills is the
+  // common case, and in it this tool is not merely unused — it is uncallable, so its
+  // schema was pure cost and any call it attracted could only fail.
+  relevantWhen: (ctx) => (ctx.governance?.skills.length ?? 0) > 0,
   // available_skills is a FILTERED view: a skill scoped with `globs` only appears when
   // the working set matches, yet stays runnable by name. Describing the catalog as the
   // set of runnable skills therefore understated what is reachable, and the one place

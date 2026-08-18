@@ -41,8 +41,25 @@ function parseEnvPrice(raw: string | undefined): ModelPrice | null {
 
 /** What a finished task amounts to, derived from each call's reported usage. */
 export interface TaskUsage {
-  /** Total tokens the task actually used (sum of every call's total) — the real
-   *  throughput the provider reports/bills. */
+  /**
+   * The turn's REAL token cost: unique input the model had to read, plus everything
+   * it generated. This is the number to show a human.
+   *
+   * It is deliberately NOT `totalTokens`. A turn re-sends its whole prompt on every
+   * tool round, so summing per-call totals counts the same text once per step: a
+   * five-step turn over a 30K context reports ~150K, and the figure climbs with tool
+   * use rather than with work done. Cache HITS are exactly those re-reads — the
+   * tokens were already counted as a miss the first time they were sent — so adding
+   * misses and output counts every token precisely once.
+   *
+   * Concretely, over two steps of a 30K conversation that grows by a 1K tool result:
+   * misses are 30K then 1K, hits are 0 then 29K. `billedTokens` is 31K plus output,
+   * which is the unique text that existed. `totalTokens` would say 60K.
+   */
+  billedTokens: number;
+  /** Sum of every call's reported total. Kept because it is what the provider's own
+   *  dashboard shows (it bills cache reads too, just cheaply), but it inflates with
+   *  tool rounds — see `billedTokens`, which is what the UI displays. */
   totalTokens: number;
   /** Current context-window occupancy = the last call's prompt size. NOT a sum. */
   ctxTokens: number;
@@ -86,7 +103,18 @@ export function summarizeTask(samples: Usage[], modelId?: string): TaskUsage | n
   const totalIn = hit + miss;
   const cachePct = totalIn > 0 ? Math.round((hit / totalIn) * 100) : 0;
   const costUsd = (hit * price.cacheHit + miss * price.cacheMiss + out * price.output) / 1_000_000;
-  return { totalTokens: total, ctxTokens, cacheHitTokens: hit, cacheMissTokens: miss, outputTokens: out, cachePct, costUsd };
+  return {
+    // Misses + output: every token counted exactly once. See the field's own note
+    // for why this is not `total`.
+    billedTokens: miss + out,
+    totalTokens: total,
+    ctxTokens,
+    cacheHitTokens: hit,
+    cacheMissTokens: miss,
+    outputTokens: out,
+    cachePct,
+    costUsd,
+  };
 }
 
 /** Optional per-task ceilings. 0 disables a limit. */

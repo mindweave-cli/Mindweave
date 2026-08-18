@@ -216,3 +216,40 @@ test("forbidden-commands: pattern matches as a normalized case-insensitive subst
   assert.equal(forbiddenCommandPatternReason({ patterns: [], root: "/proj" }, "tauri dev"), null);
   assert.equal(forbiddenCommandPatternReason(undefined, "tauri dev"), null);
 });
+
+// ── the catalog is bounded, because it lives in the cached prefix forever ──────
+
+test("a rambling skill description is clipped, but the skill stays callable", () => {
+  // Only the prose is clipped. The NAME and argument hint are what make a skill
+  // invocable — use_skill takes a name and nothing lists them — so clipping those
+  // would silently remove a capability rather than save tokens.
+  const skills = [
+    { name: "deploy", description: "x".repeat(500), whenToUse: "y".repeat(500), dir: "/d", argumentHint: "<env>" },
+  ] as unknown as Parameters<typeof renderSkillCatalog>[0];
+
+  const out = renderSkillCatalog(skills);
+  assert.ok(out.startsWith("- deploy <env>"), "name and hint survive intact");
+  assert.ok(out.length < 300, `the line must be bounded, got ${out.length}`);
+  assert.match(out, /…/, "and say it was cut");
+});
+
+test("a short catalog is untouched", () => {
+  const skills = [
+    { name: "ship", description: "release flow", whenToUse: "cutting a release", dir: "/d" },
+  ] as unknown as Parameters<typeof renderSkillCatalog>[0];
+  assert.equal(renderSkillCatalog(skills), "- ship: release flow — use when: cutting a release");
+});
+
+test("an absurd number of skills is capped, and the overflow is reported", () => {
+  const skills = Array.from({ length: 130 }, (_, i) => ({
+    name: `s${i}`,
+    description: "d",
+    whenToUse: "",
+    dir: "/d",
+  })) as unknown as Parameters<typeof renderSkillCatalog>[0];
+
+  const out = renderSkillCatalog(skills);
+  const entries = out.split("\n").filter((l) => l.startsWith("- "));
+  assert.equal(entries.length, 100, "capped at the backstop");
+  assert.match(out, /30 more skill\(s\) exist/, "silence here would hide capabilities from the model");
+});

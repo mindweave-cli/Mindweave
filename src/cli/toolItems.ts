@@ -7,25 +7,42 @@
  *    ("Read home.html (1747 lines)").
  *  - collapseAdjacent: fold a RUN of identical consecutive items into one line with a
  *    ×N count. This is the "collide the same silent thing when it repeats" rule — the
- *    fix for a model that polls `shell_output` (or re-reads one file) over and over:
+ *    fix for a model that polls `shells` (or re-reads one file) over and over:
  *    nine `shell #1 (running)` rows become one `shell #1 (running) ×9`. Only identical
  *    ADJACENT items merge, so distinct calls still each show; and only silent/groupable
  *    tools ever land here — an edit diff or a command's output always keeps its own row.
  */
 import type { ToolGroupItem } from "./transcript.js";
 
-// Present-continuous verb shown while a call is still running, so a row reads
-// "Reading home.html" live and then resolves to "Read home.html (1747 lines)".
+// Present-continuous verb for a block that belongs to the turn still in progress,
+// so a row reads "Reading home.html" while Mindweave works and becomes "Read
+// home.html" when the turn ends. The block itself never changes shape — the verb
+// is the only thing that moves, in place (see activeForm / the `live` flag).
+//
+// Only names with a natural continuous form are listed. Anything else falls back
+// to itself, which keeps the rule honest: a header may stay identical, but it may
+// never mutate into a DIFFERENT word or grow a body.
 export const ACTIVE_FORM: Record<string, string> = {
   Read: "Reading",
+  Update: "Updating",
+  Write: "Writing",
   Search: "Searching",
   Glob: "Finding",
   List: "Listing",
+  "Executed shell command": "Executing shell command",
   Map: "Mapping",
   Fetch: "Fetching",
   Shell: "Checking",
   Check: "Checking",
+  Add: "Adding",
+  Link: "Linking",
 };
+
+/** The verb a tool row shows: present-continuous while its turn is live, the
+ *  plain display name once the turn has ended. */
+export function activeForm(name: string, live: boolean): string {
+  return live ? ACTIVE_FORM[name] ?? name : name;
+}
 
 /** What a discovery/rail item shows: while it runs, a present-tense line ("Reading
  *  home.html"); once it resolves, its tool-authored result ("Read home.html (1747

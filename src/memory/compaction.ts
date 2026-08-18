@@ -70,7 +70,7 @@ export const IMAGE_CLEARED_STUB = "was attached here but is no longer in context
  *  we clear the input too. Done here on the transcript, this is provider-AGNOSTIC —
  *  every model, not just DeepSeek, gets the saving, and it stays correct even once a
  *  provider offers an equivalent feature natively. */
-const CONTENT_CARRYING_TOOLS = new Set(["edit_file", "write_file", "multi_edit", "replace_symbol_body"]);
+const CONTENT_CARRYING_TOOLS = new Set(["edit", "write_file", "replace_symbol_body"]);
 
 const CLEARED_INPUT_NOTE =
   "content cleared to save context — the file's current state is in the working set, or re-read it";
@@ -146,6 +146,7 @@ export function estimateEntriesTokens(entries: Entry[]): number {
 export function microcompact(
   entries: Entry[],
   keepLastN: number = KEEP_LAST_N,
+  supersededPaths: ReadonlySet<string> = new Set(),
 ): {
   entries: Entry[];
   cleared: number;
@@ -166,6 +167,31 @@ export function microcompact(
   }
   if (lastRoundStart >= 0) {
     clearable = new Set([...clearable].filter((i) => i < lastRoundStart));
+  }
+
+  // A file the WORKING SET carries in full is represented twice: once here in the
+  // transcript, and once again in the <working_files> block that is rebuilt at the
+  // boundary every step. Those copies are not equivalent — the working-set one is
+  // current by construction, and the transcript one is a snapshot of whatever the file
+  // said when it was read — so the transcript copy is the redundant one, and clearing
+  // it costs the model nothing it cannot already see, fresher.
+  //
+  // This deliberately overrides BOTH protections above. keepLastN and the live-round
+  // rule exist so the model is never left blind on something it has not acted on; a
+  // file rendered whole at the boundary is the one case where neither concern applies.
+  //
+  // It also deliberately happens HERE rather than eagerly each turn. Clearing an entry
+  // rewrites the transcript, and the transcript is the CACHED half of the request: doing
+  // it on an ordinary turn would trade a cheap cached-read for a full prefix rewrite at
+  // 1.25x, which is a straight loss. Microcompaction is already discarding that cache,
+  // so riding along with it is the version that is actually free.
+  if (supersededPaths.size > 0) {
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      if (e?.role === "tool" && e.fullContentOf && supersededPaths.has(e.fullContentOf)) {
+        clearable.add(i);
+      }
+    }
   }
 
   // Which edit/write tool-call INPUTS to clear: map each clearable RESULT back to the

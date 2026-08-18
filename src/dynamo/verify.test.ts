@@ -1,27 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isFileMutation, mutationNeedsVerification, looksLikeVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, normalizeErrorSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, narrationFault, narrationNudge, NARRATION_SENTENCES} from "./verify.js";
+import { isFileMutation, mutationNeedsVerification, looksLikeVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, normalizeErrorSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, narrationFault, narrationNudge, nearestTools, unknownToolError, replyFault, replyRewrite, REPLY_LINES, NARRATION_SENTENCES} from "./verify.js";
 
 test("file mutations are the edit/write tools", () => {
-  assert.ok(isFileMutation("edit_file"));
+  assert.ok(isFileMutation("edit"));
   assert.ok(isFileMutation("write_file"));
-  assert.ok(isFileMutation("multi_edit"));
+  assert.ok(isFileMutation("replace_symbol_body"));
   assert.ok(!isFileMutation("read_file"));
   assert.ok(!isFileMutation("run_command"));
 });
 
 test("mutationNeedsVerification: code/config edits DO need a check", () => {
-  assert.ok(mutationNeedsVerification("edit_file", { path: "src/dynamo/engine.ts" }));
+  assert.ok(mutationNeedsVerification("edit", { path: "src/dynamo/engine.ts" }));
   assert.ok(mutationNeedsVerification("write_file", { path: "src/App.tsx" }));
-  assert.ok(mutationNeedsVerification("multi_edit", { path: "src-tauri/Cargo.toml" }));
+  assert.ok(mutationNeedsVerification("edit", { path: "src-tauri/Cargo.toml" }));
   assert.ok(mutationNeedsVerification("write_file", { path: "package.json" }));
   assert.ok(mutationNeedsVerification("replace_symbol_body", { path: "lib.rs" }));
 });
 
 test("mutationNeedsVerification: docs-only edits do NOT trip the gate", () => {
-  assert.ok(!mutationNeedsVerification("multi_edit", { path: "MINDWEAVE.md" }));
+  assert.ok(!mutationNeedsVerification("edit", { path: "MINDWEAVE.md" }));
   assert.ok(!mutationNeedsVerification("write_file", { path: "docs/README.md" }));
-  assert.ok(!mutationNeedsVerification("edit_file", { path: "notes.txt" }));
+  assert.ok(!mutationNeedsVerification("edit", { path: "notes.txt" }));
   assert.ok(!mutationNeedsVerification("write_file", { path: "CHANGELOG.mdx" }));
 });
 
@@ -31,7 +31,7 @@ test("mutationNeedsVerification: non-mutations and unknown paths", () => {
   assert.ok(!mutationNeedsVerification("run_command", { command: "npm test" }));
   // An extensionless or missing path is treated as code (safe default: gate fires).
   assert.ok(mutationNeedsVerification("write_file", { path: "Dockerfile" }));
-  assert.ok(mutationNeedsVerification("edit_file", {}));
+  assert.ok(mutationNeedsVerification("edit", {}));
   // A dot in a directory name, not the filename, is not an extension.
   assert.ok(mutationNeedsVerification("write_file", { path: "my.docs/lib" }));
 });
@@ -82,7 +82,7 @@ test("isVerification counts diagnostics and check-like commands", () => {
 
 test("reScopeCheck: an ordinary turn that never completes a list never pauses", () => {
   // Editing with an in-progress list — no completion yet, no pause.
-  const r = reScopeCheck(false, [{ name: "edit_file", summary: "edited" }], [
+  const r = reScopeCheck(false, [{ name: "edit", summary: "edited" }], [
     { status: "in_progress" },
     { status: "pending" },
   ]);
@@ -109,31 +109,31 @@ test("reScopeCheck: a NEW pending list after a completion triggers the pause", (
 
 test("reScopeCheck: finishing then answering (no new list) does not pause", () => {
   // Completed earlier, and the model is wrapping up — the list stays empty.
-  const r = reScopeCheck(true, [{ name: "edit_file", summary: "edited" }], []);
+  const r = reScopeCheck(true, [{ name: "edit", summary: "edited" }], []);
   assert.equal(r.pause, false);
 });
 
-test("isBackgroundPollStep: a shell_output poll of a still-running shell is a poll step", () => {
-  assert.equal(isBackgroundPollStep([{ name: "shell_output", summary: "shell #1 (running)" }]), true);
+test("isBackgroundPollStep: reading a still-running shell is a poll step", () => {
+  assert.equal(isBackgroundPollStep([{ name: "shells", summary: "shell #1 (running)" }]), true);
 });
 
-test("isBackgroundPollStep: list_shells with something running is a poll step", () => {
-  assert.equal(isBackgroundPollStep([{ name: "list_shells", summary: "1 running, 1 total" }]), true);
+test("isBackgroundPollStep: listing with something running is a poll step", () => {
+  assert.equal(isBackgroundPollStep([{ name: "shells", summary: "1 running, 1 total" }]), true);
 });
 
-test("isBackgroundPollStep: list_shells with nothing running is NOT a poll step", () => {
+test("isBackgroundPollStep: listing with nothing running is NOT a poll step", () => {
   // "0 running, 2 total" must not false-match on the word "running".
-  assert.equal(isBackgroundPollStep([{ name: "list_shells", summary: "0 running, 2 total" }]), false);
+  assert.equal(isBackgroundPollStep([{ name: "shells", summary: "0 running, 2 total" }]), false);
 });
 
 test("isBackgroundPollStep: polling a FINISHED shell is not a poll step (model can report it)", () => {
-  assert.equal(isBackgroundPollStep([{ name: "shell_output", summary: "shell #1 (exited 0)" }]), false);
+  assert.equal(isBackgroundPollStep([{ name: "shells", summary: "shell #1 (exited 0)" }]), false);
 });
 
 test("isBackgroundPollStep: real work alongside a poll is not a poll step", () => {
   const step = [
-    { name: "shell_output", summary: "shell #1 (running)" },
-    { name: "edit_file", summary: "edited app.tsx" },
+    { name: "shells", summary: "shell #1 (running)" },
+    { name: "edit", summary: "edited app.tsx" },
   ];
   assert.equal(isBackgroundPollStep(step), false);
 });
@@ -154,12 +154,12 @@ test("stepFailureSignature: null unless EVERY result in the step errored", () =>
     ]),
     null,
   );
-  assert.ok(stepFailureSignature([{ name: "edit_file", output: "file not found", isError: true }]));
+  assert.ok(stepFailureSignature([{ name: "edit", output: "file not found", isError: true }]));
 });
 
 test("stepFailureSignature: same edit failing twice yields the same signature", () => {
-  const a = stepFailureSignature([{ name: "edit_file", output: "file src/App.css not found. Use write_file.", isError: true }]);
-  const b = stepFailureSignature([{ name: "edit_file", output: "file src/App.css not found. Use write_file.", isError: true }]);
+  const a = stepFailureSignature([{ name: "edit", output: "file src/App.css not found. Use write_file.", isError: true }]);
+  const b = stepFailureSignature([{ name: "edit", output: "file src/App.css not found. Use write_file.", isError: true }]);
   assert.equal(a, b);
 });
 
@@ -260,7 +260,7 @@ test("failedActionLabel: a shell failure shows the command that was actually run
 });
 
 test("failedActionLabel: other tools show what they acted on, or just their name", () => {
-  assert.equal(failedActionLabel("edit_file", { path: "src/App.css" }), "edit_file src/App.css");
+  assert.equal(failedActionLabel("edit", { path: "src/App.css" }), "edit src/App.css");
   assert.equal(failedActionLabel("read_file", { file_path: "a.ts" }), "read_file a.ts");
   assert.equal(failedActionLabel("todo_write", {}), "todo_write");
 });
@@ -321,4 +321,95 @@ test("naming the same file twice is not restating", () => {
   const first = "Patching runCommand in backgroundShells.";
   const next = "runCommand is patched; backgroundShells still needs the guard.";
   assert.equal(narrationFault(next, [first]), null);
+});
+
+test("a near-miss tool name gets a suggestion the model can act on", () => {
+  // The point of the hint: turn a dead end into a correction. A one-character slip
+  // and a plural are both things a model actually produces.
+  assert.deepEqual(nearestTools("read_fil", ["read_file", "write_file", "search"]), ["read_file"]);
+  assert.deepEqual(nearestTools("searches", ["read_file", "write_file", "search"]), ["search"]);
+});
+
+test("a name nothing resembles gets NO suggestion rather than the shortest one", () => {
+  // Seen live: the model invented `index_results`. Pointing it at whichever registered
+  // name happens to be shortest is worse than pointing it at nothing.
+  assert.deepEqual(nearestTools("index_results", ["read_file", "write_file", "search", "edit"]), []);
+});
+
+test("the unknown-tool error names the tool, denies it exists, and gives a way forward", () => {
+  const near = unknownToolError("read_fil", ["read_file", "search"]);
+  assert.match(near, /unknown tool 'read_fil'/);
+  assert.match(near, /Did you mean 'read_file'\?/);
+
+  const far = unknownToolError("index_results", ["read_file", "search"]);
+  assert.match(far, /unknown tool 'index_results'/);
+  assert.match(far, /find_tools/, "with no near miss it must still say where to look");
+});
+
+// ── The reply gate ────────────────────────────────────────────────────────────
+// Written against the observed failure: asked what was missing from a frontend, it
+// answered with two bold section labels, eleven bullets, three numbered questions and
+// an "My honest opinion" paragraph. The prompt already forbade all of that.
+
+test("a turn that only ANSWERED is never gated, however long", () => {
+  // The budget exists to stop padding after work, not to stop answering a question.
+  const essay = Array.from({ length: 40 }, (_, i) => `Paragraph ${i} of a real explanation.`).join("\n");
+  assert.equal(replyFault(essay, false), null);
+});
+
+test("a short plain confirmation after work passes", () => {
+  assert.equal(replyFault("Added. The spending-cap branch now subtracts subs before the split.", true), null);
+});
+
+test("a wall of prose after work is over budget", () => {
+  const wall = Array.from({ length: 9 }, (_, i) => `Sentence ${i} recapping what you just watched.`).join("\n");
+  const fault = replyFault(wall, true);
+  assert.equal(fault?.kind, "length");
+  assert.equal(fault?.lines, 9);
+});
+
+test("headings are refused after work at ANY length", () => {
+  // A four-line answer that needs a heading is not a four-line answer.
+  const fault = replyFault("## What changed\nThe cap now subtracts subs.", true);
+  assert.equal(fault?.kind, "shape");
+  assert.match(fault!.detail, /heading/);
+});
+
+test("bold section labels are refused — they are headings wearing a disguise", () => {
+  const fault = replyFault("**What exists:**\nThe cart loop is closed.", true);
+  assert.equal(fault?.kind, "shape");
+  assert.match(fault!.detail, /bold section label/);
+});
+
+test("one question is allowed, two are not", () => {
+  assert.equal(replyFault("Done. Want me to remove the stale reference too?", true), null);
+  const fault = replyFault("Done. Should I remove it? Or leave it for later?", true);
+  assert.equal(fault?.kind, "shape");
+  assert.match(fault!.detail, /2 questions/);
+});
+
+test("a fenced code block does not count against the budget", () => {
+  // A snippet or a diff in the reply is content, never padding.
+  const withCode = ["Fixed it, the guard was inverted.", "```ts", "a", "b", "c", "d", "e", "f", "```"].join("\n");
+  assert.equal(replyFault(withCode, true), null);
+});
+
+test("blank lines do not count as lines", () => {
+  const spaced = "One.\n\nTwo.\n\nThree.\n\nFour.";
+  assert.equal(replyFault(spaced, true), null, `${REPLY_LINES} lines of prose is within budget however it is spaced`);
+});
+
+test("an empty reply is not a fault", () => {
+  assert.equal(replyFault("   ", true), null);
+});
+
+test("the rewrite instruction names the fault, not just 'be shorter'", () => {
+  // "Be shorter" produces a shorter version of the same shape.
+  const shape = replyRewrite(replyFault("## Heading\nbody", true)!);
+  assert.match(shape, /1 heading/);
+  assert.match(shape, /plain prose/);
+
+  const length = replyRewrite(replyFault(Array.from({ length: 9 }, () => "Line.").join("\n"), true)!);
+  assert.match(length, /9 lines/);
+  assert.match(length, new RegExp(`${REPLY_LINES} lines or fewer`));
 });

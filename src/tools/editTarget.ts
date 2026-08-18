@@ -1,5 +1,5 @@
 /**
- * editTarget.ts — the shared pre-edit gauntlet for edit_file and multi_edit.
+ * editTarget.ts — the shared pre-edit gauntlet for the edit tool.
  *
  * Both tools must clear the exact same gates before touching a file: path guards
  * (protected + forbidden-with-lift), the file must exist and be a file, and it
@@ -24,6 +24,14 @@ export interface EditTarget {
   content: string;
   /** The file's detected EOL, to preserve on write. */
   eol: ReturnType<typeof detectEol>;
+  /**
+   * This file is NOT in the read ledger, so the caller must earn the edit by matching.
+   *
+   * See the read-before-edit gate below for why this is a flag rather than a refusal.
+   * The caller proceeds only if every `old_string` matches exactly once in `content`;
+   * anything less and it returns `unreadError(rawPath)` instead of writing.
+   */
+  unread: boolean;
 }
 
 export type PrepareResult = EditTarget | { ok: false; error: ToolResult };
@@ -68,15 +76,24 @@ export async function prepareEditTarget(
   if (stat.isDirectory()) return { ok: false, error: fail(`${rawPath} is a directory, not a file.`) };
 
   // Read-before-edit: the anti-confabulation gate.
-  const seen = ctx.reads.get(filePath);
-  if (!seen) {
-    return {
-      ok: false,
-      error: fail(
-        `${rawPath} has not been read this session. Read it first so your edit matches the real content.`,
-      ),
-    };
-  }
+  //
+  // It used to refuse here, outright, for any file not in the ledger. That cost far more
+  // than it protected. Measured on a real session: the model batched one identical
+  // navigation edit across five pages, four were refused, and it then read four whole
+  // files (~9,000 tokens each) and re-issued the same four edits — which all applied
+  // cleanly, first try. Twelve calls where five would have done, and every byte of those
+  // reads was spent proving something the edit was about to prove anyway.
+  //
+  // Because that is what an edit already does: `old_string` is matched against the
+  // file's CURRENT bytes (see the freshness note below, which says as much). A unique
+  // match IS evidence the model knows what is there — you cannot quote a line you have
+  // not seen. So an unread file is no longer refused; it is made to earn the edit by
+  // matching exactly. If it cannot, the caller returns the same "read it first" message
+  // it always did, and the read happens then — when it is actually needed.
+  // A search-sourced entry does not count as having seen the file: grep shows matching
+  // lines, never the file, so the edit still has to earn itself by matching exactly.
+  const record = ctx.reads.get(filePath);
+  const seen = record && !record.viaSearch ? record : undefined;
 
   let content;
   try {
@@ -97,7 +114,7 @@ export async function prepareEditTarget(
   // editing, its edit applies cleanly against content nobody has looked at. That is the
   // only path here where a confident edit is made on stale understanding, so it is worth
   // one comparison of two numbers we already hold.
-  if (changedSinceRead(seen, stat)) {
+  if (seen && changedSinceRead(seen, stat)) {
     return {
       ok: false,
       error: failQuietly(
@@ -108,7 +125,16 @@ export async function prepareEditTarget(
     };
   }
 
-  return { ok: true, filePath, content, eol: detectEol(content) };
+  return { ok: true, filePath, content, eol: detectEol(content), unread: seen === undefined };
+}
+
+/** The refusal an unread file earns only when its edits do NOT match exactly. Same
+ *  message the gate always gave; it is just paid for when it is actually true. */
+export function unreadError(rawPath: string): ToolResult {
+  return fail(
+    `${rawPath} has not been read this session, and your edit did not match it exactly. ` +
+      `Read it first so your edit matches the real content.`,
+  );
 }
 
 /**

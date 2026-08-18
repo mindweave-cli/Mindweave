@@ -79,3 +79,35 @@ test("a local href/src becomes an import; an absolute URL or anchor does not", a
   const ex = (await extractMarkup("i.html", html))!;
   assert.deepEqual(ex.imports.map((i) => i.spec), ["theme.css"]);
 });
+
+test("a class touched by many rules is DEFINED once and REFERENCED after that", async () => {
+  // A real stylesheet writes the same class from many rules. Storing one symbol per
+  // OCCURRENCE measured 439 symbols for 128 distinct names on a 2,045-line sheet
+  // (`.sepia` sixty-six times), and that one file was then 83% of the project's whole
+  // symbol graph — which is what ranking ranks over and what an outline lists.
+  const css = [
+    ".panel { color: red; }", // 1  → definition
+    ".panel.is-open { color: blue; }", // 2  → reference
+    "body.sepia .panel { color: tan; }", // 3  → reference (+ sepia defined)
+    "@media (width > 40em) { .panel { color: green; } }", // 4  → reference
+  ].join("\n");
+
+  const out = await extractMarkup("theme.css", css);
+  assert.ok(out, "extraction failed");
+  const panels = out!.defs.filter((d) => d.name === "panel");
+  assert.equal(panels.length, 1, `.panel defined ${panels.length} times, expected once`);
+  assert.equal(panels[0]!.line, 1, "the first rule that names it is its definition");
+
+  // Nothing is lost: "every rule that styles this" is still answerable, as references.
+  const panelRefs = out!.refs.filter((r) => r.name === "panel");
+  assert.equal(panelRefs.length, 3, `expected the 3 later rules as references, got ${panelRefs.length}`);
+  assert.deepEqual(panelRefs.map((r) => r.line), [2, 3, 4]);
+});
+
+test("two selectors in one rule are still two definitions", async () => {
+  // Deduping is per NAME, not per rule — `.a .b { }` defines both, which is what makes
+  // a compound selector navigable at all.
+  const out = await extractMarkup("t.css", ".hero-stats .value { color: red; }");
+  const names = (out?.defs ?? []).map((d) => d.name).sort();
+  assert.deepEqual(names, ["hero-stats", "value"]);
+});

@@ -10,6 +10,7 @@
  * which keeps the door open for the later thin-client / server-brain split:
  * the brain decides *which* tool to call, the client *executes* it locally.
  */
+import type { ToolKind } from "../cli/toolDisplay.js";
 
 /** What a tool hands back after running. */
 export interface ToolResult {
@@ -44,10 +45,40 @@ export interface ToolResult {
   /**
    * A multi-line rich block for the UI to show under the tool row — an edit's
    * +/- diff, a new file's preview, a command's output. Display-only, like
-   * `summary`; never sent to the model. Lines prefixed `+ `/`- ` render as
-   * added/removed; bare lines render plain. See detail.ts.
+   * `summary`; never sent to the model. See detail.ts.
    */
   detail?: string;
+
+  /**
+   * How to READ the lines in `detail`. Diff colouring is opt-in and this is the
+   * opt-in.
+   *
+   * It used to be inferred — anything with a detail block was coloured as a diff, so
+   * `+ `/`- ` lines went green/red. That is right for an edit and wrong for everything
+   * else, because a command's output is not a diff and its lines start with whatever
+   * the command felt like printing. `Get-ChildItem` renders its column rule as `----`
+   * and every file row as `-a----  …`, so a directory listing came out half red, as if
+   * the files had been deleted.
+   *
+   * "text" (the default) renders plain. Only the edit/write paths, which build genuine
+   * +/- diffs, pass "diff".
+   */
+  detailKind?: "diff" | "text" | "shell";
+
+  /**
+   * Override the row's category/name shown in the UI. Display-only, like
+   * `summary`/`detail`; never sent to the model.
+   *
+   * The call's OWN category (derived from its tool name, before it even runs —
+   * see toolDisplay.ts) is right for an ordinary result. It is wrong when the
+   * RESULT itself is what makes the row a policy decision rather than an
+   * ordinary outcome — a write blocked by a forbidden-path rule reads as "a
+   * failed Write," identical to any other failed write, when it is really a
+   * governance event. That distinction is only knowable once `execute()` runs,
+   * which is after the row's default name/category were already chosen.
+   */
+  displayKind?: ToolKind;
+  displayName?: string;
 
   /**
    * Display-only: this failure is the agent's own business, not news for the user.
@@ -102,6 +133,15 @@ export interface ReadRecord {
   /** Line spans (1-based, inclusive) the model recently read/edited in this file —
    *  used to localize a large file in the working set to just its focused regions. */
   focus?: { start: number; end: number }[];
+  /**
+   * This file entered the ledger from a SEARCH, not from a read.
+   *
+   * A search puts its hits into the working set so the model can keep what it found —
+   * without this flag that would also satisfy the read-before-WRITE gates, and a grep is
+   * not a read: it shows matching lines, never the file. `write_file` still refuses, and
+   * an edit still has to earn itself by matching exactly.
+   */
+  viaSearch?: boolean;
 }
 
 /** One item on the session task list (see todo_write). */
@@ -126,7 +166,7 @@ export interface TodoItem {
  *    session anchor (the primary root; see paths.ts `anchorOf`), so a `cd` into a
  *    subdirectory before a build can never make a later edit/read miss its file.
  *  - `reads` is the read ledger: every file the model has read or written this
- *    session, with its state at that moment. It does double duty — `edit_file` /
+ *    session, with its state at that moment. It does double duty — `edit` /
  *    `write_file` refuse to touch a path that isn't in here (so "editing a file
  *    you never looked at" is impossible), and `read_file` uses the recorded
  *    state to skip re-sending a file that hasn't changed since the last read.
@@ -139,6 +179,22 @@ export interface TodoItem {
 export interface ToolContext {
   /** Working directory; `run_command` may change it (cd persistence). */
   cwd: string;
+  /**
+   * Deferred native tools this session has searched for and activated (see
+   * `Tool.deferred`). Sticky for the session: activation costs one prompt-cache
+   * invalidation when the tool list changes, so it happens once per capability rather
+   * than once per call. Absent until the first successful search.
+   */
+  activatedTools?: Set<string>;
+  /**
+   * The user-approved plan currently in force, verbatim (see dynamo/planArtifact).
+   * Set by exit_plan on approval, loaded from `.mindweave/plan.md` at session
+   * start. `undefined` = not yet checked; `""` = checked, none active. The engine
+   * injects it as standing knowledge on execution turns while non-empty.
+   */
+  activePlan?: string;
+  /** ISO timestamp of the active plan's approval — rendered with the block. */
+  activePlanApprovedAt?: string;
   /**
    * The session's roots, primary first (`/include` adds more — e.g. a backend and a
    * frontend). When more than one is present, file tools express every path as
@@ -191,8 +247,23 @@ export interface ToolContext {
    * future server). A forbidden-path tool uses it to offer a one-time lift instead
    * of a hard refusal: it returns the chosen option string verbatim. Client-side
    * only (it prompts where the human is), so it never crosses the engine↔brain wire.
+   *
+   * `question` is ONE SHORT LINE. Long context — a plan, a diff, a command's full
+   * text — goes in `detail`, which the client prints into the transcript where it can
+   * be scrolled and read. This is not a style preference: the prompt renders in the
+   * footer, which is not height-bounded, so a long question makes the frame taller
+   * than the terminal and corrupts the screen (measured — a 40-step plan did exactly
+   * that, and the app looked hung because the input box was pushed off).
    */
-  requestApproval?: (question: string, options: string[]) => Promise<string>;
+  requestApproval?: (
+    question: string,
+    options: string[],
+    detail?: string,
+    /** Titles the detail as a FACTS block on a rail ("Permission Request") instead of
+     *  rendering it as prose. Use it when the detail is literal commands and paths the
+     *  user must read exactly; omit it when the detail is a document, like a plan. */
+    detailTitle?: string,
+  ) => Promise<string>;
   /**
    * Other coding tools whose data the user has allowed this session, by name
    * ("Claude Code", "Cursor", …). Another agent's sessions/memory/rules are not
@@ -291,6 +362,16 @@ export interface ToolContext {
    *  the model is already looking at a span instead of assuming it. */
   workingSetSpans?: Map<string, { start: number; end: number }[]>;
   /**
+   * Last built working-set block, with the disk state it was built from.
+   *
+   * The block is rebuilt on every model STEP so it can never be stale, and that
+   * unconditional freshness is worth keeping — a `run_command` can write files with no
+   * tool the engine could hook. So instead of trusting a "nothing was mutated" flag,
+   * the rebuild is skipped only when a fresh `stat` of every active file says nothing
+   * changed. Same guarantee, without re-reading and re-tokenizing whole files each step.
+   */
+  workingSetCache?: { key: string; value: import("../memory/workingSet.js").WorkingSetBlock };
+  /**
    * Files whose WHOLE content is still present in the TRANSCRIPT — a full read whose
    * result microcompaction has not cleared to a stub. Derived by the engine each turn
    * (see `memory/presence.ts`), never stored on the ledger: "the model can see this"
@@ -357,6 +438,35 @@ export interface Tool {
    * invite the model to call something with nothing to end.
    */
   planOnly?: boolean;
+
+  /**
+   * Hold this tool back from the advertised list until the model searches for it.
+   *
+   * The same trade `src/mcp/deferred.ts` already makes for MCP catalogs, applied to
+   * native tools: a model choosing among 30 tools chooses better than one choosing
+   * among 40, and the schemas of tools a session never touches are paid for on every
+   * uncached request regardless. Deferred tools stay fully reachable — `find_tools`
+   * activates them, and activation is sticky for the session — so nothing is lost
+   * except the standing cost of advertising them.
+   *
+   * Only for genuinely occasional capabilities. A tool in the core loop must never be
+   * deferred: the search round trip would cost more than the schema ever did.
+   */
+  deferred?: boolean;
+
+  /**
+   * Advertise this tool only when the session actually has something for it to act on.
+   *
+   * Distinct from `deferred`, and better where it applies: a deferred tool costs a
+   * search round trip when it IS needed, whereas this costs nothing either way. It
+   * suits a tool whose entire subject matter can be absent — `use_skill` in a project
+   * with no skills is not "rare", it is inert, and advertising it invites a call that
+   * can only fail.
+   *
+   * Evaluated against the live session when the tool list is built, so a skill created
+   * mid-session brings the tool back on the next turn.
+   */
+  relevantWhen?: (ctx: ToolContext) => boolean;
 
   /**
    * May THIS call run in parallel with the others in the same batch? Optional and

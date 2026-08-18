@@ -80,6 +80,22 @@ export function measuredOverhead(promptTokens: number, transcriptTokens: number)
 }
 
 /** The model's usable context window, as its driver reports it. */
+/**
+ * What one compaction pass did, in tokens.
+ *
+ * Lives here rather than in the CLI because it is a fact about context accounting, not
+ * about a terminal: the engine produces it and any client (a future server, a different
+ * UI) renders it however it likes. The CLI's job is only to draw bars from it.
+ */
+export interface CompactionReport {
+  /** Context in use before the pass. */
+  before: number;
+  /** Context in use after it. */
+  after: number;
+  /** The model's full context window. */
+  window: number;
+}
+
 export function sharpContextWindow(model: string): number {
   return manifestForModel(model).contextWindow(model);
 }

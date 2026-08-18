@@ -15,8 +15,9 @@ import { render } from "ink";
 import { createElement } from "react";
 import { App } from "./cli/App.js";
 import { loadConfig } from "./cli/bootstrap.js";
-import { sweepCapturesInBackground } from "./tools/captureSweep.js";
+import { sweepTempInBackground } from "./tools/tempSweep.js";
 import { parseStartupArgs } from "./cli/startupArgs.js";
+import { enterAltScreen } from "./cli/altScreen.js";
 
 // --help / --version answer and exit, BEFORE anything reads config, sweeps a
 // directory, or starts the UI. They used to fall through to the interactive app,
@@ -32,10 +33,12 @@ if (startup.kind === "print") {
 // available no matter which project we're launched in.
 loadConfig();
 
-// Clear out screenshots older than the retention window. A capture holds whatever was
-// on screen when it was taken, so they should not accumulate forever. Startup rather
-// than shutdown because that also catches whatever a crash left behind, and detached
-// so a slow or unreadable temp directory cannot delay the UI appearing.
-sweepCapturesInBackground();
+// Clear out the temp files and directories earlier runs left behind: screenshots past
+// their retention window, and the scratch (cwd hand-off files, command wrappers, test
+// fixtures) that every call site removes on its way out and nothing removes when a run
+// ends badly. Startup rather than shutdown precisely because that catches what a crash
+// left behind, and detached so a slow or unreadable temp directory cannot delay the UI.
+sweepTempInBackground();
 
+enterAltScreen();
 render(createElement(App));

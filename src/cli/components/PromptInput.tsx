@@ -10,13 +10,15 @@
  *  - Multiline: Shift+Enter inserts a newline (where the terminal reports it);
  *    Enter sends.
  *
- * The transcript above lives in <Static> (see App), so it scrolls naturally and
- * this box stays put. Editing keys: ←/→, Ctrl+A/E (home/end), Ctrl+U (kill line),
+ * Pinned to the bottom of the alt-screen frame (see App) while the chat scrolls
+ * above it. Editing keys: ←/→, Ctrl+A/E (home/end), Ctrl+U (kill line),
  * Backspace, and paste (inserted at the cursor).
  */
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { inputView } from "../inputView.js";
 import { feedPasteChunk, initPasteState, type PasteState } from "../pasteAssembler.js";
+import { stripMouse } from "../mouse.js";
 
 /** One autocomplete entry. */
 export interface Completion {
@@ -155,9 +157,26 @@ interface PromptInputProps {
   /** Register a large multi-line paste; returns the placeholder chip to insert in
    *  its place (the App restores the full text when the message is sent). */
   onLargePaste?: (content: string) => string;
+  /** How many command-palette rows App.tsx has actually verified there's room
+   *  for — computed from the real frame height, not a guess. Showing more than
+   *  this can make the footer taller than the screen, which corrupts the whole
+   *  frame rather than just clipping (confirmed with a bare Ink render), so this
+   *  is a hard cap, not a suggestion. Falls back to a small, always-safe count. */
+  maxMenuRows?: number;
+  /** Called when the suggestion menu's size changes (opened, closed, or
+   *  filtered to a different number of rows). The App needs this to re-measure
+   *  the footer — see the call site for why it can't detect it on its own. */
+  onMenuChange?: () => void;
+  /** Hard ceiling on how many rows the text area may occupy. Past it the box
+   *  scrolls with the cursor instead of growing, because the rows it would take
+   *  come off the bottom of a fixed frame — where the tip line lives. */
+  maxInputRows?: number;
 }
 
-const MAX_SUGGESTIONS = 8;
+const DEFAULT_MAX_SUGGESTIONS = 6;
+/** Rows the text area may grow to before it scrolls instead. Enough for a real
+ *  paragraph; small enough that the chat above it is never squeezed away. */
+const DEFAULT_MAX_INPUT_ROWS = 8;
 
 export function PromptInput({
   onSubmit,
@@ -168,6 +187,9 @@ export function PromptInput({
   completions = [],
   pathComplete,
   onLargePaste,
+  maxMenuRows = DEFAULT_MAX_SUGGESTIONS,
+  onMenuChange,
+  maxInputRows = DEFAULT_MAX_INPUT_ROWS,
 }: PromptInputProps) {
   const [state, dispatch] = useReducer(reduce, INITIAL);
   const { value, cursor, histIdx, selected, draft } = state;
@@ -195,6 +217,20 @@ export function PromptInput({
   const menu = computeMenu();
   const menuOpen = menu !== null;
   const sel = Math.min(selected, Math.max(0, (menu?.items.length ?? 1) - 1));
+
+  // Tell the App the footer's height just changed.
+  //
+  // Opening the menu is state local to THIS component, so React re-renders only
+  // this subtree — App does not re-render, so App's own footer measurement never
+  // re-runs and it keeps sizing the chat against a menu-closed footer. The menu
+  // then overflows the frame and is clipped away entirely; sitting idle at the
+  // prompt, nothing else re-renders App, so it never corrects itself. The row
+  // count (not just open/closed) is the trigger, because filtering as you type
+  // changes the height too.
+  const menuRowCount = menu ? Math.min(menu.items.length, maxMenuRows) : 0;
+  useEffect(() => {
+    onMenuChange?.();
+  }, [menuRowCount, onMenuChange]);
 
   function computeMenu(): { mode: "command" | "path"; items: Completion[]; start: number } | null {
     if (commandMode) {
@@ -252,7 +288,18 @@ export function PromptInput({
   }, []);
 
   useInput(
-    (input, key) => {
+    (raw, key) => {
+      // Mouse reports arrive as ordinary stdin bytes once wheel reporting is on
+      // (see mouse.ts). Ink's key parser does not recognise them and hands them
+      // straight through as if typed, so scrolling filled the prompt with
+      // `[<64;25;26M`. Stripped FIRST — ahead of the paste assembler, which would
+      // otherwise buffer a fast flick and commit it as a pasted block.
+      const input = stripMouse(raw);
+      // A chunk that was nothing but mouse reports is not a keystroke. Guarded on
+      // `raw` being non-empty so genuine keys that carry no text (arrows, Enter)
+      // still reach the handlers below.
+      if (input === "" && raw !== "") return;
+
       // Bracketed paste (authoritative): from the `\x1b[200~` start marker to the
       // `\x1b[201~` end marker, every chunk is literal pasted content — never Enter,
       // arrows, or other keys — so we handle it here, before anything else, accumulating
@@ -379,37 +426,47 @@ export function PromptInput({
     { isActive: !disabled },
   );
 
-  const fieldWidth = Math.max(10, width - 4);
+  const fieldWidth = Math.max(10, width - 6);
 
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={width} flexShrink={0}>
       <Box
         flexDirection="column"
         width={width}
+        flexShrink={0}
         borderStyle="single"
         borderColor="gray"
-        borderLeft={false}
-        borderRight={false}
         paddingX={1}
       >
-        <Box>
-          <Text bold color="cyan">{"> "}</Text>
-          <Box width={fieldWidth}>
-            <Field value={value} cursor={cursor} active={!disabled} placeholder={placeholder} />
-          </Box>
-        </Box>
+        <Field
+          value={value}
+          cursor={cursor}
+          active={!disabled}
+          placeholder={placeholder}
+          width={fieldWidth}
+          maxRows={maxInputRows}
+        />
       </Box>
 
-      {menu ? <SuggestionMenu matches={menu.items} selected={sel} width={width} /> : null}
+      {menu ? <SuggestionMenu matches={menu.items} selected={sel} width={width} mode={menu.mode} maxRows={maxMenuRows} /> : null}
     </Box>
   );
 }
 
 /** The `@token` ending at the cursor (back to the nearest whitespace), or null.
  *  Used to drive the file-path picker while typing a `@mention`. */
+// No real @mention (a path) is anywhere near this long. Without a cap, a run of
+// the same non-whitespace character (fast typing, a held key) has no whitespace
+// to stop the scan at, so it walks back to index 0 on EVERY keystroke — O(cursor)
+// work repeated once per character typed, which is what made fast typing laggy
+// even well under the length where Field's own render-windowing kicks in.
+const MAX_TOKEN_SCAN = 300;
+
 function atTokenAt(value: string, cursor: number): { text: string; start: number } | null {
+  const floor = Math.max(0, cursor - MAX_TOKEN_SCAN);
   let i = cursor;
-  while (i > 0 && !/\s/.test(value[i - 1]!)) i--;
+  while (i > floor && !/\s/.test(value[i - 1]!)) i--;
+  if (i === floor && floor > 0 && !/\s/.test(value[floor - 1] ?? " ")) return null; // ran into the cap, not a real boundary
   const text = value.slice(i, cursor);
   return text.startsWith("@") ? { text, start: i } : null;
 }
@@ -419,75 +476,143 @@ function atTokenAt(value: string, cursor: number): { text: string; start: number
  * sliding window keeps the highlighted row in view as ↑/↓ move past the visible
  * count, with `↑ N more` / `↓ N more` markers for what's hidden above/below — so a
  * long list (every command) is fully reachable, not capped at the first few.
+ *
+ * Bordered like the input box itself, not a bare list floating under it — same
+ * treatment, same reason: it's the other place the user is choosing something,
+ * not just reading a log.
  */
 function SuggestionMenu({
   matches,
   selected,
   width,
+  mode,
+  maxRows,
 }: {
   matches: Completion[];
   selected: number;
   width: number;
+  mode: "command" | "path";
+  maxRows: number;
 }) {
   // Window the list so `selected` is always visible (same scheme as Picker).
-  const start = Math.min(Math.max(0, selected - (MAX_SUGGESTIONS - 1)), Math.max(0, matches.length - MAX_SUGGESTIONS));
-  const shown = matches.slice(start, start + MAX_SUGGESTIONS);
+  const start = Math.min(Math.max(0, selected - (maxRows - 1)), Math.max(0, matches.length - maxRows));
+  const shown = matches.slice(start, start + maxRows);
   const nameWidth = Math.min(18, Math.max(...shown.map((m) => m.name.length), 1));
   const above = start;
   const below = matches.length - (start + shown.length);
+  const title = mode === "command" ? "Commands" : "Files";
+  // The prefix ("› " / "  ") + the padded name, so the description column knows
+  // exactly what's left. Without this Box the description had no width of its
+  // own to truncate against — Yoga let a long one push past the row and wrap,
+  // splitting a command's NAME onto its own line, one row later than where it
+  // belonged. Confirmed with a bare Ink render before this fix went in.
+  const descWidth = Math.max(4, width - 2 - 2 - nameWidth);
   return (
-    <Box flexDirection="column" paddingX={1} marginTop={1}>
-      {above > 0 ? <Text dimColor>{`  ↑ ${above} more`}</Text> : null}
+    <Box flexDirection="column" width={width} flexShrink={0} borderStyle="single" borderColor="gray" paddingX={1} marginTop={1}>
+      {/* flexShrink:0 on every row here (not just the menu's own outer box) is
+          what makes App.tsx's maxRows cap actually reliable: without it, Yoga
+          can compress an overfull menu instead of respecting the cap that was
+          computed specifically so it wouldn't need to — confirmed the same way
+          the chat viewport's own flexShrink:0 rows were (see App.tsx). */}
+      {/* The parenthetical is the only place that says you can keep TYPING to narrow the
+          list. Without it the arrows look like the only way through, and a long catalog
+          reads as something to scroll rather than something to filter. */}
+      <Box flexShrink={0}>
+        <Text bold>{title}</Text>
+        <Text dimColor>{" (type to filter, or use ↑/↓)"}</Text>
+      </Box>
+      {above > 0 ? <Box flexShrink={0}><Text dimColor>{`  ↑ ${above} more`}</Text></Box> : null}
       {shown.map((m, i) => {
         const active = start + i === selected;
         return (
-          <Box key={m.name} width={width - 2}>
+          <Box key={m.name} width={width - 2} flexShrink={0}>
             <Text color={active ? "cyan" : undefined} bold={active}>
               {active ? "› " : "  "}
               {m.name.padEnd(nameWidth)}
             </Text>
-            <Text dimColor wrap="truncate-end">{"  " + m.description}</Text>
+            <Box width={descWidth}>
+              <Text dimColor wrap="truncate-end">{"  " + m.description}</Text>
+            </Box>
           </Box>
         );
       })}
-      {below > 0 ? <Text dimColor>{`  ↓ ${below} more`}</Text> : null}
+      {below > 0 ? <Box flexShrink={0}><Text dimColor>{`  ↓ ${below} more`}</Text></Box> : null}
+      <Box flexShrink={0}>
+        <Text dimColor>{mode === "command" ? "Tab completes · Esc dismisses" : "↑/↓ to select · Enter/Tab to complete · Esc dismisses"}</Text>
+      </Box>
     </Box>
   );
 }
 
 /** The text area: the buffer word-wrapped, with a block cursor, or a placeholder. */
+/**
+ * The text area: the buffer wrapped into rows with a block cursor, capped in height.
+ *
+ * Row-by-row rather than one `<Text wrap="wrap">`, because the box has to know how tall
+ * it is. Left to wrap itself it grew without limit, and since it shares a fixed frame
+ * with the chat and the tip line, the rows it took came off the bottom of the screen —
+ * the tip vanished and the box looked cut in half. The wrapping and the cursor maths
+ * live in inputView.ts, where they are unit-tested.
+ */
 function Field({
   value,
   cursor,
   active,
   placeholder,
+  width,
+  maxRows,
 }: {
   value: string;
   cursor: number;
   active: boolean;
   placeholder: string;
+  width: number;
+  maxRows: number;
 }) {
   if (value.length === 0) {
     return (
-      <Text wrap="truncate-end">
-        {active ? <Text inverse> </Text> : null}
-        {placeholder ? <Text dimColor>{placeholder}</Text> : null}
-      </Text>
+      <Box flexShrink={0}>
+        <Text bold color="cyan">{"> "}</Text>
+        <Box width={width} overflow="hidden">
+          <Text wrap="truncate-end">
+            {active ? <Text inverse> </Text> : null}
+            {placeholder ? <Text dimColor>{placeholder}</Text> : null}
+          </Text>
+        </Box>
+      </Box>
     );
   }
 
-  if (!active) {
-    return <Text wrap="wrap">{value}</Text>;
-  }
-
-  const before = value.slice(0, cursor);
-  const at = value.slice(cursor, cursor + 1) || " ";
-  const after = value.slice(cursor + 1);
+  const view = inputView(value, cursor, width, maxRows);
   return (
-    <Text wrap="wrap">
-      {before}
-      <Text inverse>{at}</Text>
-      {after}
-    </Text>
+    <Box flexDirection="column" flexShrink={0}>
+      {view.hiddenAbove > 0 ? (
+        <Box flexShrink={0}><Text dimColor>{`  ↑ ${view.hiddenAbove} more line${view.hiddenAbove === 1 ? "" : "s"}`}</Text></Box>
+      ) : null}
+      {view.rows.map((row, i) => (
+        <Box key={i} flexShrink={0}>
+          {/* The marker is only on the first row; continuations align under the text
+              so a wrapped message reads as one paragraph, not a list. */}
+          <Text bold color="cyan">{i === 0 && view.hiddenAbove === 0 ? "> " : "  "}</Text>
+          <Box width={width} overflow="hidden">
+            <Text wrap="truncate-end">
+              {active && i === view.cursorRow ? (
+                <>
+                  {row.text.slice(0, view.cursorCol)}
+                  <Text inverse>{row.text.slice(view.cursorCol, view.cursorCol + 1) || " "}</Text>
+                  {row.text.slice(view.cursorCol + 1)}
+                </>
+              ) : (
+                row.text
+              )}
+            </Text>
+          </Box>
+        </Box>
+      ))}
+      {view.hiddenBelow > 0 ? (
+        <Box flexShrink={0}><Text dimColor>{`  ↓ ${view.hiddenBelow} more line${view.hiddenBelow === 1 ? "" : "s"}`}</Text></Box>
+      ) : null}
+    </Box>
   );
 }
+

@@ -20,6 +20,9 @@
  * catalog change — instead of once per turn or, worse, once per step.
  */
 import type { Tool, ToolResult, ToolSchema } from "../tools/types.js";
+import { outputDetail } from "../tools/detail.js";
+import { formatBytes } from "../tools/webFetch.js";
+import { formatElapsed } from "../tools/webSearch.js";
 import {
   estimateCatalogTokens,
   frameUntrusted,
@@ -80,12 +83,22 @@ function buildTool(name: string, def: McpToolDef, connection: McpConnection, spi
     readOnly: def.readOnly,
     async execute(args): Promise<ToolResult> {
       try {
+        // Timed at the call site: a remote server's round trip is the one cost in a
+        // tool row that nothing else on screen reveals, and it is what tells a slow
+        // server apart from a slow query.
+        const startedAt = Date.now();
         const result = await connection.callTool(def.name, args);
+        const elapsedMs = Date.now() - startedAt;
         const { blocks, isError } = parseContentBlocks(result);
         const text = await renderBlocks(blocks, def, spillRoot());
         // Framed as data, not instruction: this text is written by a third party and
         // lands where the model trusts built-in tool output.
-        return { output: frameUntrusted(def.server, text), summary: name, ...(isError ? { isError: true } : {}) };
+        return {
+          output: frameUntrusted(def.server, text),
+          summary: `${def.server} · ${def.name}`,
+          detail: mcpDetail(def.name, args, text, isError, elapsedMs),
+          ...(isError ? { isError: true } : {}),
+        };
       } catch (error) {
         // A tool failure is a tool RESULT, not an exception: the model should see it,
         // reason about it, and try something else — the same contract as a failed shell
@@ -99,6 +112,24 @@ function buildTool(name: string, def: McpToolDef, connection: McpConnection, spi
       }
     },
   };
+}
+
+/** The UI-only detail block under an MCP call row — never sent to the model
+ *  (`frameUntrusted`'s `output` is what the model sees). A short args preview
+ *  plus how much came back, capped the same way any other tool's output is. */
+function mcpDetail(toolName: string, args: Record<string, unknown>, text: string, isError: boolean, elapsedMs?: number): string {
+  const argsPreview = Object.keys(args).length > 0 ? JSON.stringify(args).slice(0, 120) : "";
+  const lines: string[] = [];
+  // "Connected" is implied by having a result at all; the LATENCY is the part worth
+  // stating, and it is omitted rather than invented when nothing measured it.
+  if (elapsedMs !== undefined) lines.push(`Status: Connected [Latency: ${formatElapsed(elapsedMs)}]`);
+  lines.push(`Executed: ${toolName}${argsPreview ? `(${argsPreview})` : "()"}`);
+  lines.push(
+    isError
+      ? "Received an error result"
+      : `Received ${formatBytes(Buffer.byteLength(text, "utf8"))} (OK) → ${text.length.toLocaleString("en-US")} chars`,
+  );
+  return outputDetail(lines.join("\n"));
 }
 
 /**

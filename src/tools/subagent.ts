@@ -18,6 +18,7 @@
  * parallel edits can't race). A process-wide semaphore bounds how many run at once.
  */
 import { randomUUID } from "node:crypto";
+import { STATUS_INSTRUCTION, renderVerdict, verifySubagentReport } from "./subagentReport.js";
 import type { Tool, ToolResult } from "./types.js";
 import type { EngineEvent } from "../dynamo/engine.js";
 
@@ -143,9 +144,16 @@ export const spawnSubagent: Tool = {
     }
 
     const outputFormat = typeof args.output_format === "string" ? args.output_format.trim() : "";
-    const framedTask = outputFormat
-      ? `${task}\n\nReport your result in EXACTLY this format:\n${outputFormat}`
-      : task;
+    // The status line is asked for on EVERY child, not only formatted ones: it is the
+    // child's half of the verification contract (see subagentReport.ts), and a child
+    // with no output_format is if anything the one whose outcome is least obvious.
+    const framedTask = [
+      task,
+      outputFormat ? `Report your result in EXACTLY this format:\n${outputFormat}` : "",
+      STATUS_INSTRUCTION,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     const budget = clampSteps(args.max_steps) ?? SUBAGENT_BUDGET;
     const readOnly = args.read_only === true;
 
@@ -185,10 +193,17 @@ export const spawnSubagent: Tool = {
     const steps = child.transcript.filter((e) => e.role === "assistant").length;
     const scope = readOnly ? " · read-only" : "";
     const stepLabel = `${steps} step${steps === 1 ? "" : "s"}${scope}`;
-    ctx.emitEvent?.({ type: "subagent", phase: "end", id: agentId, summary: stepLabel, error: false });
+
+    // The gate: a child's report is a claim, not a result, until the run behind it has
+    // been checked. Nothing is withheld — the parent decides whether a partial answer
+    // is still useful — but it is told what not to assume, above the report rather
+    // than after it.
+    const verdict = verifySubagentReport(reply, { steps, budget, outputFormat });
+    const flag = verdict.trustworthy ? "" : ` · ${verdict.status === "unstated" ? "unverified" : verdict.status}`;
+    ctx.emitEvent?.({ type: "subagent", phase: "end", id: agentId, summary: `${stepLabel}${flag}`, error: verdict.status === "failed" });
     return {
-      output: reply,
-      summary: `subagent · ${stepLabel}`,
+      output: renderVerdict(verdict),
+      summary: `subagent · ${stepLabel}${flag}`,
     };
   },
 };

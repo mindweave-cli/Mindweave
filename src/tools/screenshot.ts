@@ -38,6 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { describeImage, isRejection } from "../memory/images.js";
+import { formatBytes } from "./webFetch.js";
 import { captureWindow, listWindows, type WindowInfo } from "./screenshotWin.js";
 
 /** How many titles to name when a match fails, so the model can retry precisely. */
@@ -100,6 +101,7 @@ export function listTitles(windows: WindowInfo[]): string {
 
 export const screenshot: Tool = {
   name: "screenshot",
+  deferred: true,
   // An observation: it changes nothing about the project. The privacy gate below
   // is explicit and runs whether or not the session is in a guarded mode.
   readOnly: true,
@@ -200,6 +202,13 @@ export const screenshot: Tool = {
           `Captured "${target.title}" (${size.width}x${size.height}). ` +
           `The image follows this result — look at it and say what you see.`,
         summary: `screenshot of ${target.title} (${size.width}x${size.height})`,
+        // The facts about the capture itself, which the model's own output does not
+        // carry: what was taken, how big it is, and WHEN — the timestamp is what tells
+        // the user whether this is the state they just put the window into.
+        detail: [
+          `${size.width}×${size.height} • PNG • ${formatBytes(bytes)}`,
+          `Captured: ${new Date().toTimeString().slice(0, 8)}`,
+        ].join("\n"),
         images: [ref],
       };
     } catch (error) {

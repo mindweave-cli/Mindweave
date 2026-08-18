@@ -426,7 +426,7 @@ interface RawLocation {
 }
 
 interface RawDiagnostic {
-  range?: { start?: { line?: number; character?: number } };
+  range?: { start?: { line?: number; character?: number }; end?: { line?: number; character?: number } };
   severity?: number; // 1=Error 2=Warning 3=Information 4=Hint
   message?: string;
   source?: string;
@@ -436,13 +436,22 @@ interface RawDiagnostic {
 function toCodeDiagnostic(file: string, d: RawDiagnostic): CodeDiagnostic {
   const sev = d.severity;
   const severity = sev === 1 ? "error" : sev === 2 ? "warning" : sev === 3 ? "info" : "hint";
+  const startLine = d.range?.start?.line;
+  const endLine = d.range?.end?.line;
+  // Only carries over when the token doesn't cross a line — a caret under a
+  // single source line has no meaning for a genuinely multi-line span.
+  const endColumn =
+    startLine != null && endLine === startLine && d.range?.end?.character != null
+      ? d.range.end.character + 1
+      : undefined;
   return {
     file,
-    line: (d.range?.start?.line ?? 0) + 1,
+    line: (startLine ?? 0) + 1,
     column: (d.range?.start?.character ?? 0) + 1,
     severity,
     message: (d.message ?? "").trim(),
     ...(d.source ? { source: d.source } : {}),
+    ...(endColumn != null ? { endColumn } : {}),
   };
 }
 

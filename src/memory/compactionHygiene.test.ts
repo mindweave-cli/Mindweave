@@ -149,3 +149,40 @@ test("once the payload is evicted, so is its token cost", () => {
 
   assert.ok(after < before - 2000, "eviction has to show up in the bars, or it bought nothing");
 });
+
+// ── superseded transcript copies ──────────────────────────────────────────────
+
+test("a file the working set carries WHOLE is cleared even inside the protected window", () => {
+  // The double-representation case: the same file sits in the transcript (a snapshot of
+  // what it said when read) and in <working_files> (current by construction). Normally
+  // keepLastN and the live-round rule protect recent results so the model is never blind
+  // on something it has not acted on — but a file rendered whole at the boundary is the
+  // one case where it cannot be blind.
+  const entries: Entry[] = [
+    { role: "user", content: "look at a.ts" },
+    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "read_file", arguments: '{"path":"a.ts"}' }] },
+    { role: "tool", toolCallId: "c1", content: "export const a = 1;\nexport const b = 2;", fullContentOf: "/p/a.ts" },
+  ];
+
+  // Without the signal, the recent result is protected and survives.
+  const untouched = microcompact(structuredClone(entries), 5);
+  assert.equal(untouched.cleared, 0, "the protection must still hold when nothing supersedes it");
+
+  // With it, the redundant copy goes.
+  const swept = microcompact(structuredClone(entries), 5, new Set(["/p/a.ts"]));
+  assert.equal(swept.cleared, 1, "a superseded copy must be cleared despite being recent");
+  const tool = swept.entries.find((e) => e.role === "tool")!;
+  assert.match(tool.content, /cleared|superseded|removed/i, "and leave a navigable stub");
+});
+
+test("a file the working set does NOT carry whole is left alone", () => {
+  // Localized files (shown as outline + focus, not whole) are NOT superseded: clearing
+  // the transcript copy would lose the parts the boundary is not showing.
+  const entries: Entry[] = [
+    { role: "user", content: "look at big.ts" },
+    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "read_file", arguments: '{"path":"big.ts"}' }] },
+    { role: "tool", toolCallId: "c1", content: "line one\nline two", fullContentOf: "/p/big.ts" },
+  ];
+  const swept = microcompact(entries, 5, new Set(["/p/other.ts"]));
+  assert.equal(swept.cleared, 0, "only files carried WHOLE are redundant");
+});

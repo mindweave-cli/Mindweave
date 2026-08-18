@@ -8,7 +8,7 @@
  * whole-file read are unchanged — this is the surgical alternative, and WHEN to
  * reach for it stays the model's judgment.
  *
- * It also records the file as read, so a follow-up edit_file / replace_symbol_body
+ * It also records the file as read, so a follow-up edit / replace_symbol_body
  * clears the read-before-edit gate without a redundant whole-file read.
  */
 import { promises as fs } from "node:fs";

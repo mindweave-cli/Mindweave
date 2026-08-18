@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
-import { exitPlan, readVerdict, planQuestion, PLAN_CHOICES } from "./exitPlan.js";
+import { exitPlan, readVerdict, PLAN_QUESTION, PLAN_CHOICES } from "./exitPlan.js";
 import { toolSchemas } from "./registry.js";
 import { modeFromFlags } from "../cli/modes.js";
 
@@ -50,11 +50,30 @@ test("readVerdict tolerates casing and surrounding space", () => {
 
 // ── the approval prompt ──────────────────────────────────────────────────────
 
-test("the whole plan reaches the approval prompt, not a summary of it", () => {
+test("the whole plan reaches the user as DETAIL, and the question stays one line", async () => {
+  // The plan must still arrive in full — but not through the question. The prompt
+  // renders in the footer, which has no height bound, so a 40-step plan there made the
+  // frame taller than the terminal and tore the screen; the app looked hung because
+  // the input box had been pushed off it. Detail prints into the scrollable transcript.
   const long = Array.from({ length: 40 }, (_, i) => `${i + 1}. step ${i + 1}`).join("\n");
-  const q = planQuestion(long);
-  assert.ok(q.startsWith(long), "the plan must be shown in full and first");
-  assert.match(q, /Start on this\?$/);
+  let askedQuestion = "";
+  let askedDetail: string | undefined;
+  let wasAsked = false;
+  const c = ctx(undefined, {
+    requestApproval: async (question: string, _o: string[], detail?: string) => {
+      wasAsked = true;
+      askedQuestion = question;
+      askedDetail = detail;
+      return PLAN_CHOICES[0]!;
+    },
+  });
+  await exitPlan.execute({ plan: long }, c);
+
+  assert.ok(wasAsked, "approval must be requested");
+  assert.equal(askedDetail, long, "the plan must travel in full, unsummarised");
+  assert.equal(askedQuestion, PLAN_QUESTION);
+  assert.ok(!askedQuestion.includes("step 1"), "the plan must NOT be in the question");
+  assert.equal(askedQuestion.split("\n").length, 1, "the question must be a single line");
 });
 
 // ── refusal paths ────────────────────────────────────────────────────────────

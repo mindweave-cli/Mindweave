@@ -13,11 +13,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type Anthropic from "@anthropic-ai/sdk";
-import { buildBody, emit, renderMessages, toStop, toTurn, toUsage } from "./client.js";
-import { OPUS, SONNET, normalize, thinkLevels } from "./manifest.js";
-import type { ModelRequest, StreamEvent } from "../types.js";
+import { buildBody, emit, renderMessages, thinkingBudget, toStop, toTurn, toUsage } from "./client.js";
+import { FABLE, HAIKU, MODELS, OPUS, OPUS_48, SONNET, normalize, thinkLevels } from "./manifest.js";
+import type { Effort, ModelRequest, StreamEvent } from "../types.js";
 
 const base: ModelRequest = { system: "SYSTEM", messages: [] };
+
+/** Every model this provider advertises. */
+const ALL = MODELS.map((m) => m.id);
+/** The models on the current request surface — adaptive thinking plus `effort`. */
+const CURRENT_SURFACE = [SONNET, OPUS, OPUS_48];
+const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** A body for one model at one reasoning setting. */
+function bodyFor(model: string, thinking: boolean, effort: Effort, maxTokens = 1000) {
+  return buildBody(
+    { ...base, messages: [{ role: "user", content: "x" }], model: { model, thinking, effort } },
+    maxTokens,
+  );
+}
 
 /** Content blocks of a message, as an array (they always are here). */
 function blocks(msg: Anthropic.MessageParam): Anthropic.ContentBlockParam[] {
@@ -220,43 +234,129 @@ test("no tools means no tool_choice (a plain-text answer is forced)", () => {
   assert.equal(body.tool_choice, undefined);
 });
 
-test("reasoning maps to adaptive thinking plus an effort level, never a token budget", () => {
-  const on = buildBody({ ...base, messages: [{ role: "user", content: "x" }], model: { model: OPUS, thinking: true, effort: "max" } }, 1000);
-  assert.deepEqual(on.thinking, { type: "adaptive" });
-  assert.deepEqual(on.output_config, { effort: "max" });
+test("on the current surface, reasoning is adaptive thinking plus an effort level", () => {
+  for (const model of CURRENT_SURFACE) {
+    const on = bodyFor(model, true, "max");
+    assert.deepEqual(on.thinking, { type: "adaptive" }, model);
+    assert.deepEqual(on.output_config, { effort: "max" }, model);
 
-  const off = buildBody({ ...base, messages: [{ role: "user", content: "x" }], model: { model: OPUS, thinking: false, effort: "high" } }, 1000);
-  assert.deepEqual(off.thinking, { type: "disabled" });
+    const off = bodyFor(model, false, "high");
+    assert.deepEqual(off.thinking, { type: "disabled" }, model);
+  }
+});
 
-  // These models reject both of these outright; neither may ever be sent.
-  const serialized = JSON.stringify(on) + JSON.stringify(off);
-  assert.ok(!serialized.includes("budget_tokens"), "budget_tokens is rejected by these models");
+test("Fable 5 is sent NO thinking field at all — it rejects every explicit value", () => {
+  // Including `{type:"disabled"}`, which the other models accept happily. The one
+  // thing that must never appear on this model's body is the key itself.
+  for (const thinking of [true, false]) {
+    const body = bodyFor(FABLE, thinking, "xhigh");
+    assert.ok(!("thinking" in body), `thinking must be absent (thinking=${thinking})`);
+    // Effort still applies — Fable takes the full ladder.
+    assert.deepEqual(body.output_config, { effort: "xhigh" });
+  }
+});
+
+test("Haiku 4.5 gets a token budget and NO effort — it predates both", () => {
+  const on = bodyFor(HAIKU, true, "high", 16_000);
+  assert.deepEqual(on.thinking, { type: "enabled", budget_tokens: 8000 });
+  assert.ok(!("output_config" in on), "output_config is rejected by Haiku 4.5");
+
+  const off = bodyFor(HAIKU, false, "high", 16_000);
+  assert.ok(!("thinking" in off), "no thinking means no thinking field");
+  assert.ok(!("output_config" in off), "output_config is rejected by Haiku 4.5");
+});
+
+test("the thinking budget stays inside the API's two limits at every ceiling", () => {
+  // It is spent from the same allowance as the answer, so an equal budget leaves
+  // nothing to answer with; and the floor is 1024.
+  for (const ceiling of [1025, 2048, 16_000, 64_000]) {
+    const budget = thinkingBudget(ceiling);
+    assert.ok(budget >= 1024, `${ceiling}: budget ${budget} is below the floor`);
+    assert.ok(budget < ceiling, `${ceiling}: budget ${budget} leaves no room to answer`);
+  }
+  // Below 1025 the floor and the ceiling contradict each other. There is no legal
+  // number, so the answer is "none" and the caller omits the field.
+  for (const ceiling of [512, 1024]) {
+    assert.equal(thinkingBudget(ceiling), 0, `${ceiling} has no legal budget`);
+  }
+  const cramped = bodyFor(HAIKU, true, "high", 1024);
+  assert.ok(!("thinking" in cramped), "no legal budget means no thinking field");
+});
+
+test("sampling parameters are never sent to any model in this lineup", () => {
+  const serialized = ALL.flatMap((m) => [bodyFor(m, true, "high"), bodyFor(m, false, "high")])
+    .map((b) => JSON.stringify(b))
+    .join("");
   for (const param of ["temperature", "top_p", "top_k"]) {
     assert.ok(!serialized.includes(`"${param}"`), `${param} is rejected by these models`);
+  }
+});
+
+test("a token budget never reaches a model on the current surface", () => {
+  for (const model of [...CURRENT_SURFACE, FABLE]) {
+    const serialized = JSON.stringify(bodyFor(model, true, "high")) + JSON.stringify(bodyFor(model, false, "high"));
+    assert.ok(!serialized.includes("budget_tokens"), `${model}: budget_tokens is rejected here`);
   }
 });
 
 // ── Model rules ───────────────────────────────────────────────────────────────
 
 test("normalize never pairs disabled thinking with an effort Opus 5 rejects", () => {
-  for (const model of [OPUS, SONNET]) {
-    for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
-      const config = normalize({ model, thinking: false, effort });
-      assert.ok(
-        config.effort !== "xhigh" && config.effort !== "max",
-        `${model}: no-thinking at ${effort} must step down, got ${config.effort}`,
-      );
+  for (const effort of EFFORTS) {
+    const config = normalize({ model: OPUS, thinking: false, effort });
+    assert.ok(
+      config.effort !== "xhigh" && config.effort !== "max",
+      `no-thinking at ${effort} must step down, got ${config.effort}`,
+    );
+  }
+});
+
+test("normalize forces thinking ON for Fable 5 — it cannot be asked to skip it", () => {
+  for (const effort of EFFORTS) {
+    assert.equal(normalize({ model: FABLE, thinking: false, effort }).thinking, true, effort);
+  }
+});
+
+test("normalize pins Haiku 4.5's effort, so no rung it rejects is ever stored", () => {
+  for (const effort of EFFORTS) {
+    for (const thinking of [true, false]) {
+      assert.equal(normalize({ model: HAIKU, thinking, effort }).effort, "high", `${effort}/${thinking}`);
     }
   }
 });
 
 test("normalize keeps every advertised reasoning level intact", () => {
-  for (const model of [OPUS, SONNET]) {
+  for (const model of ALL) {
     for (const level of thinkLevels(model)) {
       const config = { model, thinking: level.thinking, effort: level.effort };
       assert.deepEqual(normalize(config), config, `${model}: "${level.label}" was altered`);
     }
   }
+});
+
+test("switching between any two models leaves a config the target accepts", () => {
+  // `/model` carries the reasoning intent across, so every level of every model has
+  // to survive landing on every other model — this is the pairing that would 400.
+  for (const from of ALL) {
+    for (const level of thinkLevels(from)) {
+      for (const to of ALL) {
+        const moved = normalize({ model: to, thinking: level.thinking, effort: level.effort });
+        assert.deepEqual(normalize(moved), moved, `${from} "${level.label}" → ${to} is unstable`);
+        assert.ok(
+          thinkLevels(to).some((l) => l.thinking === moved.thinking && l.effort === moved.effort),
+          `${from} "${level.label}" → ${to} landed on ${JSON.stringify(moved)}, which ${to} does not offer`,
+        );
+      }
+    }
+  }
+});
+
+test("every advertised model has a price and a normalize that keeps it", () => {
+  for (const model of ALL) {
+    assert.equal(normalize({ model, thinking: true, effort: "high" }).model, model, `${model} was coerced away`);
+  }
+  // An id no provider serves falls back rather than reaching the wire.
+  assert.equal(normalize({ model: "claude-not-a-model", thinking: true, effort: "high" }).model, SONNET);
 });
 
 // ── Response conversion ───────────────────────────────────────────────────────

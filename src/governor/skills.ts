@@ -82,17 +82,53 @@ export function activeSkills(skills: SkillMeta[], workingSet: string[] = []): Sk
  * name (+ argument hint), description, and when-to-use. "" when none are visible.
  * Content only — the engine frames it.
  */
+/**
+ * Caps on the always-loaded skill catalog.
+ *
+ * This block renders into the CACHED system prefix on every session and only ever
+ * grows: every create_skill adds a line, permanently, and nothing trims it.
+ *
+ * The cap is on LENGTH PER ENTRY rather than on the number of entries, and that is a
+ * deliberate departure from "keep the most recent N". A skill is only reachable by
+ * NAME — use_skill takes one, and there is no tool that lists them — so an entry
+ * dropped from this catalog is a skill the model can no longer invoke at all. Trading
+ * a capability away to save tokens is the wrong trade. Clipping a rambling description
+ * costs nothing by comparison: the name still appears, the skill stays callable, and
+ * its full text is loaded on use anyway.
+ *
+ * The entry cap below is a backstop against the absurd case, set far above any real
+ * project, and it says so when it bites.
+ */
+const MAX_SKILL_LINE_CHARS = 200;
+const MAX_SKILL_ENTRIES = 100;
+
+/** Clip to `max` on a word boundary where possible, with an ellipsis. */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
 export function renderSkillCatalog(skills: SkillMeta[], workingSet: string[] = []): string {
   const visible = activeSkills(skills, workingSet);
   if (visible.length === 0) return "";
-  return visible
-    .map((s) => {
-      const hint = s.argumentHint ? ` ${s.argumentHint}` : "";
-      const desc = s.description ? `: ${s.description}` : "";
-      const when = s.whenToUse ? ` — use when: ${s.whenToUse}` : "";
-      return `- ${s.name}${hint}${desc}${when}`;
-    })
-    .join("\n");
+  const shown = visible.slice(0, MAX_SKILL_ENTRIES);
+  const lines = shown.map((s) => {
+    const hint = s.argumentHint ? ` ${s.argumentHint}` : "";
+    const desc = s.description ? `: ${s.description}` : "";
+    const when = s.whenToUse ? ` — use when: ${s.whenToUse}` : "";
+    // The name and its argument hint are never clipped — they are what makes the
+    // skill callable. Only the prose after them is.
+    return `- ${s.name}${hint}${clip(`${desc}${when}`, MAX_SKILL_LINE_CHARS)}`;
+  });
+  if (visible.length > shown.length) {
+    lines.push(
+      `> WARNING: ${visible.length - shown.length} more skill(s) exist but are not listed here. ` +
+        `Keep the catalog under ${MAX_SKILL_ENTRIES} skills, or scope them with \`globs\` so they appear only when relevant.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 /**

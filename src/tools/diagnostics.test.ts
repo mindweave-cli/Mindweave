@@ -3,6 +3,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ReadRecord, ToolContext } from "./types.js";
 import type { Chassis, CodeDiagnostic } from "../alternator/chassis/types.js";
 import { MAX_WORKING_SET, diagnosticsTool, formatDiagnostics } from "./diagnostics.js";
@@ -111,6 +114,70 @@ test("a path that cannot be read is reported exactly like a clean file", async (
     /does not exist or cannot be read/i,
     "the description must say an unreadable path looks clean",
   );
+});
+
+// ── The compiler-caret detail block (UI-only, reads the real source line) ──────
+
+test("detail draws a caret under the exact failing token, using the server's end column", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mw-diag-"));
+  const abs = join(dir, "a.ts");
+  const line1 = "if (isInteractiveServerCommand(command) && ctx.backgroundShells) {";
+  const line2 = "  const dup = findRunningDuplicate(ctx.backgroundShells.running(), command);";
+  await writeFile(abs, `${line1}\n${line2}\nif (dup) {\n`, "utf8");
+
+  const token = "findRunningDuplicate";
+  const col = line2.indexOf(token) + 1;
+  const endCol = col + token.length;
+
+  const c = chassisWith([
+    { file: abs, line: 2, column: col, endColumn: endCol, severity: "error", message: "Cannot find name 'findRunningDuplicate'.", source: "ts" },
+  ]);
+  const res = await diagnosticsTool.execute({ path: abs }, { cwd: dir, reads: new Map(), todos: [], chassis: c } as unknown as ToolContext);
+
+  const detail = res.detail!;
+  assert.match(detail, /a\.ts:2:\d+/);
+  assert.ok(detail.includes(`│ 1: ${line1}`), "the line before should give context");
+  assert.ok(detail.includes(`│ 2: ${line2}`), "the failing line itself should be shown");
+  assert.ok(detail.includes(`⎿ ts: Cannot find name 'findRunningDuplicate'.`));
+
+  // The caret line: same gutter width as "│ 2: ", then (col-1) spaces, then
+  // exactly token.length tildes — under the token, not its first letter alone.
+  const caretRow = detail.split("\n").find((l) => l.includes("~"));
+  assert.ok(caretRow, "a caret row should exist");
+  assert.equal(caretRow!.replace(/^\s+/, ""), "~".repeat(token.length));
+});
+
+test("detail falls back to a single ^ when the server gave no end column", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mw-diag-"));
+  const abs = join(dir, "a.ts");
+  await writeFile(abs, "const x = 1\n", "utf8");
+  const c = chassisWith([{ file: abs, line: 1, column: 7, severity: "error", message: "oops" }]);
+  const res = await diagnosticsTool.execute({ path: abs }, { cwd: dir, reads: new Map(), todos: [], chassis: c } as unknown as ToolContext);
+  const caretRow = res.detail!.split("\n").find((l) => l.trim() === "^");
+  assert.ok(caretRow, "should fall back to a bare caret, not a tilde span it has no width for");
+});
+
+test("a diagnostic on an unreadable path is silently dropped from detail, not a crash", async () => {
+  const c = chassisWith([{ file: "/does/not/exist.ts", line: 1, column: 1, severity: "error", message: "boom" }]);
+  const res = await diagnosticsTool.execute({ path: "/does/not/exist.ts" }, ctx(c));
+  assert.equal(res.detail, "");
+  assert.match(res.output, /boom/, "the model still gets the finding even without a caret");
+});
+
+test("more than MAX_CARETS diagnostics: the rest are counted, not silently dropped", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mw-diag-"));
+  const abs = join(dir, "a.ts");
+  await writeFile(abs, Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n"), "utf8");
+  const diags: CodeDiagnostic[] = Array.from({ length: 8 }, (_, i) => ({
+    file: abs,
+    line: i + 1,
+    column: 1,
+    severity: "error" as const,
+    message: `err ${i}`,
+  }));
+  const c = chassisWith(diags);
+  const res = await diagnosticsTool.execute({ path: abs }, { cwd: dir, reads: new Map(), todos: [], chassis: c } as unknown as ToolContext);
+  assert.match(res.detail!, /\(\+3 more/);
 });
 
 test("the description warns that a broken CALLER will not be seen", () => {

@@ -39,8 +39,9 @@ import { forbiddenCommandReason, forbiddenCommandPatternReason } from "../govern
 import { requestForbiddenLift } from "./approval.js";
 import { posixShell, shellMismatchNote } from "./posixShell.js";
 import { killTree, spawnManaged } from "./killTree.js";
+import { captureAfterCommand, looksReadOnly, snapshotBeforeCommand } from "./shellCheckpoint.js";
 import { canonicalRoot, relativize } from "./paths.js";
-import { outputDetail } from "./detail.js";
+import { outputDetail, withOutcome } from "./detail.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
 import { findRunningDuplicate, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
 
@@ -101,7 +102,7 @@ export const runCommand: Tool = {
     `mid-turn) but resets to the root next turn. ` +
     `A command still running after 2 minutes (or 'timeout' ms, up to 10 minutes) is ` +
     `MOVED TO THE BACKGROUND, not killed: you get a shell id and the session carries on. ` +
-    `Read its output any time with shell_output. WHAT YOU HEAR AFTERWARDS IS SET BY ` +
+    `Read its output any time with the shells tool. WHAT YOU HEAR AFTERWARDS IS SET BY ` +
     `'notify', so choose it deliberately: only 'on_finish' reports that the command ` +
     `ended, and it is not the default for everything. ` +
     `Pass 'run_in_background: true' to background it from the start, and do that for a ` +
@@ -247,7 +248,24 @@ export const runCommand: Tool = {
       args.notify === "on_finish" || args.notify === "on_failure" || args.notify === "never"
         ? (args.notify as NotifyPolicy)
         : undefined;
-    return runShell(command, ctx, timeout, args.run_in_background === true, shell, declared);
+
+    // Bring shell-caused changes into /undo. Snapshot the read ledger first, run, then
+    // check in whatever moved — this is the one mutation path that had no checkpoint at
+    // all, which mattered precisely because improvising with a script is a capability we
+    // rely on. Skipped for obviously read-only commands, and for background ones, whose
+    // writes land long after this call has returned. See shellCheckpoint.ts for the
+    // bounds and for what is honestly NOT covered.
+    const background = args.run_in_background === true;
+    const watch = !background && !looksReadOnly(command);
+    const before = watch ? await snapshotBeforeCommand(ctx) : undefined;
+
+    const result = await runShell(command, ctx, timeout, background, shell, declared);
+
+    if (before && before.size > 0) {
+      // Never let bookkeeping fail a command that already ran and succeeded.
+      await captureAfterCommand(ctx, before).catch(() => undefined);
+    }
+    return result;
   },
 };
 
@@ -401,7 +419,7 @@ async function runShell(
       detachAbort();
       await applyCwd(cwdFile, ctx);
       if (tempFile) await fs.rm(tempFile, { force: true }).catch(() => {});
-      resolve(format(command, ctx, collected(), dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore));
+      resolve(format(command, ctx, collected(), dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore, child.pid));
     };
 
     child.on("error", (error) => {
@@ -441,19 +459,26 @@ function backgroundedResult(id: number, command: string, lead: string, notify: N
   const tail =
     notify === "never"
       ? `Nothing further will be reported about it. Say in ONE short line that it's running, then STOP ` +
-        `(end your turn). Use shell_output(${id}) to inspect it and kill_shell(${id}) to stop it.`
+        `(end your turn). Use shells({id: ${id}}) to inspect it and kill_shell(${id}) to stop it.`
       : notify === "on_failure"
         ? `You WILL be told once it has come up, so you can report that. You will NOT be told when it ` +
           `stops, because the user closing their own app is not an event to act on — so never restart ` +
           `it on your own. Say in ONE short line that it's starting, then STOP (end your turn). Use ` +
-          `shell_output(${id}) to inspect it and kill_shell(${id}) to stop it.`
+          `shells({id: ${id}}) to inspect it and kill_shell(${id}) to stop it.`
         : `You will be notified AUTOMATICALLY the moment it finishes, so do NOT poll it. Say in ONE ` +
           `short line that it started and that you'll report back when it's done, then STOP (end your ` +
-          `turn). Only call shell_output(${id}) if you have a specific reason to inspect partial ` +
+          `turn). Only call shells({id: ${id}}) if you have a specific reason to inspect partial ` +
           `output; use kill_shell(${id}) to stop it.`;
   return {
     output: `${lead}. ${tail}`,
     summary: `bg shell #${id}: ${clip(command)}`,
+    // UI-only, never sent to the model (`tail` above already told IT the real
+    // notification policy) — just the command itself and which shell it landed
+    // in, the same "$ command" convention run_command's own foreground detail
+    // uses. Previously absent entirely, so a backgrounded command's row showed
+    // nothing under it at all.
+    detail: outputDetail(`$ ${command}\nBackgrounded as shell #${id}`),
+    detailKind: "shell" as const,
   };
 }
 
@@ -599,6 +624,8 @@ function format(
   timeoutMs: number,
   shell: Shell,
   cwdBefore: string,
+  /** The killed process, named only when something WAS killed (see withOutcome). */
+  pid?: number,
 ): ToolResult {
   const body = output.trim();
   const parts: string[] = [];
@@ -652,8 +679,23 @@ function format(
     output: parts.join("\n"),
     isError: timedOut || signal !== null || (exitCode !== 0 && exitCode !== null),
     summary: `ran \`${clip(command)}\` in ${shown} (${status})`,
-    detail: outputDetail(body),
+    // The outcome is appended to what is SHOWN, not just to what the model reads. A
+    // command that printed output previously ended its row with the last line of that
+    // output and nothing else, so a build that failed and a build that passed looked
+    // identical unless you recognised the text — the exit code was known here and
+    // simply never displayed.
+    // The command leads its own block on its own row. Inline in the header it was
+    // clipped to 48 characters, which for a real command line lost the half that said
+    // what it actually did (`Run(mkdir -p ..\astra-backup; Move-Item .\astra.htm…)`).
+    detail: withOutcome(shellBody(command, body), timedOut, exitCode, signal, timeoutMs, pid),
+    detailKind: "shell" as const,
   };
+}
+
+/** The `$ command` header row above a command's captured output. */
+function shellBody(command: string, body: string): string {
+  const out = outputDetail(body);
+  return out ? `$ ${command}\n${out}` : `$ ${command}`;
 }
 
 /** Single-quote a string for a POSIX shell. */

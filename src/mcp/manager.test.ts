@@ -18,6 +18,24 @@ import type { McpServerConfig } from "./config.js";
  * A stdio MCP server. `legacy` speaks the pre-2026 handshake (no `server/discover`),
  * which is what most real servers still do.
  */
+/**
+ * Assert a server actually connected, quoting the server's own error if it did not.
+ *
+ * An assertion on the TOOL LIST alone reports an empty array and stops there, which
+ * describes the symptom of a server that never started exactly as well as it describes
+ * a genuine tools bug. The state and the error message are already carried on the
+ * status; not reading them just throws away the diagnosis.
+ */
+function assertConnected(mgr: McpManager, name: string): void {
+  const status = mgr.statuses().find((s) => s.name === name);
+  assert.ok(status, `no status at all for server '${name}'`);
+  assert.equal(
+    status.state,
+    "connected",
+    `server '${name}' is ${status.state}${status.error ? ` — ${status.error}` : " with no error reported"}`,
+  );
+}
+
 function serverScript(opts: { legacy?: boolean; failTool?: boolean } = {}): string {
   return `
 let buf = "";
@@ -164,6 +182,13 @@ test("a read-only turn is offered only the tools the server marked read-only", a
   const mgr = new McpManager();
   try {
     await mgr.start([stdio("fake", serverScript())]);
+    // Check the CONNECTION before the tools. This test flaked once in a full suite run
+    // — an empty tool list, in 662ms, far too fast to be a request timeout — and an
+    // assertion on names alone cannot tell "the server connected and offered the wrong
+    // tools" from "the server never came up". Those need opposite fixes, so the failure
+    // has to say which it was. Reproduced in neither 8 isolated runs nor a memory
+    // measurement (3.5GB free, 12 processes), so the next occurrence is the evidence.
+    assertConnected(mgr, "fake");
     assert.deepEqual(
       mgr.toolSchemas(true).map((s) => s.function.name),
       ["mcp__fake__peek"],

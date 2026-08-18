@@ -12,10 +12,11 @@ import {
   findRunningDuplicate,
   shouldWakeOnEnd,
   guessNotifyPolicy,
+  detectPort,
 } from "./backgroundShells.js";
 import type { ShellInfo } from "./backgroundShells.js";
 import { runCommand } from "./runCommand.js";
-import { shellOutput, listShells, killShell } from "./shellTools.js";
+import { shellsTool, killShell } from "./shellTools.js";
 import type { ToolContext } from "./types.js";
 import { isProcessStopped } from "./killTree.js";
 
@@ -516,7 +517,7 @@ test("the whole reported scenario, through run_command / shell_output / list_she
   const id = mgr.running()[0]!.id;
 
   // 2. It peeks while the thing is still starting. Same rule: no false promise.
-  const early = await shellOutput.execute({ id }, ctx);
+  const early = await shellsTool.execute({ id }, ctx);
   assert.match(early.output, /Still starting/);
   assert.match(early.output, /will NOT be told when it later stops/);
   assert.doesNotMatch(early.output, /when it finishes/);
@@ -528,7 +529,7 @@ test("the whole reported scenario, through run_command / shell_output / list_she
   assert.equal(ready.length, 1);
   assert.equal(ready[0]!.kind, "ready");
 
-  const upList = await listShells.execute({}, ctx);
+  const upList = await shellsTool.execute({}, ctx);
   assert.match(upList.output, /#\d+ up \(/, `list_shells should say it is up, got: ${upList.output}`);
 
   // 4. The user closes it themselves, from outside.
@@ -545,7 +546,7 @@ test("the whole reported scenario, through run_command / shell_output / list_she
   assert.equal(ended[0]!.wake, false);
 
   // 6. And afterwards the model can answer "why is my app down?" from list_shells.
-  const afterList = await listShells.execute({}, ctx);
+  const afterList = await shellsTool.execute({}, ctx);
   assert.match(afterList.output, /after it had come up|stopped by/, `list_shells must explain the stop, got: ${afterList.output}`);
 
   mgr.dispose();
@@ -558,7 +559,7 @@ test("a server that never comes up is described as such, not as a bare exit code
   mgr.adopt(child, { command: "npm run dev", cwd: process.cwd(), notify: "on_failure" });
   await waitUntil(() => mgr.list()[0]!.status !== "running");
 
-  const listed = await listShells.execute({}, ctx);
+  const listed = await shellsTool.execute({}, ctx);
   assert.match(listed.output, /never came up/, `got: ${listed.output}`);
   assert.equal(mgr.pendingCount(), 1, "the user never saw it, so this interrupts");
   mgr.dispose();
@@ -573,7 +574,7 @@ test("a signalled shell never describes itself as 'exited null'", async () => {
   await waitUntil(() => mgr.list()[0]!.status !== "running");
 
   assert.equal(mgr.list()[0]!.exitCode, null, "a signalled process has no exit code");
-  const listed = await listShells.execute({}, ctx);
+  const listed = await shellsTool.execute({}, ctx);
   assert.doesNotMatch(listed.output, /exited null/, `got: ${listed.output}`);
   assert.match(listed.output, /stopped \(SIG/, `got: ${listed.output}`);
   mgr.dispose();
@@ -594,7 +595,7 @@ test("a rolled buffer is REPORTED, not silently incomplete", async () => {
   assert.equal(shown.info.truncated, true, "the roll must be visible on the public view");
   // …and it must reach the model, through the tool it actually calls.
   const ctx = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
-  const listed = await listShells.execute({}, ctx);
+  const listed = await shellsTool.execute({}, ctx);
   assert.match(listed.output, /this log is incomplete/i);
   mgr.dispose();
 });
@@ -610,12 +611,12 @@ test("kill_shell reports a non-running shell plainly, not as a failure", async (
 });
 
 test("list_shells' description names the two questions its output answers", () => {
-  assert.match(listShells.description, /IS IT UP/i);
-  assert.match(listShells.description, /WHY DID IT STOP/i);
+  assert.match(shellsTool.description, /IS IT UP/i);
+  assert.match(shellsTool.description, /WHY DID IT STOP/i);
 });
 
 test("shell_output's stated read cap is the real one", () => {
-  assert.match(shellOutput.description, /at most 30,000 characters/i);
+  assert.match(shellsTool.description, /at most 30,000 characters/i);
 });
 
 test("disposing kills a shell's descendants even after the wrapper has exited", async () => {
@@ -653,4 +654,28 @@ test("disposing kills a shell's descendants even after the wrapper has exited", 
     true,
     "the shell's process group must be gone after dispose, wrapper and descendants alike",
   );
+});
+
+test("a dev server's own startup URL is where the port comes from", () => {
+  // Read from the process's output, never from inspecting sockets: no privileges
+  // needed, and it cannot report a port that belongs to some other process.
+  assert.equal(detectPort("  ➜  Local:   http://localhost:5173/"), 5173);
+  assert.equal(detectPort("Server running at http://127.0.0.1:8080"), 8080);
+  assert.equal(detectPort("listening on port 3000"), 3000);
+});
+
+test("the FIRST announcement wins when a server prints several", () => {
+  // Vite prints Local then Network for the same port, and some tools print a proxy
+  // target after that. The first line describes the server that just came up.
+  const out = ["  Local:   http://localhost:5173/", "  Network: http://192.168.1.9:5173/", "proxy -> port 9000"].join("\n");
+  assert.equal(detectPort(out), 5173);
+});
+
+test("output with no port announcement yields nothing, not a guess", () => {
+  assert.equal(detectPort("building...\ncompiled successfully"), undefined);
+  assert.equal(detectPort(""), undefined);
+});
+
+test("a number that cannot be a port is rejected", () => {
+  assert.equal(detectPort("http://localhost:999999"), undefined);
 });

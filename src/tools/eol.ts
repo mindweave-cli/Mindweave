@@ -4,7 +4,7 @@
  *
  * The model always emits LF in tool arguments (it can't see a CR). Left alone,
  * write_file would turn a Windows (CRLF) project into a mix of CRLF and LF files,
- * and a multi-line edit_file old_string would fail to match raw CRLF bytes. These
+ * and a multi-line `old_string` would fail to match raw CRLF bytes. These
  * helpers keep the bytes on disk consistent with what's already there.
  */
 import { promises as fs } from "node:fs";

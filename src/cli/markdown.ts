@@ -47,6 +47,92 @@ function configure(): void {
 // the box). Module-level because renderMarkdown is synchronous and single-threaded.
 let tableWidth = 80;
 
+const BULLET_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
+const HEADING_RE = /^#{1,6}\s/;
+const FENCE_RE = /^\s*(?:```|~~~)/;
+const TABLE_RE = /^\s*\|/;
+/** A line that is nothing but bold text, optionally ending in a colon — models write
+ *  these as section labels, so they behave like headings even though they aren't. */
+const LABEL_RE = /^\s*\*\*[^*]+\*\*:?\s*$/;
+/**
+ * A definition line: a bold term, a separator, then its description.
+ *
+ *   **Smart Organization** — auto-linking, quick switcher, …
+ *   **Export**: Markdown, HTML, PDF
+ *
+ * This is the shape models reach for constantly when summarising, and it was the
+ * single worst thing this renderer did. Each one is a separate fact, but written
+ * without blank lines they are consecutive lines of one paragraph as far as
+ * CommonMark is concerned — so nine of them lexed to ONE token and rendered as an
+ * unbroken nine-line wall with bold scattered through it. `LABEL_RE` did not save
+ * them because it requires the line to be bold and NOTHING else.
+ *
+ * The separator has to be present and followed by text: that is what distinguishes a
+ * definition from an ordinary sentence that merely opens with emphasis ("**The trick**
+ * that keeps it specific is…"), which must stay part of its paragraph.
+ */
+const DEFN_RE = /^\s*\*\*[^*]+\*\*\s*(?:[—–:]|-)\s+\S/;
+
+/**
+ * Put blank lines back at block boundaries, before the markdown is lexed.
+ *
+ * Models write markdown tightly — a list directly under the sentence introducing it,
+ * a sentence directly under the last bullet, a bold label hard against the paragraph
+ * above. Rendered faithfully that produces the wall of text this fixes: every block
+ * hugging the next with nothing to separate them.
+ *
+ * It also repairs a real parse fault, not just spacing. In CommonMark a prose line
+ * directly beneath a list item is a LAZY CONTINUATION — it is absorbed into that item
+ * rather than starting a paragraph. So a summary sentence written under the last
+ * bullet became part of the bullet, and rendered hanging at the left margin under it,
+ * looking like a bug. A blank line is what tells the parser they are separate things.
+ *
+ * Deliberately conservative: it only inserts blanks where two DIFFERENT kinds of block
+ * meet. Content inside a fence is never touched, and an indented line after a bullet
+ * is left alone because that is a genuine continuation of the item.
+ */
+export function normalizeBlocks(md: string): string {
+
+  const lines = md.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  const blank = (s: string) => s.trim() === "";
+  // 2+ leading spaces: a continuation of the list item above, not a new block.
+  const indented = (s: string) => /^\s{2,}\S/.test(s);
+
+  for (const line of lines) {
+    if (FENCE_RE.test(line)) {
+      if (!inFence && out.length > 0 && !blank(out[out.length - 1]!)) out.push("");
+      out.push(line);
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+
+    const prev = out.length > 0 ? out[out.length - 1]! : "";
+    if (!blank(line) && !blank(prev)) {
+      const prevList = BULLET_RE.test(prev);
+      const thisList = BULLET_RE.test(line);
+      const needsAir =
+        (thisList && !prevList) || // prose introducing a list
+        (prevList && !thisList && !indented(line)) || // prose after a list — the lazy-continuation fix
+        HEADING_RE.test(line) ||
+        HEADING_RE.test(prev) ||
+        LABEL_RE.test(line) ||
+        DEFN_RE.test(line) || // a definition starts its own block…
+        DEFN_RE.test(prev) || // …and so does whatever follows one
+        FENCE_RE.test(prev) || // the line after a closing fence
+        TABLE_RE.test(line) !== TABLE_RE.test(prev); // either edge of a table
+      if (needsAir) out.push("");
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 /** Render a markdown string to a styled ANSI string for an Ink <Text>. `width` is
  *  the visible columns available; tables are sized to fit inside it. */
 export function renderMarkdown(content: string, width = 80): string {
@@ -54,7 +140,7 @@ export function renderMarkdown(content: string, width = 80): string {
   tableWidth = Math.max(20, width);
   try {
     return marked
-      .lexer(content)
+      .lexer(normalizeBlocks(content))
       .map((t) => renderToken(t, 0, null))
       .join("")
       .replace(/\n{3,}/g, "\n\n")
@@ -250,48 +336,143 @@ function fitColumns(natural: number[], budget: number): number[] {
   return widths;
 }
 
-// The gutter between columns: a dim thin rule with a space either side. Light
-// enough not to box the content in, but it keeps the columns visually separated
-// (and wrapped continuation lines aligned under their column).
-const COL_GUTTER = " │ ";
-const GUTTER_WIDTH = COL_GUTTER.length; // 3 columns
+// A column narrower than this holds nothing readable. The old sizer shrank the
+// widest column one character at a time with a floor of ONE, so a wide table
+// degraded into a stack of single letters rather than admitting it did not fit.
+const MIN_COL = 3;
+// Cells never touch the terminal's last column: a box drawn exactly to the edge is
+// one rounding error away from Ink wrapping a row and shattering the border.
+const SAFETY_MARGIN = 2;
+// Past this many lines in a single row, the grid is doing more harm than good and
+// the vertical layout reads better. Same threshold Froge's port settled on.
+const MAX_ROW_LINES = 4;
+// Per column: a space either side of the content plus one border character.
+const CELL_PADDING = 3;
 
 /**
- * A clean monospace table that always fits the available width. The old renderer
- * drew a full ASCII box (outer border + a ├─┼─┤ rule between every row), which
- * read as cramped and busy in the terminal — especially once cells wrapped. This
- * is airier: a bold header, ONE dim rule beneath it, and dim thin column
- * separators — no outer border and no per-row grid. Columns are sized to their
- * content, then the widest are shrunk and word-wrapped so a long cell stacks onto
- * several lines instead of overflowing. Cell contents render plain (inline styling
- * dropped) so wrapping and alignment stay exact.
+ * A bordered monospace table that always fits the available width.
+ *
+ * The borderless version this replaces was airier in isolation and worse in use: with
+ * only a thin gutter between columns, a wrapped cell was hard to tell from the row
+ * below it, and the whole thing stopped reading as a unit of structured data. A drawn
+ * box is what makes a table scan as a table at a glance, which is the only reason to
+ * choose one over prose in the first place.
+ *
+ * Sizing runs in three tiers rather than shrinking the widest column until something
+ * gives: use the natural widths if they fit, otherwise distribute the available space
+ * in proportion to how much each column wants, and only hard-wrap when even the
+ * longest single WORD in each column cannot fit.
+ *
+ * And when no arrangement is readable — a row taller than MAX_ROW_LINES, or a box
+ * still wider than the terminal — it stops trying and renders vertically instead. A
+ * table that does not fit is not a table; forcing it into columns produces the
+ * shredded output this fallback exists to avoid.
  */
 function renderTable(token: Tokens.Table): string {
-  const headers = token.header.map((c) => stripAnsi(inline(c.tokens)));
-  const n = headers.length;
+  const n = token.header.length;
   if (n === 0) return "";
-  const rows = token.rows.map((r) => headers.map((_, i) => stripAnsi(inline(r[i]?.tokens ?? []))));
 
-  const natural = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length), 1));
-  // Columns are joined by the gutter (no outer border), so the separators between
-  // n columns cost GUTTER_WIDTH*(n-1). Leave one trailing column as breathing room.
-  const budget = Math.max(n, tableWidth - GUTTER_WIDTH * (n - 1) - 1);
-  const widths = fitColumns(natural, budget);
+  const styledOf = (t: Token[] | undefined) => inline(t ?? []).replace(/\s+/g, " ").trim();
+  const headers = token.header.map((c) => styledOf(c.tokens));
+  const rows = token.rows.map((r) => token.header.map((_, i) => styledOf(r[i]?.tokens)));
+  const plain = (s: string) => stripAnsi(s);
 
-  const gutter = chalk.dim(COL_GUTTER);
-  const renderRow = (cells: string[], header: boolean): string => {
-    const wrapped = cells.map((c, i) => wrapPlain(c, widths[i]));
-    const height = Math.max(1, ...wrapped.map((w) => w.length));
-    const out: string[] = [];
-    for (let row = 0; row < height; row++) {
-      const line = wrapped.map((w, i) => padCell(w[row] ?? "", widths[i])).join(gutter);
-      out.push(header ? chalk.bold(line) : line);
-    }
-    return out.join("\n");
+  const columns = (i: number) => [headers[i]!, ...rows.map((r) => r[i]!)];
+  // What a column wants, and the least it can take without slicing through a word.
+  const ideal = token.header.map((_, i) => Math.max(MIN_COL, ...columns(i).map((c) => plain(c).length)));
+  const floor = token.header.map((_, i) =>
+    Math.max(MIN_COL, ...columns(i).flatMap((c) => plain(c).split(/\s+/).map((w) => w.length))),
+  );
+
+  const budget = Math.max(n * MIN_COL, tableWidth - SAFETY_MARGIN - (n * CELL_PADDING + 1));
+  const totalIdeal = ideal.reduce((a, b) => a + b, 0);
+  const totalFloor = floor.reduce((a, b) => a + b, 0);
+
+  let widths: number[];
+  let hard = false;
+  if (totalIdeal <= budget) {
+    widths = ideal;
+  } else if (totalFloor <= budget) {
+    // Share the leftover in proportion to how much each column is giving up, so a
+    // column that wanted a lot gets more of the slack than one that barely wanted any.
+    const slack = budget - totalFloor;
+    const want = ideal.map((w, i) => w - floor[i]!);
+    const totalWant = want.reduce((a, b) => a + b, 0);
+    widths = floor.map((w, i) => (totalWant === 0 ? w : w + Math.floor((want[i]! / totalWant) * slack)));
+  } else {
+    hard = true;
+    widths = fitColumns(floor, budget);
+  }
+
+  // Styling survives only when a cell fits on one line. Wrapping a string that
+  // carries ANSI means splitting between an escape and the text it colours, which
+  // renders as leaked codes — so a wrapped cell falls back to its plain text. That
+  // keeps `inline code` and **bold** in the short cells where they carry meaning,
+  // without a full ANSI-aware wrapper to get subtly wrong.
+  const cellLines = (styled: string, w: number): string[] => {
+    const text = plain(styled);
+    if (text.length <= w) return [styled + " ".repeat(w - text.length)];
+    return wrapPlain(text, w).map((l) => padCell(l, w));
   };
 
-  // A single continuous rule under the header, spanning the table's full width.
-  const total = widths.reduce((a, b) => a + b, 0) + GUTTER_WIDTH * (n - 1);
-  const rule = chalk.dim("─".repeat(total));
-  return [renderRow(headers, true), rule, ...rows.map((r) => renderRow(r, false))].join("\n");
+  const height = (cells: string[]) => Math.max(1, ...cells.map((c, i) => cellLines(c, widths[i]!).length));
+  const tallest = Math.max(height(headers), ...rows.map(height));
+  const boxWidth = widths.reduce((a, b) => a + b, 0) + n * CELL_PADDING + 1;
+  if (hard || tallest > MAX_ROW_LINES || boxWidth > tableWidth - SAFETY_MARGIN) {
+    return renderTableVertically(headers, rows);
+  }
+
+  const bar = chalk.dim("│");
+  const rule = (left: string, mid: string, right: string) =>
+    chalk.dim(left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right);
+
+  const renderRow = (cells: string[], header: boolean): string[] => {
+    const parts = cells.map((c, i) => cellLines(c, widths[i]!));
+    const lines: string[] = [];
+    for (let r = 0; r < Math.max(...parts.map((p) => p.length)); r++) {
+      const body = parts
+        .map((p, i) => {
+          const text = p[r] ?? " ".repeat(widths[i]!);
+          return ` ${header ? chalk.bold(text) : text} `;
+        })
+        .join(bar);
+      lines.push(bar + body + bar);
+    }
+    return lines;
+  };
+
+  return [
+    rule("┌", "┬", "┐"),
+    ...renderRow(headers, true),
+    rule("├", "┼", "┤"),
+    ...rows.flatMap((r) => renderRow(r, false)),
+    rule("└", "┴", "┘"),
+  ].join("\n");
+}
+
+/**
+ * The fallback for a table that cannot be a table here: each row becomes a small
+ * labelled stack, separated by a rule.
+ *
+ * This is the honest answer to a table that is too wide. The alternative — squeezing
+ * columns until the words break — keeps the SHAPE of a table while destroying the
+ * thing a table is for, which is comparing values by position. Stacked labels lose
+ * the comparison but keep every value readable, and on a narrow terminal that is
+ * strictly the better trade.
+ */
+function renderTableVertically(headers: string[], rows: string[][]): string {
+  const label = (s: string) => chalk.bold(stripAnsi(s) || "—");
+  const out: string[] = [];
+  rows.forEach((row, i) => {
+    if (i > 0) out.push(chalk.dim("─".repeat(Math.min(40, tableWidth))));
+    row.forEach((cell, c) => {
+      const head = label(headers[c] ?? `Column ${c + 1}`);
+      const value = stripAnsi(cell).trim();
+      const indent = "  ";
+      const lines = wrapPlain(value, Math.max(10, tableWidth - stripAnsi(head).length - 2));
+      out.push(`${head}: ${lines[0] ?? ""}`);
+      for (const rest of lines.slice(1)) out.push(indent + rest);
+    });
+  });
+  return out.join("\n");
 }

@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findMcpTools } from "./mcpSearch.js";
+import { findTools } from "./mcpSearch.js";
 import { McpManager } from "../mcp/manager.js";
 import type { ToolContext } from "./types.js";
 
@@ -47,12 +47,12 @@ async function poolOf(count: number): Promise<McpManager> {
 }
 
 test("the tool is read-only and always present", () => {
-  assert.equal(findMcpTools.readOnly, true);
-  assert.equal(findMcpTools.name, "find_mcp_tools");
+  assert.equal(findTools.readOnly, true);
+  assert.equal(findTools.name, "find_tools");
 });
 
 test("with no servers it says so plainly and points back to built-ins", async () => {
-  const r = await findMcpTools.execute({ query: "github" }, ctxWith());
+  const r = await findTools.execute({ query: "github" }, ctxWith());
   assert.equal(r.isError, undefined, "no servers is a normal answer, not an error");
   assert.match(r.output, /No MCP servers/);
 });
@@ -62,7 +62,7 @@ test("when nothing is deferred it tells the model not to bother", async () => {
   // tools that are already sitting in its tool list.
   const mgr = await poolOf(2);
   try {
-    const r = await findMcpTools.execute({ query: "create issue" }, ctxWith(mgr));
+    const r = await findTools.execute({ query: "create issue" }, ctxWith(mgr));
     assert.match(r.output, /already loaded/);
     assert.match(r.output, /don't need this tool/);
   } finally {
@@ -73,7 +73,7 @@ test("when nothing is deferred it tells the model not to bother", async () => {
 test("a match is loaded and reported by its callable name", async () => {
   const mgr = await poolOf(40);
   try {
-    const r = await findMcpTools.execute({ query: "create issue" }, ctxWith(mgr));
+    const r = await findTools.execute({ query: "create issue" }, ctxWith(mgr));
     assert.equal(r.isError, undefined);
     assert.match(r.output, /mcp__big__create_issue/, "the name the model must call");
     assert.ok(mgr.snapshot().exposedSchemas().some((s) => s.function.name === "mcp__big__create_issue"));
@@ -85,7 +85,7 @@ test("a match is loaded and reported by its callable name", async () => {
 test("a miss is honest and tells the model to stop guessing", async () => {
   const mgr = await poolOf(40);
   try {
-    const r = await findMcpTools.execute({ query: "kubernetes" }, ctxWith(mgr));
+    const r = await findTools.execute({ query: "kubernetes" }, ctxWith(mgr));
     assert.equal(r.isError, undefined, "a miss is information, not a failure");
     assert.match(r.output, /No MCP tool matches/);
     // The important half: what to do next.
@@ -101,10 +101,10 @@ test("a search cut off at the cap says so instead of looking exhaustive", async 
   // returned they were never activated either, so nothing else can reveal them.
   const mgr = await poolOf(40);
   try {
-    const r = await findMcpTools.execute({ query: "big" }, ctxWith(mgr)); // bare server name
+    const r = await findTools.execute({ query: "big" }, ctxWith(mgr)); // bare server name
     assert.match(r.output, /top 8/, "a capped result must not read as the whole list");
     assert.match(r.output, /search again with a narrower term/);
-    assert.ok(findMcpTools.description.includes("at most 8 tools"), "the cap belongs in the description too");
+    assert.ok(findTools.description.includes("at most 8 tools"), "the cap belongs in the description too");
   } finally {
     await mgr.dispose();
   }
@@ -114,7 +114,7 @@ test("a search that fits under the cap does NOT claim there is more", async () =
   // The other half: warning every time would train the model to ignore it.
   const mgr = await poolOf(40);
   try {
-    const r = await findMcpTools.execute({ query: "create issue" }, ctxWith(mgr));
+    const r = await findTools.execute({ query: "create issue" }, ctxWith(mgr));
     assert.doesNotMatch(r.output, /top 8/);
   } finally {
     await mgr.dispose();
@@ -122,6 +122,6 @@ test("a search that fits under the cap does NOT claim there is more", async () =
 });
 
 test("an empty query is refused rather than matching everything", async () => {
-  const r = await findMcpTools.execute({ query: "  " }, ctxWith());
+  const r = await findTools.execute({ query: "  " }, ctxWith());
   assert.equal(r.isError, true);
 });

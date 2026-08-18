@@ -38,9 +38,8 @@ export const GUARD_REFUSAL =
 export function describeCall(name: string, args: Record<string, unknown>): string {
   const path = typeof args.path === "string" ? args.path : undefined;
   switch (name) {
-    case "edit_file":
+    case "edit":
     case "write_file":
-    case "multi_edit":
     case "replace_symbol_body":
       return `${name} — ${path ?? "?"}`;
     case "run_command":
@@ -53,9 +52,47 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
   }
 }
 
-/** The question shown atop the Sentinel approval prompt. */
-export function guardQuestion(name: string, args: Record<string, unknown>): string {
-  return `Sentinel — approve this action?\n${describeCall(name, args)}`;
+/** The question shown atop the Sentinel approval prompt. ONE line: it renders inside a
+ *  height-bounded box, and what the call actually is goes in `guardDetail` instead. */
+export function guardQuestion(): string {
+  return "Sentinel — approve this action?";
+}
+
+/** What each kind of call is called in the permission block, in the user's terms
+ *  rather than the tool's. Anything unlisted falls back to the tool name. */
+const ACTION_LABEL: Record<string, string> = {
+  run_command: "Shell execution",
+  edit: "File edit",
+  replace_symbol_body: "File edit",
+  write_file: "File write",
+  spawn_subagent: "Sub-agent spawn",
+};
+
+/**
+ * The block printed above a Sentinel prompt: what is about to happen, spelled out.
+ *
+ * Rendered into the TRANSCRIPT (as approval `detail`), not into the prompt — the prompt
+ * is height-bounded and this is the part that can run long. Reading it is the whole
+ * point of the gate: a prompt that says only "approve this action?" is one the user
+ * learns to answer without looking.
+ *
+ * Deliberately NOT a risk rating. The reference design shows a "Risk: High" line, and
+ * there is nothing in Mindweave that knows which commands are dangerous — inventing a
+ * severity here would be a guess presented as an assessment, and a wrong "Low" is worse
+ * than no line at all. What IS shown is fact: the kind of action, and its exact target.
+ */
+export function guardDetail(name: string, args: Record<string, unknown>): string {
+  const lines = [`Action: ${ACTION_LABEL[name] ?? name}`];
+  const command = strArg(args.command);
+  const path = strArg(args.path);
+  const task = strArg(args.task);
+  // The command is shown UNCLIPPED. It is the thing being agreed to, and a truncated
+  // one hides the tail — which on a shell command is exactly where the damage lives.
+  if (command) lines.push(`Command: $ ${command}`);
+  if (path) lines.push(`File: ${path}`);
+  if (task) lines.push(`Task: ${clip(task, 200)}`);
+  lines.push(`Tool: ${name}`);
+  return lines.join("\n");
 }
 
 function strArg(v: unknown): string {

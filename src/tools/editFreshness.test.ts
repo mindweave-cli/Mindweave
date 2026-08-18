@@ -21,10 +21,19 @@ import { promises as fs } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { editFile } from "./editFile.js";
-import { multiEdit } from "./multiEdit.js";
+import { edit } from "./edit.js";
 import { changedSinceRead } from "./editTarget.js";
 import type { ToolContext } from "./types.js";
+
+/** The single-edit case, spelled the way it reads: `edit` takes an edits[] array,
+ *  and a lone change is an array of one. */
+function editOne(
+  args: { path: string; old_string: string; new_string: string; replace_all?: boolean },
+  ctx: ToolContext,
+) {
+  const { path, ...one } = args;
+  return edit.execute({ path, edits: [one] }, ctx);
+}
 
 const SOURCE = `import logging
 
@@ -73,7 +82,7 @@ test("an edit after an external change is refused, and says WHY", async () => {
   const { path, ctx } = await project();
   await externallyChange(path, SOURCE.replace("return 42", "return 43"));
 
-  const r = await editFile.execute(
+  const r = await editOne(
     { path: "app.py", old_string: '    ip = request.META.get("REMOTE_ADDR")', new_string: "    ip = client_ip(request)" },
     ctx,
   );
@@ -86,7 +95,7 @@ test("an edit after an external change is refused, and says WHY", async () => {
 test("the refusal is quiet — it is the agent's own bookkeeping, not the user's problem", async () => {
   const { path, ctx } = await project();
   await externallyChange(path, SOURCE.replace("return 42", "return 43"));
-  const r = await editFile.execute({ path: "app.py", old_string: "return 42", new_string: "return 44" }, ctx);
+  const r = await editOne({ path: "app.py", old_string: "return 42", new_string: "return 44" }, ctx);
   assert.equal(r.quiet, true);
 });
 
@@ -96,7 +105,7 @@ test("the dangerous case: a change ELSEWHERE no longer slips through", async () 
   const { root, path, ctx } = await project();
   await externallyChange(path, SOURCE.replace("def other(request):\n    return 42", "def other(request):\n    raise RuntimeError('gone')"));
 
-  const r = await editFile.execute(
+  const r = await editOne(
     { path: "app.py", old_string: '    ip = request.META.get("REMOTE_ADDR")', new_string: "    ip = client_ip(request)" },
     ctx,
   );
@@ -107,10 +116,10 @@ test("the dangerous case: a change ELSEWHERE no longer slips through", async () 
   assert.ok(after.includes("RuntimeError"), "and the external change is intact");
 });
 
-test("multi_edit is gated the same way — the check lives in the shared gauntlet", async () => {
+test("a batched edit is gated the same way — the check lives in the shared gauntlet", async () => {
   const { path, ctx } = await project();
   await externallyChange(path, SOURCE.replace("return 42", "return 43"));
-  const r = await multiEdit.execute(
+  const r = await edit.execute(
     { path: "app.py", edits: [{ old_string: "import logging", new_string: "import logging\nimport os" }] },
     ctx,
   );
@@ -125,7 +134,7 @@ test("re-reading clears it, and the edit then goes through", async () => {
   const st = await fs.stat(path);
   ctx.reads.set(path, { mtimeMs: st.mtimeMs, size: st.size, full: true });
 
-  const r = await editFile.execute({ path: "app.py", old_string: "return 43", new_string: "return 44" }, ctx);
+  const r = await editOne({ path: "app.py", old_string: "return 43", new_string: "return 44" }, ctx);
   assert.ok(!r.isError, r.output);
   assert.match(await readFile(path, "utf8"), /return 44/);
 });
@@ -134,15 +143,15 @@ test("the agent's OWN writes never trip the gate", async () => {
   // recordWrite re-stats after every edit. If it did not, the second edit of any pair
   // would refuse, which would make the whole gate unusable.
   const { path, ctx } = await project();
-  const first = await editFile.execute({ path: "app.py", old_string: "return 42", new_string: "return 43" }, ctx);
+  const first = await editOne({ path: "app.py", old_string: "return 42", new_string: "return 43" }, ctx);
   assert.ok(!first.isError, first.output);
-  const second = await editFile.execute({ path: "app.py", old_string: "return 43", new_string: "return 44" }, ctx);
+  const second = await editOne({ path: "app.py", old_string: "return 43", new_string: "return 44" }, ctx);
   assert.ok(!second.isError, second.output);
   assert.match(await readFile(path, "utf8"), /return 44/);
 });
 
 // ── the description has to match the matcher ──────────────────────────────────
-// edit_file's description claims the matcher forgives indentation and line endings
+// The edit tool's description claims the matcher forgives indentation and line endings
 // but not skipped or reordered lines. Those are behaviours in editCore, and a
 // description that oversells leniency invites the sloppy input that makes a
 // wrong-place edit possible, while one that undersells it costs whole-file re-reads
@@ -154,7 +163,7 @@ test("indentation really is forgiven, as the description promises", () => {
   const r = findMatches(file, "function a() {\nreturn 1;\n}");
   assert.equal(r.matches.length, 1, "a differently-indented block must still match");
   assert.equal(r.tier, "line-trimmed");
-  assert.match(editFile.description, /leading and trailing whitespace ignored/i);
+  assert.match(edit.description, /leading and trailing whitespace ignored/i);
 });
 
 test("an exact match still wins over the looser tier", () => {
@@ -167,12 +176,12 @@ test("a skipped line is NOT forgiven, as the description warns", () => {
   const file = "one\ntwo\nthree\n";
   const r = findMatches(file, "one\nthree");
   assert.equal(r.matches.length, 0, "skipping a line must not match");
-  assert.match(editFile.description, /skipped, reordered, or extra line/i);
+  assert.match(edit.description, /skipped, reordered, or extra line/i);
 });
 
 test("the description no longer claims an exact-bytes match is required", () => {
   // The claim that cost the re-reads.
-  assert.doesNotMatch(editFile.description, /must match the file's text/i);
+  assert.doesNotMatch(edit.description, /must match the file's text/i);
 });
 
 // ── write_file's description promises three services; they must exist ─────────
@@ -242,7 +251,7 @@ test("same-file ambiguity is refused and `path` cannot fix it", async () => {
   // The file must be untouched.
   assert.match(await readFile(p, "utf8"), /return 1/);
   // And the description must send the model somewhere that actually works.
-  assert.match(replaceSymbolBody.description, /use edit_file with an exact old_string/i);
+  assert.match(replaceSymbolBody.description, /use edit with an exact old_string/i);
 });
 
 test("a successful replace returns the new definition WITH line numbers", async () => {
@@ -265,4 +274,91 @@ test("a successful replace returns the new definition WITH line numbers", async 
   assert.ok(!r.isError, `expected success, got: ${r.output}`);
   assert.match(r.output, /\b1\b.*export function only/, "the result must carry line numbers");
   assert.match(replaceSymbolBody.description, /WITH line numbers/i);
+});
+
+// ── An unread file earns its edit by matching ────────────────────────────────
+// Measured on a real session: the model batched ONE identical nav edit across five
+// pages. Four were refused for not having been read, so it read four whole files
+// (~9,000 tokens each) and re-issued the same four edits, which all applied first try.
+// Twelve calls where five would have done, and the reads proved nothing the match was
+// not about to prove. An `old_string` is matched against the file's CURRENT bytes, so a
+// unique match is itself the evidence — you cannot quote a line you have not seen.
+
+const NAV_PAGE = [
+  "<!DOCTYPE html>",
+  "<html>",
+  "<body>",
+  "<nav>",
+  '  <a href="cart.html" class="cart-link">',
+  '    <i class="fa-solid fa-shopping-bag"></i>',
+  "  </a>",
+  "</nav>",
+  "<main>content</main>",
+  "</body>",
+  "</html>",
+].join("\n");
+
+async function pageDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "mw-unread-"));
+  await fs.writeFile(join(dir, "home.html"), NAV_PAGE);
+  return dir;
+}
+
+test("an edit that matches exactly is APPLIED to a file that was never read", () => {
+  return (async () => {
+    const dir = await pageDir();
+    const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+    const res = await editOne(
+      { path: "home.html", old_string: '  <a href="cart.html" class="cart-link">', new_string: '  <a href="wishlist.html" class="wishlist-link">' },
+      ctx,
+    );
+    assert.ok(!res.isError, `should have applied, got: ${res.output}`);
+    const after = await readFile(join(dir, "home.html"), "utf8");
+    assert.match(after, /wishlist-link/);
+  })();
+});
+
+test("an edit that does NOT match a never-read file is refused, and says to read it", () => {
+  return (async () => {
+    // This is the case the gate actually exists for: the model does not know what is
+    // in the file. Now it costs a read only here, instead of on every unread edit.
+    const dir = await pageDir();
+    const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+    const res = await editOne(
+      { path: "home.html", old_string: '<a href="basket.html" class="basket-link">', new_string: "<a>x</a>" },
+      ctx,
+    );
+    assert.ok(res.isError, "a guessed old_string must not be allowed through");
+    assert.match(res.output, /has not been read this session/);
+    const after = await readFile(join(dir, "home.html"), "utf8");
+    assert.equal(after, NAV_PAGE, "nothing may be written");
+  })();
+});
+
+test("an AMBIGUOUS match on a never-read file is refused too", () => {
+  return (async () => {
+    // Matching twice is not evidence of knowing which one you meant.
+    const dir = await mkdtemp(join(tmpdir(), "mw-unread-"));
+    await fs.writeFile(join(dir, "dup.html"), "<li>item</li>\n<li>item</li>\n");
+    const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+    const res = await editOne({ path: "dup.html", old_string: "<li>item</li>", new_string: "<li>x</li>" }, ctx);
+    assert.ok(res.isError);
+    assert.equal(await readFile(join(dir, "dup.html"), "utf8"), "<li>item</li>\n<li>item</li>\n");
+  })();
+});
+
+test("a file that WAS read and then changed underneath still gets the freshness refusal", () => {
+  return (async () => {
+    // The unread path must not swallow the case this file was built for.
+    const dir = await pageDir();
+    const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
+    const st = await fs.stat(join(dir, "home.html"));
+    ctx.reads.set(join(dir, "home.html"), { mtimeMs: st.mtimeMs - 5000, size: st.size - 40, full: true });
+    const res = await editOne(
+      { path: "home.html", old_string: "<main>content</main>", new_string: "<main>new</main>" },
+      ctx,
+    );
+    assert.ok(res.isError);
+    assert.match(res.output, /changed on disk since you read it/);
+  })();
 });

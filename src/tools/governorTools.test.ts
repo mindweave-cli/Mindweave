@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { ToolContext } from "./types.js";
-import { editFile } from "./editFile.js";
+import { edit } from "./edit.js";
 import { writeFile } from "./writeFile.js";
 import { runCommand } from "./runCommand.js";
 import { useSkill } from "./useSkill.js";
-import { rememberRule, forbidPath, forbidCommand, createSkill } from "./governorTools.js";
+import { governor, createSkill } from "./governorTools.js";
 import { projectDir, sanitizeProjectPath } from "../memory/store.js";
 
 async function tempDir(prefix = "mindweave-gt-"): Promise<string> {
@@ -26,13 +26,13 @@ function ctxWith(cwd: string, governance: ToolContext["governance"]): ToolContex
   return { cwd, reads: new Map(), todos: [], governance };
 }
 
-test("edit_file / write_file refuse a forbidden path", async () => {
+test("edit / write_file refuse a forbidden path", async () => {
   const cwd = await tempDir();
   const ctx = ctxWith(cwd, { rules: [], skills: [], forbidden: { patterns: ["locked.txt"], root: cwd } });
 
-  const edit = await editFile.execute({ path: "locked.txt", old_string: "a", new_string: "b" }, ctx);
-  assert.ok(edit.isError);
-  assert.match(edit.output, /forbidden/i);
+  const edited = await edit.execute({ path: "locked.txt", edits: [{ old_string: "a", new_string: "b" }] }, ctx);
+  assert.ok(edited.isError);
+  assert.match(edited.output, /forbidden/i);
 
   const write = await writeFile.execute({ path: "locked.txt", content: "x" }, ctx);
   assert.ok(write.isError);
@@ -57,7 +57,7 @@ test("forbid_command persists, mirrors live, and run_command then refuses it (no
   const ctx = ctxWith(cwd, { rules: [], skills: [], forbidden: { patterns: [], commands: [], root: cwd } });
 
   // Forbid it: persisted to forbidden-commands.md AND mirrored into live governance.
-  const saved = await forbidCommand.execute({ pattern: "tauri dev" }, ctx);
+  const saved = await governor.execute({ action: "forbid_command", value: "tauri dev" }, ctx);
   assert.equal(saved.isError, undefined);
   assert.deepEqual(ctx.governance!.forbidden.commands, ["tauri dev"]);
   const onDisk = await fs.readFile(join(projectDir(cwd), "forbidden-commands.md"), "utf8");
@@ -74,7 +74,7 @@ test("forbid_command persists, mirrors live, and run_command then refuses it (no
   assert.equal(allowed.output.toLowerCase().includes("forbidden"), false);
 
   // Idempotent: forbidding it again reports already-forbidden, no duplicate.
-  const again = await forbidCommand.execute({ pattern: "tauri dev" }, ctx);
+  const again = await governor.execute({ action: "forbid_command", value: "tauri dev" }, ctx);
   assert.match(again.output, /already forbidden/i);
   assert.deepEqual(ctx.governance!.forbidden.commands, ["tauri dev"]);
 });
@@ -142,8 +142,8 @@ test("two rule names that share a slug are ONE rule, live and on disk", async ()
     const cwd = process.platform === "win32" ? "C:\\proj\\slug" : "/proj/slug";
     const ctx = ctxWith(cwd, { rules: [], skills: [], forbidden: { patterns: [], root: cwd } });
 
-    await rememberRule.execute({ rule: "Use pnpm", name: "Use pnpm" }, ctx);
-    await rememberRule.execute({ rule: "Use pnpm, never npm", name: "use pnpm!" }, ctx);
+    await governor.execute({ action: "remember_rule", value: "Use pnpm", name: "Use pnpm" }, ctx);
+    await governor.execute({ action: "remember_rule", value: "Use pnpm, never npm", name: "use pnpm!" }, ctx);
 
     const files = (await fs.readdir(join(projectDir(cwd), "rules"))).filter((n) => n.endsWith(".md"));
     assert.equal(files.length, 1, "fixture must actually collide on disk");
@@ -169,7 +169,7 @@ test("a newline in a rule or skill field cannot forge frontmatter", async () => 
     const cwd = process.platform === "win32" ? "C:\\proj\\inject" : "/proj/inject";
     const ctx = ctxWith(cwd, { rules: [], skills: [], forbidden: { patterns: [], root: cwd } });
 
-    await rememberRule.execute({ rule: "body here", name: "sneaky\nglobs: **" }, ctx);
+    await governor.execute({ action: "remember_rule", value: "body here", name: "sneaky\nglobs: **" }, ctx);
     const rulesDir = join(projectDir(cwd), "rules");
     const ruleFile = (await fs.readdir(rulesDir)).find((n) => n.endsWith(".md"))!;
     const raw = await fs.readFile(join(rulesDir, ruleFile), "utf8");
@@ -201,7 +201,7 @@ test("remember_rule + forbid_path persist and update the live session", async ()
     const cwd = process.platform === "win32" ? "C:\\proj\\demo" : "/proj/demo";
     const ctx = ctxWith(cwd, { rules: [], skills: [], forbidden: { patterns: [], root: cwd } });
 
-    const ruled = await rememberRule.execute({ rule: "Use pnpm, never npm" }, ctx);
+    const ruled = await governor.execute({ action: "remember_rule", value: "Use pnpm, never npm" }, ctx);
     assert.match(ruled.output, /Saved rule/);
     assert.equal(ctx.governance!.rules.length, 1);
     assert.match(ctx.governance!.rules[0].body, /pnpm/);
@@ -209,11 +209,11 @@ test("remember_rule + forbid_path persist and update the live session", async ()
     const rulesDir = join(projectDir(cwd), "rules");
     assert.ok((await fs.readdir(rulesDir)).some((n) => n.endsWith(".md")));
 
-    const forbade = await forbidPath.execute({ pattern: "src/legacy/**" }, ctx);
+    const forbade = await governor.execute({ action: "forbid_path", value: "src/legacy/**" }, ctx);
     assert.match(forbade.output, /Forbidden/);
     assert.deepEqual(ctx.governance!.forbidden.patterns, ["src/legacy/**"]);
     // Idempotent.
-    const again = await forbidPath.execute({ pattern: "src/legacy/**" }, ctx);
+    const again = await governor.execute({ action: "forbid_path", value: "src/legacy/**" }, ctx);
     assert.match(again.output, /already forbidden/);
     assert.equal(ctx.governance!.forbidden.patterns.length, 1);
 

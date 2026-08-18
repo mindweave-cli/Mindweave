@@ -3,13 +3,48 @@
  * <Static> scrollback) or live in the tail. Gutter-aligned: the
  * first row of every block is a single marker in a 2-col gutter, the content
  * breathing beside it and wrapped lines hanging under the content.
+ *
+ * Multi-line text is wrapped BY US (wrap.ts), not left to Ink's own
+ * `wrap="wrap"` — that has a real, reproduced bug where some continuation
+ * lines come out indented by a stray leading space and others on the exact
+ * same text don't (see wrap.ts's header comment for the proof). Wrapping
+ * ourselves and rendering one <Text> per finished line leaves nothing for
+ * Ink's wrapper to be inconsistent about.
  */
 import { Box, Text } from "ink";
 import { renderMarkdown } from "../markdown.js";
+import { wrapAnsi } from "../wrap.js";
+import { KIND_COLOR } from "../toolDisplay.js";
+import { compactionLines } from "../compaction.js";
 import { ToolLine } from "./ToolLine.js";
 import { ToolGroup } from "./ToolGroup.js";
 import { SubagentView } from "./SubagentView.js";
 import type { Block } from "../transcript.js";
+
+/**
+ * Text pre-wrapped to `width`, one <Text> row per line — see the file header.
+ *
+ * A blank line is rendered as a single space, not as "". Ink's `measureText`
+ * (`ink/build/measure-text.js`) returns `height: 0` for an empty string, so an empty
+ * <Text> occupies no row at all and every blank line in the markdown disappears —
+ * which is what turned structured answers into one undifferentiated wall. The
+ * separators were being produced correctly by renderMarkdown and thrown away here.
+ * Probed: rows ["A","","B"] render as ["A","B"] with "", as ["A","","B"] with " ".
+ */
+function WrappedText({ text, width, color }: { text: string; width: number; color?: string }) {
+  return (
+    <Box width={width} flexDirection="column">
+      {wrapAnsi(text, width).map((line, i) => (
+        <Text key={i} color={color} wrap="truncate-end">{line === "" ? " " : line}</Text>
+      ))}
+    </Box>
+  );
+}
+
+/** The widest a line of prose is allowed to get, in columns. Around the top of the
+ *  range typography settles on for continuous reading; past it the eye starts
+ *  missing the start of the next line. */
+const READING_WIDTH = 88;
 
 export function BlockView({ block, columns, tightTop }: { block: Block; columns: number; tightTop?: boolean }) {
   const textWidth = Math.max(8, columns - 4);
@@ -19,20 +54,26 @@ export function BlockView({ block, columns, tightTop }: { block: Block; columns:
       return (
         <Box marginTop={1} flexDirection="row">
           <Box minWidth={2}><Text color="cyan">{">"}</Text></Box>
-          <Box width={textWidth}><Text color="cyan" wrap="wrap">{block.text}</Text></Box>
+          <WrappedText text={block.text} width={textWidth} color="cyan" />
         </Box>
       );
 
-    case "assistant":
+    case "assistant": {
       if (!block.text) return null;
+      // Prose is capped at a reading width rather than run to the terminal's edge.
+      // Line length is the oldest measured variable in typography and a wide
+      // terminal is well past the point where the eye starts losing its place on
+      // the return sweep — the answer gets harder to read the bigger the window
+      // gets, which is the wrong way round. Tools and diffs still use the full
+      // width; only prose is bounded, because only prose is read line after line.
+      const proseWidth = Math.min(textWidth, READING_WIDTH);
       return (
         <Box marginTop={1} flexDirection="row">
           <Box minWidth={2}><Text>{"●"}</Text></Box>
-          <Box width={textWidth} flexDirection="column">
-            <Text wrap="wrap">{renderMarkdown(block.text, textWidth)}</Text>
-          </Box>
+          <WrappedText text={renderMarkdown(block.text, proseWidth)} width={proseWidth} />
         </Box>
       );
+    }
 
     case "tool":
       return (
@@ -43,22 +84,21 @@ export function BlockView({ block, columns, tightTop }: { block: Block; columns:
           action={block.action}
           summary={block.summary}
           detail={block.detail}
+          detailKind={block.detailKind}
+          meta={block.meta}
           columns={columns}
+          live={block.live}
           tightTop={tightTop}
         />
       );
 
     case "tools":
-      return <ToolGroup items={block.items} done={block.done} columns={columns} tightTop={tightTop} />;
+      return <ToolGroup items={block.items} live={block.live} columns={columns} tightTop={tightTop} />;
 
     case "subagent":
       return (
         <SubagentView
-          task={block.task}
-          readOnly={block.readOnly}
-          status={block.status}
-          summary={block.summary}
-          items={block.items}
+          agents={block.agents}
           done={block.done}
           columns={columns}
           tightTop={tightTop}
@@ -69,7 +109,7 @@ export function BlockView({ block, columns, tightTop }: { block: Block; columns:
       return (
         <Box marginTop={1} flexDirection="row">
           <Box minWidth={2}><Text color="red">{"●"}</Text></Box>
-          <Box width={textWidth}><Text color="red" wrap="wrap">{block.text}</Text></Box>
+          <WrappedText text={block.text} width={textWidth} color="red" />
         </Box>
       );
 
@@ -81,12 +121,56 @@ export function BlockView({ block, columns, tightTop }: { block: Block; columns:
         </Box>
       );
 
-    case "note":
+    case "note": {
+      const noteLines = wrapAnsi(block.text, Math.max(4, columns - 2));
       return (
-        <Box width={columns}>
-          <Text dimColor wrap="wrap">{"· "}{block.text}</Text>
+        <Box width={columns} flexDirection="column">
+          {noteLines.map((line, i) => (
+            <Text key={i} dimColor>{i === 0 ? "· " : "  "}{line}</Text>
+          ))}
         </Box>
       );
+    }
+
+    case "notice": {
+      // A gate, not a remark. Amber marker and a rail, so "you are about to run this"
+      // cannot be mistaken for the assistant's own ● prose and skimmed past. Lines are
+      // rendered verbatim — no markdown — because they are literal commands and paths
+      // where a stray backtick or underscore must not be reinterpreted.
+      const railWidth = Math.max(8, columns - 4);
+      return (
+        <Box marginTop={1} flexDirection="column">
+          <Box flexDirection="row">
+            <Box minWidth={2}><Text color={KIND_COLOR.governor}>{"●"}</Text></Box>
+            <Text bold>{block.title}</Text>
+          </Box>
+          {block.body.split("\n").flatMap((line, i) =>
+            wrapAnsi(line, railWidth).map((row, j) => (
+              <Box key={`${i}-${j}`} flexDirection="row" width={columns}>
+                <Text color={KIND_COLOR.governor} dimColor>{"  │ "}</Text>
+                <Box width={railWidth}>
+                  <Text wrap="truncate-end">{row}</Text>
+                </Box>
+              </Box>
+            )),
+          )}
+        </Box>
+      );
+    }
+
+    case "compaction": {
+      // The bars are pre-composed as plain rows (compaction.ts) so the layout is
+      // testable without a terminal. Each row is printed verbatim and truncated, never
+      // wrapped: half a progress bar on the next line reads as two broken bars.
+      const rows = compactionLines(block.report, columns - 2);
+      return (
+        <Box marginTop={1} marginBottom={1} flexDirection="column" width={columns}>
+          {rows.map((line, i) => (
+            <Text key={i} dimColor={i !== 1} wrap="truncate-end">{"  "}{line}</Text>
+          ))}
+        </Box>
+      );
+    }
 
     case "context":
       // Context trimming (compaction) — set off from ordinary activity with its own

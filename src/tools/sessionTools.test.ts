@@ -11,7 +11,7 @@ import { promises as fs } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listSessionsTool, readSessionTool, timeAgo } from "./sessionTools.js";
+import { sessionsTool, timeAgo } from "./sessionTools.js";
 import { sessionDir } from "../memory/store.js";
 import type { ToolContext } from "./types.js";
 
@@ -68,8 +68,8 @@ test("setup: two past sessions on disk", async () => {
   });
 });
 
-test("list_sessions reports past sessions, newest first", async () => {
-  const r = await listSessionsTool.execute({}, ctx());
+test("sessions reports past sessions, newest first", async () => {
+  const r = await sessionsTool.execute({}, ctx());
   assert.equal(r.isError, undefined);
   assert.match(r.output, /harden the rate limiter/);
   assert.match(r.output, /fix the login 500/);
@@ -79,32 +79,32 @@ test("list_sessions reports past sessions, newest first", async () => {
   );
 });
 
-test("list_sessions excludes the session you are currently in", async () => {
-  const r = await listSessionsTool.execute({}, ctx("bbbbbbbb-2222"));
+test("sessions excludes the session you are currently in", async () => {
+  const r = await sessionsTool.execute({}, ctx("bbbbbbbb-2222"));
   assert.doesNotMatch(r.output, /harden the rate limiter/);
   assert.match(r.output, /fix the login 500/);
 });
 
-test("read_session answers with what that session actually recorded", async () => {
-  const r = await readSessionTool.execute({ id: "aaaaaaaa-1111" }, ctx());
+test("sessions answers with what that session actually recorded", async () => {
+  const r = await sessionsTool.execute({ id: "aaaaaaaa-1111" }, ctx());
   assert.equal(r.isError, undefined);
   assert.match(r.output, /RequestScoringMiddleware had to run first/);
 });
 
-test("read_session defaults to the most recent past session", async () => {
-  const r = await readSessionTool.execute({}, ctx());
+test("sessions defaults to the most recent past session", async () => {
+  const r = await sessionsTool.execute({ id: "latest" }, ctx());
   assert.match(r.output, /harden the rate limiter/);
 });
 
-test("read_session is honest when a session kept no notes", async () => {
-  const r = await readSessionTool.execute({ id: "bbbbbbbb-2222" }, ctx());
+test("sessions is honest when a session kept no notes", async () => {
+  const r = await sessionsTool.execute({ id: "bbbbbbbb-2222" }, ctx());
   assert.match(r.output, /kept no notes/);
   // It still hands back what it does know, rather than nothing.
   assert.match(r.output, /harden the rate limiter/);
 });
 
 test("a session with no notes still ANSWERS in one call, from its transcript", async () => {
-  const r = await readSessionTool.execute({ id: "bbbbbbbb-2222" }, ctx());
+  const r = await sessionsTool.execute({ id: "bbbbbbbb-2222" }, ctx());
   assert.equal(r.isError, undefined);
   // The actual work done that session, not just the bracketing prompts from the header.
   assert.match(r.output, /per-IP token bucket in throttles\.py/);
@@ -113,21 +113,36 @@ test("a session with no notes still ANSWERS in one call, from its transcript", a
   assert.doesNotMatch(r.output, /full:true/);
 });
 
-test("read_session rejects an unknown id instead of inventing one", async () => {
-  const r = await readSessionTool.execute({ id: "nope" }, ctx());
+test("sessions rejects an unknown id instead of inventing one", async () => {
+  const r = await sessionsTool.execute({ id: "nope" }, ctx());
   assert.equal(r.isError, true);
-  assert.match(r.output, /list_sessions/);
+  assert.match(r.output, /sessions with no id/);
+});
+
+// ── Both are internal bookkeeping, not news — never a visible row ──────────────
+
+test("sessions never shows a row: looking up its own history is bookkeeping", async () => {
+  assert.equal((await sessionsTool.execute({}, ctx())).quiet, true);
+});
+
+test("sessions never shows a row, notes or transcript or no-notes fallback", async () => {
+  assert.equal((await sessionsTool.execute({ id: "aaaaaaaa-1111" }, ctx())).quiet, true);
+  assert.equal((await sessionsTool.execute({ id: "bbbbbbbb-2222" }, ctx())).quiet, true, "no-notes fallback");
+  assert.equal((await sessionsTool.execute({ id: "aaaaaaaa-1111", full: true }, ctx())).quiet, true, "full transcript");
+});
+
+test("an unknown session id is still a real, visible error — quiet is for routine lookups, not failures", async () => {
+  assert.equal((await sessionsTool.execute({ id: "nope" }, ctx())).quiet, undefined);
 });
 
 test("both tools are read-only", () => {
-  assert.equal(listSessionsTool.readOnly, true);
-  assert.equal(readSessionTool.readOnly, true);
+  assert.equal(sessionsTool.readOnly, true);
 });
 
 test("a project with no history says so plainly", async () => {
   const empty = mkdtempSync(join(tmpdir(), "mindweave-empty-"));
   const emptyCtx = { cwd: empty, roots: [empty], reads: new Map(), todos: [] } as unknown as ToolContext;
-  const r = await listSessionsTool.execute({}, emptyCtx);
+  const r = await sessionsTool.execute({}, emptyCtx);
   assert.match(r.output, /No earlier sessions/);
 });
 

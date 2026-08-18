@@ -4,7 +4,7 @@
  *
  * Why this is not a tool-description change: measured against a real model, the identical
  * task with identical descriptions batched correctly on one run and made three separate
- * `edit_file` calls to one file on the next. Prose can bias a choice; it cannot make it
+ * one-edit calls to one file on the next. Prose can bias a choice; it cannot make it
  * hold. And this tool ships to every provider, so "tune the driver" is not available
  * either — a driver owns format, never behaviour. Anything that must be true on every
  * model has to be enforced by the harness. Same reasoning as the verify gate and the
@@ -14,24 +14,33 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SAME_FILE_EDIT_LIMIT, batchEditNudge, overusedSingleEdits, sameFileEditCounts } from "./verify.js";
 
-const call = (name: string, path?: string) => ({ name, args: path ? { path } : {} });
+/** One `edit` call carrying `n` edits to `path`. */
+const call = (name: string, path?: string, edits = 1) => ({
+  name,
+  args: { ...(path ? { path } : {}), ...(edits ? { edits: Array.from({ length: edits }, () => ({})) } : {}) },
+});
 
-test("only single edit_file calls are counted", () => {
+test("only ONE-AT-A-TIME edits are counted", () => {
   const counts = sameFileEditCounts([
-    call("edit_file", "a.py"),
-    call("edit_file", "a.py"),
-    call("multi_edit", "a.py"), // already the batched form
+    call("edit", "a.py"),
+    call("edit", "a.py"),
+    call("edit", "a.py", 3), // already the batched form — counting it would scold correct behaviour
     call("write_file", "a.py"), // a different decision entirely
     call("read_file", "a.py"),
-    call("edit_file", "b.py"),
+    call("edit", "b.py"),
   ]);
   assert.equal(counts.get("a.py"), 2);
   assert.equal(counts.get("b.py"), 1);
   assert.equal(counts.size, 2);
 });
 
-test("an edit_file with no path is ignored rather than counted under a blank key", () => {
-  const counts = sameFileEditCounts([call("edit_file"), call("edit_file", "   ")]);
+test("an edit with no path is ignored rather than counted under a blank key", () => {
+  const counts = sameFileEditCounts([call("edit"), call("edit", "   ")]);
+  assert.equal(counts.size, 0);
+});
+
+test("a malformed call with no edits array is not counted", () => {
+  const counts = sameFileEditCounts([{ name: "edit", args: { path: "a.py" } }]);
   assert.equal(counts.size, 0);
 });
 
@@ -56,8 +65,8 @@ test("edits spread across DIFFERENT files never trip it", () => {
 
 test("the nudge says what to do, and what NOT to do", () => {
   const msg = batchEditNudge("monitor/middleware.py", 3);
-  assert.match(msg, /3 separate edit_file calls to monitor\/middleware\.py/, "the fact, so it isn't abstract");
-  assert.match(msg, /single multi_edit call/, "the remedy");
+  assert.match(msg, /3 separate one-edit calls to monitor\/middleware\.py/, "the fact, so it isn't abstract");
+  assert.match(msg, /SAME edit call/, "the remedy");
   assert.match(msg, /one call per file/, "and the boundary, so it doesn't over-correct into one giant call");
   assert.match(msg, /fires once per turn/, "so it reads as a reminder, not a rule it broke");
 });

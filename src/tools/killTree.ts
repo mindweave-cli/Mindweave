@@ -121,12 +121,47 @@ export function killTree(pid: number | undefined): void {
 }
 
 /**
+ * How long to wait for the OS to actually finish killing before giving up.
+ *
+ * SIGKILL cannot be caught, blocked or ignored, so this deadline is not there for
+ * a process that resists — nothing resists SIGKILL. It exists for the pathological
+ * case where a process is wedged in uninterruptible kernel I/O (state `D`), where
+ * the kill is pending until that I/O completes and waiting longer would not help.
+ * Better to return late than to hang a shutdown forever.
+ */
+const KILL_CONFIRM_MS = 1_500;
+
+/** One shared buffer for the sync sleep; allocating per poll would churn. */
+const SLEEP_SLOT = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Block this thread for `ms` with no event loop involved.
+ *
+ * `Atomics.wait` on a value that never changes is the only true synchronous sleep
+ * in Node. setTimeout is useless here by definition: the callers of this module
+ * run from `process.on("exit")`, where no timer will ever fire again.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(SLEEP_SLOT, 0, 0, ms);
+}
+
+/**
  * Kill `pid` and its descendants, blocking until it has happened.
  *
  * The variant that works from a `process.on("exit")` handler. No grace period: the
  * process is on its way out and there is no event loop left to deliver a follow-up
  * signal on, so a polite first attempt would simply be the only attempt and would
  * leave anything that ignores SIGTERM running.
+ *
+ * "Blocking until it has happened" is the whole contract, and it used to be a lie.
+ * Sending a signal is not the same as the target being dead: `process.kill` returns
+ * as soon as the signal is QUEUED, and for a window after that the process is still
+ * scheduled, still holding its port, still listed as running. An exit handler gets
+ * no second chance to look, so a caller that returned into `process.exit` left a
+ * live process behind. MEASURED: `isProcessStopped` reported a just-SIGKILLed child
+ * as alive immediately after this function returned.
+ *
+ * So the kill is now CONFIRMED before returning, not merely sent.
  */
 export function killTreeSync(pid: number | undefined): void {
   if (pid === undefined) return;
@@ -138,6 +173,13 @@ export function killTreeSync(pid: number | undefined): void {
     }
   } catch {
     // Already gone, or no permission — nothing more we can do.
+  }
+  // Poll until the OS agrees the process is gone. Costs nothing in the common case
+  // (the first check almost always passes); it is the rare slow reap that this
+  // exists for, because that is exactly when an exit handler would leak a process.
+  const deadline = Date.now() + KILL_CONFIRM_MS;
+  while (!isProcessStopped(pid) && Date.now() < deadline) {
+    sleepSync(1);
   }
 }
 

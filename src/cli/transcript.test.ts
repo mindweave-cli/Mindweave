@@ -9,15 +9,29 @@ import { initialState, reduce, trimNarration, NARRATION_LINES, type Action, type
 import { isGroupable } from "./toolDisplay.js";
 
 test("only read-only discovery tools group — edits, writes, runs, tests never do", () => {
-  // Read-only discovery + silent status checks fold into the group. diagnostics joins
-  // them: its one-line summary carries into the group note (red on failure) and the
-  // model still gets the full listing via the tool output, so collapsing loses nothing.
-  for (const n of ["read_file", "read_symbol", "glob", "grep", "list_dir", "outline", "definition", "references", "relevant", "diagnostics"]) {
+  // Reads + silent status checks fold into one row.
+  for (const n of ["read_file", "read_symbol", "shells"]) {
     assert.ok(isGroupable(n), `${n} should group (silent receipt — collapsing loses nothing)`);
+  }
+  // `diagnostics` USED to group here, and that was wrong. Collapsing was justified by
+  // "its one-line summary carries into the group note, so nothing is lost" — but a
+  // group row renders a label and never a detail, and diagnostics carries a caret
+  // block: the source line, the squiggle under the failing token, the error code. So
+  // the one case worth looking at, an actual compiler error, was the case that got
+  // hidden. It keeps its own row now, and reports NOTHING when it finds nothing
+  // (quiet), which removes the wall of "no diagnostics" rows grouping was for.
+  assert.ok(!isGroupable("diagnostics"), "a caret block cannot render inside a group row");
+  // Search and the code-intel lookups do NOT group, because they no longer render at
+  // all (search.ts sets quiet on every path; navigational() wraps the others): they are
+  // how the agent finds its way around, not work done to the project. Grouping them
+  // would put them back on screen as a count that answers nothing. `todo_write` is
+  // silent too, and for the same kind of reason — its reader is the model.
+  for (const n of ["search", "outline", "definition", "references", "relevant", "todo_write"]) {
+    assert.ok(!isGroupable(n), `${n} is hidden outright, so it must not group`);
   }
   // Anything whose row carries output you need to see (a diff, command/test output,
   // fetched content, the meta result) must keep its own row.
-  for (const n of ["edit_file", "multi_edit", "replace_symbol_body", "write_file", "run_command", "todo_write", "create_skill", "use_skill", "web_fetch", "spawn_subagent"]) {
+  for (const n of ["edit", "replace_symbol_body", "write_file", "run_command", "create_skill", "use_skill", "web", "spawn_subagent"]) {
     assert.ok(!isGroupable(n), `${n} must NOT group`);
   }
 });
@@ -86,6 +100,28 @@ test("a failed tool resolves to error status", () => {
     { type: "toolEnd", toolId: "a", ok: false, summary: "exit 1" },
   ]);
   assert.equal((s.committed[0] as { status: string }).status, "error");
+});
+
+test("toolEnd's action/name override the row set at toolStart — a governor decision discovered mid-call", () => {
+  const s = run([
+    { type: "toolStart", toolId: "a", name: "Update", arg: "secret.txt", action: "edit" },
+    { type: "toolEnd", toolId: "a", ok: false, summary: "kept protected", action: "governor", name: "Governor" },
+  ]);
+  const tool = s.committed[0]!;
+  assert.ok(tool.kind === "tool");
+  assert.equal((tool as { action?: string }).action, "governor");
+  assert.equal(tool.name, "Governor");
+});
+
+test("toolEnd with no action/name override leaves the toolStart row untouched", () => {
+  const s = run([
+    { type: "toolStart", toolId: "a", name: "Update", arg: "home.html", action: "edit" },
+    { type: "toolEnd", toolId: "a", ok: true, summary: "1 replacement" },
+  ]);
+  const tool = s.committed[0]!;
+  assert.ok(tool.kind === "tool");
+  assert.equal((tool as { action?: string }).action, "edit");
+  assert.equal(tool.name, "Update");
 });
 
 test("a QUIET failure leaves no row at all", () => {
@@ -240,8 +276,10 @@ test("subagentStart opens a live nested block; its tool calls fold into the rail
   ]);
   assert.equal(s.tail.length, 1, "one nested block, not separate rows");
   const blk = s.tail[0]!;
-  assert.ok(blk.kind === "subagent" && !blk.done && blk.readOnly);
-  assert.equal(blk.kind === "subagent" ? blk.items.length : 0, 2);
+  assert.ok(blk.kind === "subagent" && !blk.done);
+  const agent = blk.kind === "subagent" ? blk.agents[0]! : undefined;
+  assert.equal(agent?.readOnly, true);
+  assert.equal(agent?.items.length, 2);
   assert.equal(s.committed.length, 0, "stays live until it reports back");
 });
 
@@ -253,7 +291,7 @@ test("subToolEnd resolves a rail item in place, the sub-agent block stays open",
   ]);
   const blk = s.tail[0]!;
   assert.ok(blk.kind === "subagent" && !blk.done);
-  const item = blk.kind === "subagent" ? blk.items[0]! : undefined;
+  const item = blk.kind === "subagent" ? blk.agents[0]!.items[0]! : undefined;
   assert.equal(item?.status, "ok");
   assert.equal(item?.note, "Read x.ts (12 lines)");
 });
@@ -268,7 +306,10 @@ test("subagentEnd seals the sub-agent and drains it to committed with its summar
   assert.equal(s.tail.length, 0);
   assert.equal(s.committed.length, 1);
   const blk = s.committed[0]!;
-  assert.ok(blk.kind === "subagent" && blk.done && blk.status === "ok" && blk.summary === "3 steps");
+  assert.ok(blk.kind === "subagent" && blk.done);
+  const agent = blk.kind === "subagent" ? blk.agents[0]! : undefined;
+  assert.equal(agent?.status, "ok");
+  assert.equal(agent?.summary, "3 steps");
 });
 
 test("a failed sub-agent seals to error status", () => {
@@ -276,7 +317,8 @@ test("a failed sub-agent seals to error status", () => {
     { type: "subagentStart", agentId: "s", task: "t", readOnly: true },
     { type: "subagentEnd", agentId: "s", ok: false, summary: "failed" },
   ]);
-  assert.equal((s.committed[0] as { status: string }).status, "error");
+  const blk = s.committed[0]!;
+  assert.equal(blk.kind === "subagent" ? blk.agents[0]!.status : "", "error");
 });
 
 test("narration before a sub-agent is sealed first, then the rail opens", () => {
@@ -290,7 +332,9 @@ test("narration before a sub-agent is sealed first, then the rail opens", () => 
   assert.equal(s.tail[0]!.kind, "subagent");
 });
 
-test("parallel sub-agents keep separate rails, keyed by agentId", () => {
+test("concurrent sub-agents share ONE block but keep their own rails", () => {
+  // Read-only workers fan out in parallel. As separate blocks their rows interleaved
+  // into a stripe; grouped, each still owns its own calls.
   const s = run([
     { type: "subagentStart", agentId: "a", task: "auth", readOnly: true },
     { type: "subagentStart", agentId: "b", task: "api", readOnly: true },
@@ -298,10 +342,42 @@ test("parallel sub-agents keep separate rails, keyed by agentId", () => {
     { type: "subToolStart", agentId: "b", toolId: "2", name: "Read", arg: "api.ts" },
     { type: "subToolStart", agentId: "a", toolId: "3", name: "Read", arg: "login.ts" },
   ]);
-  const a = s.tail.find((x) => x.kind === "subagent" && x.agentId === "a");
-  const b = s.tail.find((x) => x.kind === "subagent" && x.agentId === "b");
-  assert.equal(a?.kind === "subagent" ? a.items.length : 0, 2);
-  assert.equal(b?.kind === "subagent" ? b.items.length : 0, 1);
+  assert.equal(s.tail.length, 1, "one block, however many workers");
+  const blk = s.tail[0]!;
+  assert.ok(blk.kind === "subagent");
+  const agents = blk.kind === "subagent" ? blk.agents : [];
+  assert.equal(agents.length, 2);
+  assert.equal(agents.find((x) => x.agentId === "a")?.items.length, 2);
+  assert.equal(agents.find((x) => x.agentId === "b")?.items.length, 1);
+});
+
+test("one worker finishing does NOT commit the block while a sibling is still going", () => {
+  // The failure this prevents: committing on the first end strands the other worker's
+  // rows in a block that has already scrolled away as finished.
+  const mid = run([
+    { type: "subagentStart", agentId: "a", task: "auth", readOnly: true },
+    { type: "subagentStart", agentId: "b", task: "api", readOnly: true },
+    { type: "subagentEnd", agentId: "a", ok: true, summary: "3 steps" },
+  ]);
+  assert.equal(mid.committed.length, 0, "still live: one worker is unfinished");
+  assert.equal(mid.tail.length, 1);
+
+  const done = [{ type: "subagentEnd", agentId: "b", ok: true, summary: "2 steps" } as Action].reduce(reduce, mid);
+  assert.equal(done.tail.length, 0, "the last one to finish commits the block");
+  assert.equal(done.committed.length, 1);
+});
+
+test("a later sub-agent opens a NEW block once the previous one has finished", () => {
+  // Joining is only for workers that overlap. Sequential delegations must not pile
+  // into one block that grows for the whole session.
+  const s = run([
+    { type: "subagentStart", agentId: "a", task: "first", readOnly: true },
+    { type: "subagentEnd", agentId: "a", ok: true, summary: "done" },
+    { type: "subagentStart", agentId: "b", task: "second", readOnly: true },
+  ]);
+  assert.equal(s.committed.length, 1, "the finished one committed on its own");
+  assert.equal(s.tail.length, 1, "the new one opened separately");
+  assert.equal(s.tail[0]!.kind === "subagent" ? s.tail[0]!.agents.length : 0, 1);
 });
 
 test("note and say commit directly without disturbing a streaming block", () => {
@@ -409,4 +485,30 @@ test("the next turn gets its own narration line", () => {
   ]);
   const texts = [...s.committed, ...s.tail].filter((b) => b.kind === "assistant").map((b) => (b as { text: string }).text);
   assert.deepEqual(texts, ["One.", "Two."], "the budget refills per turn, not per session");
+});
+
+test("a rejected draft reply never reaches the screen", () => {
+  // The reply gate discards an over-long draft and has the model rewrite it. The draft
+  // has already streamed in as tokens by then — unrendered, because text reveals whole
+  // on seal — so dropping the buffer is what keeps the user from reading both.
+  let s = reduce(initialState(), { type: "user", text: "fix the guard" });
+  for (const delta of ["## What changed\n", "A very long recap ", "of work you watched."]) {
+    s = reduce(s, { type: "token", delta });
+  }
+  s = reduce(s, { type: "resetReply" });
+  for (const delta of ["Fixed. ", "The guard was inverted."]) {
+    s = reduce(s, { type: "token", delta });
+  }
+  s = reduce(s, { type: "finishReply" });
+
+  const all = [...s.committed, ...s.tail];
+  const replies = all.filter((b) => b.kind === "assistant").map((b) => (b as { text: string }).text);
+  assert.deepEqual(replies, ["Fixed. The guard was inverted."]);
+  assert.equal(s.lastReply, "Fixed. The guard was inverted.");
+  assert.ok(!JSON.stringify(all).includes("What changed"), "no trace of the draft anywhere");
+});
+
+test("resetReply on a turn with nothing buffered is harmless", () => {
+  const s = reduce(reduce(initialState(), { type: "user", text: "hi" }), { type: "resetReply" });
+  assert.equal(s.raw, "");
 });

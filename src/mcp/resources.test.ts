@@ -23,7 +23,7 @@ import {
 } from "./resources.js";
 import { resultsDir } from "./resultStore.js";
 import { McpManager } from "./manager.js";
-import { listMcpResources, readMcpResource } from "../tools/mcpResources.js";
+import { mcpResourceTool } from "../tools/mcpResources.js";
 import type { ToolContext } from "../tools/types.js";
 import type { McpServerConfig } from "./config.js";
 
@@ -136,11 +136,11 @@ test("both resource tools accept the server name the model was actually shown", 
   await mgr.start([{ ...cfg, name: "db." }]);
   const ctx = { mcp: mgr } as unknown as ToolContext;
   try {
-    const listed = await listMcpResources.execute({ server: "db" }, ctx);
+    const listed = await mcpResourceTool.execute({ server: "db" }, ctx);
     assert.notEqual(listed.isError, true, "the listing rejected the name the model is shown");
     assert.match(listed.output, /db:\/\/schema/);
 
-    const read = await readMcpResource.execute({ server: "db", uri: "db://schema" }, ctx);
+    const read = await mcpResourceTool.execute({ server: "db", uri: "db://schema" }, ctx);
     assert.notEqual(read.isError, true);
     assert.match(read.output, /CREATE TABLE users/);
   } finally {
@@ -197,11 +197,11 @@ test("the tools refuse an unfilled template instead of asking the server about i
   const mgr = await pool();
   const ctx = { mcp: mgr } as unknown as ToolContext;
   try {
-    const result = await readMcpResource.execute({ server: "db", uri: "db://table/{name}" }, ctx);
+    const result = await mcpResourceTool.execute({ server: "db", uri: "db://table/{name}" }, ctx);
     assert.equal(result.isError, true);
     assert.match(result.output, /is a template/);
 
-    const listed = await listMcpResources.execute({}, ctx);
+    const listed = await mcpResourceTool.execute({}, ctx);
     assert.match(listed.output, /db:\/\/schema/);
     assert.match(listed.summary ?? "", /2 resources/);
   } finally {
@@ -212,7 +212,7 @@ test("the tools refuse an unfilled template instead of asking the server about i
 test("with no resource servers the tools say so rather than returning nothing", async () => {
   const mgr = new McpManager();
   const ctx = { mcp: mgr } as unknown as ToolContext;
-  const listed = await listMcpResources.execute({}, ctx);
+  const listed = await mcpResourceTool.execute({}, ctx);
   assert.match(listed.output, /No connected MCP server exposes resources/);
   assert.ok(!listed.isError, "an empty project is not an error");
 });

@@ -23,6 +23,7 @@ function projectRoot(ctx: { cwd: string; governance?: { forbidden: { root: strin
 
 export const saveMemoryTool: Tool = {
   name: "save_memory",
+  deferred: true,
   readOnly: false,
   description:
     "Save something to your cross-session memory so future conversations have it. " +

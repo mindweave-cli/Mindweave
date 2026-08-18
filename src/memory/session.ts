@@ -24,24 +24,62 @@ import { ensureMemoryDir, loadMemoryIndex, memoryDir } from "./autoMemory.js";
 import { loadMcpConfig } from "../mcp/config.js";
 import { McpManager } from "../mcp/manager.js";
 
+/**
+ * Ceiling on how much MINDWEAVE.md is rendered into the cached prefix.
+ *
+ * The file is loaded WHOLE into the system prompt, the prompt tells the model to keep
+ * it concise, and the same prompt tells the model to update it at every meaningful
+ * stopping point. Nothing enforced the first instruction, so the structural pressure
+ * ran one way only: a file that can only grow, read in full every session, maintained
+ * by an agent rewarded for thoroughness. Everything else assembled into the prefix
+ * (the project snapshot's tree, README, git status, docs list) is explicitly budgeted;
+ * this was the one unbounded input. ~4K tokens is generous for "facts about this
+ * codebase" and still bounds the worst case.
+ */
+const MAX_PROJECT_MEMORY_CHARS = 16_000;
+
 /** Read the project's MINDWEAVE.md (facts the agent should always know). "" if none. */
 async function loadProjectMemory(cwd: string): Promise<string> {
+  let text: string;
   try {
-    return (await fs.readFile(join(cwd, "MINDWEAVE.md"), "utf8")).trim();
+    text = (await fs.readFile(join(cwd, "MINDWEAVE.md"), "utf8")).trim();
   } catch {
     return "";
   }
+  if (text.length <= MAX_PROJECT_MEMORY_CHARS) return text;
+  // Truncate at a line boundary and SAY SO. A silent cut would leave the model
+  // confidently acting on half a document with no way to know the rest exists.
+  const cut = text.slice(0, MAX_PROJECT_MEMORY_CHARS);
+  const atLine = cut.slice(0, cut.lastIndexOf("\n") + 1) || cut;
+  return `${atLine.trimEnd()}\n\n[MINDWEAVE.md is longer than fits here and was truncated at this point. Read the file directly if you need the rest, and consider trimming it.]`;
 }
 
 /**
- * Re-read MINDWEAVE.md into the live session. The model edits MINDWEAVE.md mid-session (it
- * maintains it), but `projectMemory` sits in the cached system prompt and was frozen
- * at session start — so the model kept seeing a STALE project memory. Calling this
- * before each turn keeps it current (same bytes when unchanged → prompt cache holds;
- * a real edit breaks the prefix once, which is correct).
+ * Re-read MINDWEAVE.md into the live session, but only when it is FREE to do so.
+ *
+ * The model maintains MINDWEAVE.md, so it edits the file mid-session; `projectMemory`
+ * is frozen into the cached system prompt at session start. Re-reading it every turn
+ * kept the two in step, at a price that turned out to be the single most expensive
+ * line in prompt assembly: changing the system prompt string invalidates the WHOLE
+ * cached prefix — base prompt, tool schemas, project snapshot, governance — and the
+ * next request pays a full cache rewrite at 1.25x normal input rate. One edit to a
+ * small markdown file re-billed everything.
+ *
+ * The codebase already knew this hazard: standing rules were deliberately moved OUT of
+ * the cached prefix precisely so a mid-session remember_rule could not bust it. This
+ * does the same thing for the same reason.
+ *
+ * Serving the frozen copy is safe because of where the fresh copy already is. The model
+ * that just edited MINDWEAVE.md has the new content in its own transcript — it wrote it
+ * — so nothing is hidden from it. The frozen prefix is only how the NEXT session starts,
+ * and it refreshes at points where the cache is being thrown away regardless: after a
+ * compaction (which rewrites the transcript, taking the edit with it), and at session
+ * start.
  */
-export async function reloadProjectMemory(session: Session): Promise<void> {
+export async function reloadProjectMemory(session: Session, opts: { force?: boolean } = {}): Promise<void> {
+  if (!opts.force && !session.projectMemoryStale) return;
   session.projectMemory = await loadProjectMemory(session.cwd);
+  session.projectMemoryStale = false;
 }
 
 /**

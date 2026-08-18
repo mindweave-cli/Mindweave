@@ -7,7 +7,7 @@
  * those lines. It's the natural pair to read_symbol — read a function, rewrite it —
  * and avoids brittle whitespace-exact matching for a full-body rewrite.
  *
- * Safety is identical to edit_file's, and then some: it reuses the shared pre-edit
+ * Safety is identical to the edit tool's, and then some: it reuses the shared pre-edit
  * gauntlet (path guards, forbidden-lift, read-before-edit), snapshots for /undo, and
  * REFUSES an ambiguous target — if the name resolves to more than one symbol it
  * writes nothing and asks for a `path`, so a rewrite can never land on the wrong one.
@@ -18,11 +18,12 @@ import type { Tool, ToolResult } from "./types.js";
 import { recordWrite, relativize, resolvePath } from "./paths.js";
 import { applyEol } from "./eol.js";
 import { editDetail, lineCount, magnitude, withScope } from "./detail.js";
-import { numberedWindow } from "./editFile.js";
+import { numberedWindow } from "./editWindow.js";
 import { normalizeLf } from "./editCore.js";
-import { prepareEditTarget, fail, errText } from "./editTarget.js";
+import { prepareEditTarget, unreadError, fail, errText } from "./editTarget.js";
 import { allChassis, symbolSpans } from "./chassisMux.js";
 import { rawLines, spliceLines } from "./spanCore.js";
+import { writeFileAtomic } from "./atomicWrite.js";
 
 export const replaceSymbolBody: Tool = {
   name: "replace_symbol_body",
@@ -30,7 +31,7 @@ export const replaceSymbolBody: Tool = {
   // Two problems. The description implied `path` resolves any ambiguity, but a name
   // defined TWICE IN ONE FILE cannot be narrowed by a path at all, and there is no
   // other parameter for it — a model following the old text would keep re-sending the
-  // same path and getting the same refusal. The escape hatch is edit_file, and it now
+  // same path and getting the same refusal. The escape hatch is the edit tool, and it now
   // says so. It also never mentioned that the result comes back line-numbered, which is
   // the thing that lets a rewrite be followed by more edits without re-reading.
   description:
@@ -41,14 +42,14 @@ export const replaceSymbolBody: Tool = {
     "AMBIGUITY IS REFUSED, never guessed: if the name resolves to more than one symbol " +
     "nothing is written and you are shown the candidates. When those are in different " +
     "files, `path` picks one. When the SAME file defines the name twice, `path` cannot " +
-    "help and there is no parameter that can, so use edit_file with an exact old_string " +
+    "help and there is no parameter that can, so use edit with an exact old_string " +
     "instead. " +
     "On success you get the new definition back WITH line numbers, so you can make " +
     "further edits from the result instead of re-reading the file. " +
     "A `new_definition` identical to what is already there is refused rather than " +
     "written as a no-op edit. " +
-    "Prefer this when you are rewriting a whole function or class; use edit_file or " +
-    "multi_edit for changes WITHIN one.",
+    "Prefer this when you are rewriting a whole function or class; use edit for changes " +
+    "WITHIN one.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -70,10 +71,10 @@ export const replaceSymbolBody: Tool = {
     const name = typeof args.name === "string" ? args.name.trim() : "";
     if (!name) return fail("`name` is required.");
     if (typeof args.new_definition !== "string" || args.new_definition.trim() === "") {
-      return fail("`new_definition` is required and must not be empty (use edit_file to delete a symbol).");
+      return fail("`new_definition` is required and must not be empty (use edit to delete a symbol).");
     }
     if (allChassis(ctx).length === 0) {
-      return fail("the code map isn't available here — use edit_file with an exact old_string instead.");
+      return fail("the code map isn't available here — use edit with an exact old_string instead.");
     }
 
     const rawPath = typeof args.path === "string" && args.path.trim() ? args.path.trim() : undefined;
@@ -83,7 +84,7 @@ export const replaceSymbolBody: Tool = {
     if (spans.length === 0) {
       return fail(
         `couldn't locate a symbol named '${name}'${rawPath ? ` in ${rawPath}` : ""}. ` +
-          "Read it first (read_symbol / outline), or use edit_file with an exact old_string.",
+          "Read it first (read_symbol / outline), or use edit with an exact old_string.",
       );
     }
     // Ambiguous → refuse and list. Never guess which definition to overwrite.
@@ -97,6 +98,12 @@ export const replaceSymbolBody: Tool = {
     const abs = resolvePath(ctx, span.file);
     const target = await prepareEditTarget(ctx, abs, "editing");
     if (!target.ok) return target.error;
+    // Unlike `edit`, this tool quotes NOTHING of what is already there — it names a
+    // symbol and hands over a whole new body. So there is no match that could serve as
+    // evidence the model knows what it is replacing, and read-before-edit stays a hard
+    // refusal here. The relaxed rule in `edit` is earned by the old_string; without one,
+    // it would just be overwriting a definition sight unseen.
+    if (target.unread) return unreadError(abs);
     const { filePath, content, eol } = target;
 
     const before = normalizeLf(content);
@@ -110,7 +117,7 @@ export const replaceSymbolBody: Tool = {
     // Snapshot the pre-edit bytes for /undo before touching disk.
     ctx.checkpoints?.backup(filePath, content, updated);
     try {
-      await fs.writeFile(filePath, updated, "utf8");
+      await writeFileAtomic(filePath, updated);
     } catch (error) {
       return fail(`could not write ${relativize(ctx, filePath)}: ${errText(error)}`);
     }
@@ -136,6 +143,7 @@ export const replaceSymbolBody: Tool = {
         `New definition — line-numbered so you can make further edits without re-reading:\n${window}`,
       summary: `replaced ${span.name} in ${shown} · ${scope}`,
       detail: withScope(scope, editDetail(oldBody, args.new_definition)),
+      detailKind: "diff" as const,
     };
   },
 };

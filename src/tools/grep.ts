@@ -6,23 +6,33 @@
  * `rg` isn't installed we fall back to a pure-Node walk so search still works.
  *
  * The interface is a familiar, predictable search shape — `pattern`, `path`, `glob`,
- * `output_mode`, `-i`, `context` — so any model can drive it reliably.
+ * `output_mode`, `ignore_case`, `context` — so any model can drive it reliably.
+ *
+ * That flag was literally named `-i` until an audit pointed out it was the only
+ * parameter in the whole registry whose name started with a dash. JSON Schema permits
+ * it, but function-calling implementations vary in how they handle a property name
+ * that looks like a CLI flag, and a parameter the model cannot reliably send is worse
+ * than a slightly longer name. It reads better spelled out anyway.
  */
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
-import { isMultiRoot, relativize, rootLabel, rootsOf, searchUnits, type SearchUnit } from "./paths.js";
+import { isMultiRoot, nextTouch, relativize, resolvePath, rootLabel, rootsOf, searchUnits, type SearchUnit } from "./paths.js";
+import { addFocus } from "./focus.js";
 import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
 import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
 import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
 
 const MAX_FILES = 5_000;
-const MAX_OUTPUT_LINES = 250;
+/** Cap on matching lines returned. Exported so the merged `search` tool states the
+ *  same number in its description instead of drifting from it. */
+export const GREP_MAX_OUTPUT_LINES = 250;
+const MAX_OUTPUT_LINES = GREP_MAX_OUTPUT_LINES;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 type Mode = "files_with_matches" | "content" | "count";
 
-export const grepTool: Tool = {
+export const grepDef: Tool = {
   name: "grep",
   readOnly: true,
   // The old description named the modes and stopped, which left the model to read an
@@ -66,7 +76,7 @@ export const grepTool: Tool = {
         enum: ["files_with_matches", "content", "count"],
         description: "What to return. Defaults to files_with_matches.",
       },
-      "-i": { type: "boolean", description: "Case-insensitive search." },
+      ignore_case: { type: "boolean", description: "Case-insensitive search." },
       context: {
         type: "integer",
         minimum: 0,
@@ -84,7 +94,7 @@ export const grepTool: Tool = {
         ? args.output_mode
         : "files_with_matches";
     const context = typeof args.context === "number" && args.context > 0 ? Math.floor(args.context) : 0;
-    const caseInsensitive = args["-i"] === true;
+    const caseInsensitive = args.ignore_case === true;
     const glob = typeof args.glob === "string" && args.glob.trim() ? args.glob.trim() : undefined;
 
     const rawPath = typeof args.path === "string" && args.path.trim() ? args.path.trim() : undefined;
@@ -108,9 +118,83 @@ export const grepTool: Tool = {
       lines.push(...got.lines);
     }
 
+    // Keep what the search found. Without this a grep is the one useful thing the model
+    // can do that leaves NOTHING behind: its result lives only in the transcript, which
+    // keeps the last 8 tool results and sweeps to 2 at a task boundary, while a read is
+    // re-rendered from disk into <working_files> on every step, forever. The harness was
+    // teaching, mechanically, that reading sticks and searching does not — so the model
+    // read, narrowly and repeatedly, where one search would have answered it.
+    if (mode === "content" && lines.length > 0) await recordSearchHits(ctx, lines);
+
     return formatGrep(mode, pattern, lines);
   },
 };
+
+/** How many distinct files one search may put into the working set. */
+const SEARCH_FOCUS_FILES = 5;
+/** How many hits per file are worth keeping — beyond a handful it is a read, not a hit. */
+const SEARCH_FOCUS_SPANS = 4;
+/** Lines of context kept either side of a hit, so the match is readable in place. */
+const SEARCH_FOCUS_PAD = 2;
+/** `path:LINE:text` — a ripgrep/walk content hit. Context rows use `-` and are skipped. */
+const CONTENT_HIT = /^(.+?):(\d+):/;
+
+/**
+ * Record a bounded focus span around each hit, so the regions a search found ride in the
+ * working set the same way a read's do.
+ *
+ * BOUNDED on both axes: a broad search must not swamp the block with regions the model
+ * never asked to keep. And marked `viaSearch`, because a grep shows matching lines, never
+ * the file — the read-before-write gates must not open on the strength of it.
+ */
+async function recordSearchHits(ctx: ToolContext, lines: readonly string[]): Promise<void> {
+  const hits = new Map<string, number[]>();
+  for (const line of lines) {
+    const m = CONTENT_HIT.exec(line);
+    if (!m) continue;
+    const at = hits.get(m[1]!);
+    if (at) {
+      if (at.length < SEARCH_FOCUS_SPANS) at.push(Number(m[2]));
+    } else if (hits.size < SEARCH_FOCUS_FILES) {
+      hits.set(m[1]!, [Number(m[2])]);
+    }
+  }
+
+  for (const [display, at] of hits) {
+    let abs: string;
+    try {
+      abs = resolvePath(ctx, display);
+    } catch {
+      continue; // a label that doesn't round-trip is not worth guessing at
+    }
+    const prior = ctx.reads.get(abs);
+    let focus = prior?.focus;
+    for (const n of at) {
+      focus = addFocus(focus, { start: Math.max(1, n - SEARCH_FOCUS_PAD), end: n + SEARCH_FOCUS_PAD });
+    }
+    if (prior) {
+      // The recorded stat says what the model was last SHOWN, and matching inside a file
+      // does not change that — leave it alone so read_file's freshness check stays true.
+      prior.touchedAt = nextTouch();
+      if (focus) prior.focus = focus;
+      continue;
+    }
+    try {
+      const st = await fs.stat(abs);
+      if (!st.isFile()) continue;
+      ctx.reads.set(abs, {
+        mtimeMs: st.mtimeMs,
+        size: st.size,
+        full: false,
+        touchedAt: nextTouch(),
+        viaSearch: true,
+        ...(focus ? { focus } : {}),
+      });
+    } catch {
+      // Gone between the search and now — nothing to carry.
+    }
+  }
+}
 
 interface GrepOpts {
   pattern: string;

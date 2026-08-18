@@ -54,7 +54,7 @@ export const readFile: Tool = {
     `\`limit\`) to read a specific range of a longer file. A file larger than ` +
     `${Math.round(MAX_BYTES / 1024)} KB must be read with \`limit\` set rather than whole. ` +
     `Very long output is truncated at the end, and says so. ` +
-    `Reading is also what unlocks editing: edit_file, multi_edit, replace_symbol_body ` +
+    `Reading is also what unlocks editing: edit, replace_symbol_body ` +
     `and overwriting an existing file with write_file all require that file to have ` +
     `been read this session (read_symbol counts too). ` +
     `TWO REPLIES MEAN YOU ALREADY HAVE THE FILE and should not read it again: one says ` +
@@ -152,7 +152,7 @@ export const readFile: Tool = {
 
     // Split on CRLF or LF so a Windows file doesn't show a trailing \r on every
     // line — the model can't see it, would omit it from an edit's old_string, and
-    // the edit would then fail to match. edit_file normalizes line endings too.
+    // the edit would then fail to match. The edit tool normalizes line endings too.
     const allLines = buf.toString("utf8").split(/\r?\n/);
     const totalLines = allLines.length;
     const start = offset ?? 1;
@@ -211,7 +211,7 @@ export const readFile: Tool = {
     // cap. The flag is the dedup's whole basis, so it has to mean what it says.
     const wholeFileSent = full && end >= totalLines && !charTruncated;
 
-    // Record the read so edit_file / write_file know this file has been seen, so a
+    // Record the read so edit / write_file know this file has been seen, so a
     // later identical read can be deduped, and so it enters the working set (recency +
     // the focused range for a partial read, used to localize a large file).
     ctx.reads.set(filePath, {

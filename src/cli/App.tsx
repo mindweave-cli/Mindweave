@@ -2,12 +2,17 @@
  * App — the terminal UI shell (the "eyes and hands" of Mindweave).
  *
  * The transcript is a pure state machine (transcript.ts): a `committed` list
- * (append-only → Ink <Static> → terminal scrollback, printed once) and a live
- * `tail` (the block currently streaming + any running tool). A block drains from
- * tail → committed the instant it and every earlier block is done. That keeps the
- * live-rendered region TINY, which is what gives smooth scrolling, a pinned
- * prompt, and no redraw jank — and it lets streamed text reveal WHOLE (tokens
- * accumulate silently; the block appears at once when it seals), never typewriter.
+ * (append-only) and a live `tail` (the block currently streaming + any running
+ * tool). A block drains from tail → committed the instant it and every earlier
+ * block is done — that lets streamed text reveal WHOLE (tokens accumulate
+ * silently; the block appears at once when it seals), never typewriter.
+ *
+ * Mindweave runs in the terminal's alternate screen (altScreen.ts) with a
+ * pinned header, a pinned footer, and the full committed+tail history in a
+ * flexGrow middle region that fills whatever space they don't use — there
+ * is no real terminal scrollback to lean on inside alt-screen, so nothing
+ * here is capped: the whole conversation stays in memory and only the
+ * render is windowed (clipped to the newest content that fits).
  *
  * The UI owns the session for the whole conversation: it creates one on startup,
  * appends each user turn to its transcript, asks the dynamo (engine) for a reply,
@@ -15,9 +20,9 @@
  * or compaction internals — it calls `respond()` / `compactNow()` and renders the
  * stream events they emit.
  */
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { isAbsolute, resolve } from "node:path";
-import { Box, Static, Text, useInput, useStdout } from "ink";
+import { Box, Text, measureElement, useInput, useStdout, type DOMElement } from "ink";
 import TextInput from "ink-text-input";
 import { compactNow, respond } from "../dynamo/engine.js";
 import { createSession, resumeSession, reloadProjectMemory } from "../memory/session.js";
@@ -30,19 +35,25 @@ import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
 import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
 import { APPROVAL_DISMISSED } from "../tools/approval.js";
 import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
-import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOf, providerOf, usableFallback, withModel, saveModelConfig } from "../dynamo/model.js";
-import { allProviders, manifestForModel } from "../drivers/registry.js";
+import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProvider, providerOf, usableFallback, withModel, saveModelConfig, refreshModels, type ModelConfig } from "../dynamo/model.js";
+import { allProviders, manifestForModel, modelsOf } from "../drivers/registry.js";
+import { accessRefusal } from "../drivers/providerError.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 import { completePath } from "./pathComplete.js";
 import { formatHelp } from "./help.js";
 import { hasApiKey, saveApiKey, globalEnvPath } from "./bootstrap.js";
-import { versionLabel } from "./version.js";
+import { versionLabel, appVersion } from "./version.js";
 import { PromptInput } from "./components/PromptInput.js";
 import { Picker } from "./components/Picker.js";
+import { ApprovalBox } from "./components/ApprovalBox.js";
 import { BlockView } from "./components/BlockView.js";
 import { initialState, reduce, trimNarration, type Action, type Block, type TranscriptState } from "./transcript.js";
-import { planToolReveal, TOOL_GRACE_MS } from "./reveal.js";
-import { toolDisplay, isGroupable } from "./toolDisplay.js";
+import { enableMouse, readWheel, stripMouse } from "./mouse.js";
+import { chatLayout } from "./chatAnchor.js";
+import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./groupReveal.js";
+import { toolDisplay, isGroupable, KIND_COLOR } from "./toolDisplay.js";
+import { workingVerb } from "./workingVerb.js";
+import { narrationPending, revealWait } from "./revealPace.js";
 import { summarizeTask, formatTokens, type TaskUsage } from "../dynamo/pricing.js";
 import type { Usage } from "../drivers/types.js";
 import type { ShellInfo } from "../tools/backgroundShells.js";
@@ -120,6 +131,17 @@ export function App() {
   const applySilent = (action: Action) => {
     stateRef.current = reduce(stateRef.current, action);
   };
+  // Apply several actions as ONE frame: everything but the last lands silently, so
+  // the terminal never shows a block part-way through being assembled. Ink mounts a
+  // legacy React root, which flushes each dispatch synchronously — so "one dispatch"
+  // and "one frame" are the same thing, and a block that needs two actions to be
+  // complete must batch them or it will be seen incomplete.
+  const applyBatch = (actions: Action[]) => {
+    for (let i = 0; i < actions.length; i++) {
+      if (i === actions.length - 1) dispatch(actions[i]!);
+      else applySilent(actions[i]!);
+    }
+  };
 
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
@@ -129,6 +151,36 @@ export function App() {
   // flag the engine actually acts on (set by applyMode / attachApproval).
   const [mode, setMode] = useState<ModeId>(DEFAULT_MODE);
   const modeRef = useRef<ModeId>(DEFAULT_MODE);
+  // Picked once per session, rendered inside the input box (PromptInput's `tip` prop).
+  const [tip] = useState(() => TIPS[Math.floor(Math.random() * TIPS.length)]);
+  // How far the transcript is scrolled back, in LINES from the bottom. Alt-screen
+  // has no terminal scrollback of its own (altScreen.ts), so this is ours to
+  // implement; 0 means pinned to the newest.
+  const [scrollUp, setScrollUp] = useState(0);
+  // The transcript's real rendered height, from measureElement — never estimated.
+  const contentRef = useRef<DOMElement | null>(null);
+  const [contentHeight, setContentHeight] = useState(0);
+  // Same idea, for the footer (status line / background bar / queued bar / input
+  // box / command palette / tip). Its height genuinely changes — the command
+  // palette alone is 5+ rows taller open than closed — and guessing it drifted
+  // from reality exactly the way an unmeasured chat height once did: either
+  // wasted space above the footer, or the footer's own bottom edge pushed past
+  // the terminal, which corrupts the whole frame if that's the row that tips
+  // outputHeight to stdout.rows. Measured, this can't drift.
+  const footerRef = useRef<DOMElement | null>(null);
+  const [footerHeight, setFooterHeight] = useState(0);
+  // The chat viewport's REAL height. Yoga decides it now (flexGrow beside a
+  // flexShrink:0 footer); this is read back purely so the scroll maths knows how
+  // much of the content is on screen.
+  const chatRef = useRef<DOMElement | null>(null);
+  const [chatHeight, setChatHeight] = useState(0);
+  // Bumped by PromptInput when its suggestion menu changes size. Its only job is
+  // to re-render App so the footer measurement below re-runs: the menu is
+  // PromptInput's own state, so App is not re-rendered by it and would otherwise
+  // keep sizing the chat against a footer that no longer exists — leaving the
+  // menu clipped off the bottom of the frame with nothing to correct it.
+  const [, bumpFooter] = useState(0);
+  const onMenuChange = useCallback(() => bumpFooter((t) => t + 1), []);
   // Turn timing for the status line: when the current turn started, how long the
   // last one took, the token count, and which whimsical verb-pair this turn uses.
   const [lastMs, setLastMs] = useState<number | null>(null);
@@ -141,6 +193,13 @@ export function App() {
   // Nothing is shown while working: mid-stream counts aren't reliable, and a
   // provider may not report usage until the turn ends.
   const usageSamples = useRef<Usage[]>([]);
+  // Read live by the status line each tick. A getter rather than state so a usage event
+  // does not force a re-render of the whole transcript — the line already re-renders
+  // once a second for its timer, which is often enough for a running count.
+  const receivedTokens = useCallback(
+    () => usageSamples.current.reduce((sum, u) => sum + (u.completionTokens ?? 0), 0),
+    [],
+  );
   // Aborts the in-flight turn when the user presses Esc (created fresh per turn).
   const abortRef = useRef<AbortController | null>(null);
   // Which provider's key we still need, or null once we have it. Not a bare
@@ -165,9 +224,22 @@ export function App() {
   // the user Yes/No/other, and we render it as an overlay that resolves the promise.
   // A ref so the function injected into a session's tool context always reaches the
   // current setOverlay (and survives session swaps on /continue).
-  const askApproval = useRef((question: string, options: string[]) =>
-    new Promise<string>((resolve) => setOverlay({ kind: "approval", question, options, resolve })),
-  );
+  //
+  // `detail` (a plan, a long command) is printed into the TRANSCRIPT rather than the
+  // prompt. The prompt lives in the footer, which is not height-bounded: a long one
+  // makes the whole frame taller than the terminal, and at that point Ink stops
+  // erasing correctly and the screen tears (see the frameHeight comment below). The
+  // transcript is the part of the UI already built to hold arbitrary length — it is
+  // clipped and scrollable — so long context goes there and the prompt stays one line.
+  const askApproval = useRef((question: string, options: string[], detail?: string, detailTitle?: string) => {
+    const body = detail?.trim();
+    if (body) {
+      // Titled → a facts block on a rail, rendered verbatim (a command must not be
+      // reinterpreted as markdown). Untitled → prose, because it is a document to read.
+      dispatch(detailTitle ? { type: "notice", title: detailTitle, body } : { type: "say", text: body });
+    }
+    return new Promise<string>((resolve) => setOverlay({ kind: "approval", question, options, resolve }));
+  });
   // Bumped whenever a background shell starts/finishes, to re-render the indicator.
   const [bgTick, setBgTick] = useState(0);
   // Guards the idle auto-react so a flurry of changes can't kick overlapping turns.
@@ -227,6 +299,11 @@ export function App() {
     }
     // Close any discovery group left open at the end so it commits to scrollback.
     dispatch({ type: "sealNarration" });
+    // Every replayed row belongs to a turn that finished long ago, so settle the
+    // verbs. Without this a resumed chat opens with "Updating(App.tsx)" over an edit
+    // that completed in a previous session — present tense claiming work is in
+    // flight when nothing is running at all.
+    dispatch({ type: "endTurn" });
   }
 
   // Parse a stored tool call's raw JSON arguments for display; malformed → {}.
@@ -268,7 +345,7 @@ export function App() {
   }
 
   function attachApproval(s: Session) {
-    s.toolContext.requestApproval = (q, o) => askApproval.current(q, o);
+    s.toolContext.requestApproval = (q, o, detail, title) => askApproval.current(q, o, detail, title);
     s.toolContext.backgroundShells?.setOnChange(handleBgChange);
     // Servers connect in the background and can die or revive at any time; without this
     // the /mcp view would only ever show what was true when the last key was pressed.
@@ -336,7 +413,11 @@ export function App() {
 
   // Live terminal width — drives message wrapping (Static items capture it at
   // commit time; the live input reflows on resize for free).
-  const width = useTerminalWidth();
+  const { columns: width, rows } = useTerminalSize();
+  // Read live at render time as well as from the polled state above: mid-resize
+  // the state can lag the real terminal by a tick, and a frame one row too TALL
+  // is the failure that corrupts the screen (see the layout comment below).
+  const { stdout } = useStdout();
 
   // One session for the whole conversation (a ref so it survives re-renders).
   const session = useRef<Session | null>(null);
@@ -437,6 +518,13 @@ export function App() {
         const mgr = session.current?.toolContext.backgroundShells;
         for (const sh of mgr?.running() ?? []) mgr?.kill(sh.id, "user");
         flush.current = true; // drain the rest of the queue immediately
+        // A held-but-unsettled group (see pump()) waits for the NEXT enqueued
+        // action to notice anything changed — nothing schedules a timer while
+        // holding any more. If this was the interrupt that ends the turn with
+        // no further engine events coming, that held group would otherwise
+        // never get released. Nudging pump() here costs nothing when there's
+        // nothing held (it's a no-op on an empty queue) and closes that gap.
+        pump();
         note("stopped.");
       }
     },
@@ -451,8 +539,80 @@ export function App() {
     },
     { isActive: ready && overlay === null },
   );
+
+  // Scrolling the transcript. The alternate screen keeps no scrollback of its
+  // own, so without this there is no way to look at anything that has left the
+  // viewport. Moves by blocks rather than lines: a block is the unit the
+  // transcript is made of, so a step never lands halfway through a diff.
+  // Scrolls by LINES. The clamp to the content's real height happens at render,
+  // where that height is known, so this only has to refuse to go below zero.
+  const scrollBy = useCallback((lines: number) => {
+    setScrollUp((s) => Math.max(0, s + lines));
+  }, []);
+
+  useInput(
+    (_input, key) => {
+      // Shift+arrows as well as PageUp/PageDown: Windows consoles routinely eat
+      // the paging keys before an app sees them, so there has to be a second way in.
+      if (key.pageUp) scrollBy(PAGE_LINES);
+      else if (key.pageDown) scrollBy(-PAGE_LINES);
+      else if (key.upArrow && key.shift) scrollBy(1);
+      else if (key.downArrow && key.shift) scrollBy(-1);
+    },
+    { isActive: ready && overlay === null },
+  );
+
+  // Measure the transcript's real rendered height after every render. Deliberately
+  // has no dependency list: the height changes for reasons no dep could name — a
+  // reply landing, a terminal resize re-wrapping every paragraph — and the guard
+  // below means a render that changed nothing sets no state, so this settles
+  // rather than looping.
+  useEffect(() => {
+    if (!contentRef.current) return;
+    const { height } = measureElement(contentRef.current);
+    setContentHeight((h) => (h === height ? h : height));
+  });
+
+  // Same measurement, for the footer — see footerHeight above.
+  useEffect(() => {
+    if (!footerRef.current) return;
+    const { height } = measureElement(footerRef.current);
+    setFooterHeight((h) => (h === height ? h : height));
+  });
+
+  // And for the chat viewport. Unlike the footer's, this measurement is not part
+  // of any layout decision — it only tells the scroll maths how many rows are
+  // visible, so a one-frame lag here is invisible.
+  useEffect(() => {
+    if (!chatRef.current) return;
+    const { height } = measureElement(chatRef.current);
+    setChatHeight((h) => (h === height ? h : height));
+  });
+
+  // The wheel. Read straight off stdin rather than through useInput, because a
+  // mouse report is not a keypress and Ink's key parser has no notion of one.
+  useEffect(() => {
+    if (!ready) return;
+    const off = enableMouse();
+    const stdin = process.stdin;
+    const onData = (chunk: Buffer | string) => {
+      for (const dir of readWheel(chunk.toString("utf8"))) {
+        scrollBy(dir === "up" ? WHEEL_LINES : -WHEEL_LINES);
+      }
+    };
+    stdin.on("data", onData);
+    return () => {
+      stdin.off("data", onData);
+      off();
+    };
+  }, [ready, scrollBy]);
+
   function endTurn() {
     if (turnStart.current != null) setLastMs(Date.now() - turnStart.current);
+    // Settle every tool row this turn produced into its past-tense verb. The single
+    // funnel for a turn ending (normal completion, error, interrupt), so no row is
+    // left reading "Reading" once nothing is being read.
+    dispatch({ type: "endTurn" });
     setBusy(false);
   }
 
@@ -550,60 +710,80 @@ export function App() {
   // ── Reveal pacing ───────────────────────────────────────────────────────────
   // The engine fires a turn's tool events in a burst, so rows would otherwise flash
   // up all at once. We queue the transcript actions and release a NEW block (a tool
-  // row, the answer) only every ~700ms so the turn reads calmly. It's a MINIMUM
-  // gap, not an added delay: if the model already spent that long between events,
-  // the next reveal is immediate. Silent text accumulation and a tool RESOLVING in
-  // place are never paced — only the APPEARANCE of a new block is.
-  const REVEAL_GAP_MS = 700;
+  // row, a sentence, the answer) on a steady beat, so the turn reads as work being
+  // done rather than as output being thrown at the screen. The beat and the reasons
+  // for it live in revealPace.ts; every path below goes through it, with no
+  // exceptions, because an exception IS a change of tempo and that is the one thing
+  // the beat cannot survive.
+  //
+  // It is a MINIMUM since the last reveal, not an added delay: if the model already
+  // spent that long between events, the next reveal is immediate. Silent text
+  // accumulation and a tool RESOLVING in place are never paced — only the
+  // APPEARANCE of a new block is.
   const revealQ = useRef<Action[]>([]);
   const lastRevealAt = useRef(0);
   const pumpTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamDone = useRef(false);
   const flush = useRef(false); // Esc → drain the rest with no pacing
-  // The standalone tool row we're briefly holding so it can appear already-resolved
-  // (header + output at once) instead of header-then-expand, and since when.
-  const holdId = useRef<string | null>(null);
-  const holdSince = useRef(0);
+  // Whether a "tools" group is currently visible (already revealed and still
+  // open). Tracked at this layer — not read from transcript state — because the
+  // decision it drives (does the NEXT grouped toolStart need to be held) has to
+  // be made before that action is even dispatched.
+  const groupOpen = useRef(false);
 
   // A new block appears (paced); a token (silent), a tool resolution (in place), a
-  // grouped discovery call (folds into the live group), or a sub-agent's nested
-  // activity (folds into / resolves its rail in place) is not. Only a sub-agent's
-  // START is paced — it's a new block, like any other tool row.
-  const isPaced = (a: Action) =>
-    a.type !== "token" &&
-    a.type !== "toolEnd" &&
-    a.type !== "subToolStart" &&
-    a.type !== "subToolEnd" &&
-    a.type !== "subagentEnd" &&
-    !(a.type === "toolStart" && a.group);
+  // discovery call folding into an ALREADY-OPEN group, or a sub-agent's nested
+  // activity (folds into / resolves its rail in place) is not.
+  //
+  // Both kinds of tool start are paced AND held: pump() waits for the matching
+  // toolEnd so the row arrives complete, then reveals the pair on the beat. (It used
+  // to show instantly as a bare header and then patch in place; that was the
+  // two-stage reveal the hold mechanism exists to remove.) Holding and pacing are
+  // separate questions — one is about the block being whole, the other about when a
+  // whole block is allowed on screen — and a standalone row used to answer only the
+  // first, which is why a burst of edits landed together however calm the rest of
+  // the turn was.
+  const isPaced = (a: Action) => {
+    if (a.type === "toolStart") return a.group ? !groupOpen.current : true;
+    return (
+      a.type !== "token" &&
+      a.type !== "toolEnd" &&
+      a.type !== "subToolStart" &&
+      a.type !== "subToolEnd" &&
+      a.type !== "subagentEnd"
+    );
+  };
 
   function enqueueReveal(a: Action) {
     revealQ.current.push(a);
-    // If we're holding a tool for its result and it just arrived, stop waiting out the
-    // grace window and reveal the row (resolved) right away.
-    if (a.type === "toolEnd" && holdId.current === a.toolId && pumpTimer.current) {
-      clearTimeout(pumpTimer.current);
-      pumpTimer.current = null;
-    }
     if (!pumpTimer.current) pump();
   }
 
-  // Reveal the next block after the calm gap (a minimum, not an added delay).
+  // Reveal the next block on the beat (a minimum since the last reveal, not an added
+  // delay), then stamp the clock and carry on draining. Every paced path in pump()
+  // goes through here, so the tempo is decided in exactly one place.
   function schedulePaced(reveal: () => void) {
-    const wait = flush.current ? 0 : Math.max(0, REVEAL_GAP_MS - (Date.now() - lastRevealAt.current));
+    const wait = revealWait({ now: Date.now(), lastRevealAt: lastRevealAt.current, flush: flush.current });
     pumpTimer.current = setTimeout(() => {
       pumpTimer.current = null;
       reveal();
+      lastRevealAt.current = Date.now();
+      pump();
     }, wait);
   }
 
   function pump() {
-    // Apply immediate actions at once: silent tokens, and in-place resolves (a tool
-    // end that lands on an already-revealed running row, a grouped/rail item).
+    // Apply immediate actions at once: silent tokens, in-place resolves, and a
+    // discovery call folding into a group that's already on screen.
     while (revealQ.current.length > 0 && !isPaced(revealQ.current[0]!)) {
       const a = revealQ.current.shift()!;
       if (a.type === "token") applySilent(a);
       else dispatch(a);
+      // A group stays open once shown; anything that isn't part of it (a
+      // standalone tool, narration, a sub-agent) closes it, mirroring exactly
+      // what the transcript reducer's own closeToolGroup does on the same actions.
+      if (a.type === "toolStart" && a.group) groupOpen.current = true;
+      else if (a.type !== "toolEnd") groupOpen.current = false;
     }
     if (revealQ.current.length === 0) {
       if (streamDone.current) {
@@ -614,50 +794,72 @@ export function App() {
     }
     const front = revealQ.current[0]!;
 
-    // A standalone tool row: prefer to reveal it ALREADY RESOLVED (header + output in
-    // one step). Hold it briefly; if its result lands within the grace window the row
-    // appears complete, never header-then-expand. Only a genuinely slow tool (still
-    // running after the grace) falls back to a running header that fills in on its end.
-    if (front.type === "toolStart" && !front.group) {
-      const hasEnd = revealQ.current.some((a) => a.type === "toolEnd" && a.toolId === front.toolId);
-      const fresh = holdId.current !== front.toolId;
-      const heldMs = fresh ? 0 : Date.now() - holdSince.current;
-      const plan = planToolReveal(hasEnd, heldMs, TOOL_GRACE_MS, flush.current);
-      if (plan === "hold") {
-        if (fresh) {
-          holdId.current = front.toolId;
-          holdSince.current = Date.now();
-        }
-        // Wait out the grace, then re-check; the end arriving (enqueueReveal) also wakes us.
-        pumpTimer.current = setTimeout(() => {
-          pumpTimer.current = null;
-          pump();
-        }, TOOL_GRACE_MS);
-        return;
-      }
-      holdId.current = null;
+    // Narration waiting in front of a tool call gets the beat to itself. `toolStart`
+    // seals the open assistant block as part of its own action, so without this the
+    // sentence and the row it introduces reach the terminal in the SAME paint and
+    // land as one clump — the pacer's blind spot, since nothing was ever queued for
+    // the text. Sealing it first lets the sentence be read before the row appears
+    // under it. Only when a block will actually result (see narrationPending): the
+    // narration budget is one line per turn, and pausing for a sentence that seals
+    // to nothing would be an empty beat, which is a stall rather than a rhythm.
+    if (front.type === "toolStart" && narrationPending(stateRef.current)) {
       schedulePaced(() => {
-        const start = revealQ.current.shift();
-        if (start) dispatch(start);
-        // "resolved" → also pull its end forward so the row lands complete at once.
-        if (plan === "resolved" && start && start.type === "toolStart") {
-          const ei = revealQ.current.findIndex((a) => a.type === "toolEnd" && a.toolId === start.toolId);
-          if (ei >= 0) dispatch(revealQ.current.splice(ei, 1)[0]!);
-        }
-        lastRevealAt.current = Date.now();
-        pump();
+        dispatch({ type: "sealNarration" });
+        groupOpen.current = false;
       });
       return;
     }
 
-    // Every other paced block (narration, a sub-agent start, notes): reveal after the gap.
+    // A tool's opening call is HELD — not dispatched, not scheduled, nothing shown —
+    // until its result is queued behind it, so the row never appears bare and then
+    // sprouts a body a second later. Holding costs nothing that was worth having:
+    // the header alone names a call whose result is the entire point of showing it,
+    // and the footer's live timer is what says work is happening. There is no
+    // time-based fallback (see groupReveal.ts): every later enqueueReveal re-enters
+    // pump, which re-checks. Esc sets `flush`, and `streamDone` releases the hold
+    // unconditionally — once the stream is over no further event can arrive, so a
+    // call whose end never came (an abort mid-flight) must still be shown rather
+    // than stranding the queue and the turn with it.
+    //
+    // Then the whole held burst reveals in ONE paint, on the beat. Painting per
+    // action would show the block assembling itself (header, then a running row,
+    // then the resolved row): Ink's root is a legacy React root, so every dispatch
+    // flushes synchronously and each one is a frame the terminal actually shows.
+    if (front.type === "toolStart") {
+      const isNewGroup = front.group && !groupOpen.current;
+      if (isNewGroup) {
+        if (planGroupReveal(groupSettled(revealQ.current.slice(1)), flush.current) === "hold") return;
+      } else if (!(resultQueued(front.toolId, revealQ.current) || flush.current || streamDone.current)) {
+        return;
+      }
+      schedulePaced(() => {
+        // Measured HERE, not when the beat was scheduled: the queue keeps growing
+        // while we wait, and a group's burst can gain members in that window. A span
+        // measured early would leave the stragglers behind to open a second group,
+        // splitting one burst across two blocks.
+        let take: number;
+        if (isNewGroup) {
+          take = 0;
+          while (take < revealQ.current.length && isGroupMember(revealQ.current[take]!)) take++;
+        } else {
+          const end = revealQ.current.findIndex((x) => x.type === "toolEnd" && x.toolId === front.toolId);
+          take = end === -1 ? 1 : end + 1;
+        }
+        applyBatch(revealQ.current.splice(0, take));
+        // Resolved either way — the action that closes the block follows next.
+        groupOpen.current = false;
+      });
+      return;
+    }
+
+    // Every remaining paced block (a sealed reply, a sub-agent start, notes) reveals
+    // on the same beat.
     schedulePaced(() => {
       const a = revealQ.current.shift();
       if (a) {
         dispatch(a);
-        lastRevealAt.current = Date.now();
+        if (a.type !== "toolEnd") groupOpen.current = a.type === "toolStart" && !!a.group;
       }
-      pump();
     });
   }
 
@@ -669,8 +871,10 @@ export function App() {
    */
   async function streamRespond(s: Session) {
     startTurn();
-    // Pick up any edits the model made to MINDWEAVE.md since last turn (it maintains it),
-    // so the project memory in the prompt is never stale.
+    // Pick up an edit the model made to MINDWEAVE.md, but only if one actually happened
+    // — this is a no-op otherwise. Re-reading unconditionally used to look free and was
+    // not: it rewrites the system prompt string, which discards the entire cached prefix
+    // (base prompt, tool schemas, project snapshot) at 1.25x rewrite cost.
     await reloadProjectMemory(s).catch(() => {});
     revealQ.current = [];
     lastRevealAt.current = 0; // first reveal of the turn is immediate
@@ -682,9 +886,14 @@ export function App() {
           enqueueReveal(
             opts?.context ? { type: "context", text: line } : opts?.error ? { type: "error", text: line } : { type: "note", text: line },
           ),
+        // An AUTOMATIC compaction, mid-turn. Queued like everything else so it appears
+        // in the order it happened, rather than jumping ahead of the rows around it.
+        onCompaction: (report) => enqueueReveal({ type: "compaction", report }),
         onEvent: (e) => {
           if (e.type === "text") {
             enqueueReveal({ type: "token", delta: e.delta });
+          } else if (e.type === "replyReset") {
+            enqueueReveal({ type: "resetReply" });
           } else if (e.type === "tool" && e.phase === "start") {
             // The spawn call itself is rendered by its sub-agent block, not a raw row.
             if (e.name === "spawn_subagent") return;
@@ -693,15 +902,35 @@ export function App() {
               // A sub-agent's own tool call — fold it into that worker's nested rail.
               enqueueReveal({ type: "subToolStart", agentId: e.agent, toolId: e.id, name: d.name, arg: d.arg, action: d.kind });
             } else {
-              enqueueReveal({ type: "toolStart", toolId: e.id, name: d.name, arg: d.arg, action: d.kind, group: isGroupable(e.name) });
+              enqueueReveal({ type: "toolStart", toolId: e.id, name: d.name, arg: d.arg, meta: d.meta, action: d.kind, group: isGroupable(e.name) });
             }
           } else if (e.type === "tool" && e.phase === "end") {
             if (e.name === "spawn_subagent") return;
             if (e.agent) {
               enqueueReveal({ type: "subToolEnd", agentId: e.agent, toolId: e.id, ok: !e.error, summary: e.summary });
             } else {
-              enqueueReveal({ type: "toolEnd", toolId: e.id, ok: !e.error, summary: e.summary, detail: e.detail, quiet: e.quiet });
+              enqueueReveal({
+                type: "toolEnd",
+                toolId: e.id,
+                ok: !e.error,
+                summary: e.summary,
+                detail: e.detail,
+                detailKind: e.detailKind,
+                quiet: e.quiet,
+                action: e.displayKind,
+                name: e.displayName,
+              });
             }
+            // A lift (see approval.ts's liftForbidden) happens INSIDE the call that
+            // just ended, with no ToolResult of its own to carry it — drained here,
+            // right after the call it happened during, as its own governor block.
+            const gov = session.current?.toolContext.governance;
+            for (const notice of gov?.notices ?? []) {
+              const govId = `governor-${crypto.randomUUID()}`;
+              enqueueReveal({ type: "toolStart", toolId: govId, name: "Governor", action: "governor" });
+              enqueueReveal({ type: "toolEnd", toolId: govId, ok: true, summary: notice });
+            }
+            if (gov) gov.notices = [];
           } else if (e.type === "subagent" && e.phase === "start") {
             enqueueReveal({ type: "subagentStart", agentId: e.id, task: e.task, readOnly: e.readOnly });
           } else if (e.type === "subagent" && e.phase === "end") {
@@ -729,7 +958,15 @@ export function App() {
       enqueueReveal({ type: "finishReply" });
     } catch (error) {
       enqueueReveal({ type: "finishReply" });
-      enqueueReveal({ type: "error", text: `⚠ ${errText(error)}` });
+      // An account-level refusal (key rejected, balance spent, rate limited) is a
+      // STATE, not a crash: nothing is broken and the red error block would say the
+      // opposite. It becomes the same calm notice the permission prompt uses, with
+      // the provider's own sentence quoted inside it. Anything else — a malformed
+      // request, a bug of ours — stays loud, which is the point of classifying
+      // narrowly. See drivers/providerError.ts.
+      const refusal = accessRefusal(error, providerOf(s.modelConfig.model).label, otherProviderHasKey(s.modelConfig.model));
+      if (refusal) enqueueReveal({ type: "notice", title: refusal.title, body: refusal.body });
+      else enqueueReveal({ type: "error", text: `⚠ ${errText(error)}` });
     } finally {
       await saveSession(s);
       streamDone.current = true;
@@ -770,7 +1007,10 @@ export function App() {
       startTurn();
       note("compacting the old conversation so it fits…");
       try {
-        await compactNow(resumed, { onActivity: (line, opts) => note(line, opts) });
+        await compactNow(resumed, {
+          onActivity: (line, opts) => note(line, opts),
+          onCompaction: (report) => dispatch({ type: "compaction", report }),
+        });
         await saveSession(resumed);
       } catch (error) {
         say(`⚠ ${errText(error)}`);
@@ -807,7 +1047,7 @@ export function App() {
     // Index into the SAME list the picker rendered — the current provider's models,
     // not every model everywhere. Indexing the global list here would silently select
     // a different model than the one on screen, and would type-check perfectly.
-    const choice = s ? modelsOf(s.modelConfig.model)[index] : undefined;
+    const choice = s ? modelsOfProvider(s.modelConfig.model)[index] : undefined;
     if (!s || !choice) return;
     s.modelConfig = withModel(s.modelConfig, choice.id);
     await saveModelConfig(s.cwd, s.modelConfig);
@@ -828,7 +1068,7 @@ export function App() {
       note(`already on ${provider.label} · ${modelLabel(s.modelConfig.model)}`);
       return;
     }
-    const target = provider.models[0];
+    const target = modelsOf(provider)[0];
     if (!target) return;
 
     // Do NOT move onto — let alone SAVE — a provider we can't run. Persisting first is
@@ -938,11 +1178,15 @@ export function App() {
 
     if (name === "/compact") {
       startTurn();
-      note("compacting the conversation…");
       try {
-        await compactNow(s, { onActivity: (line, opts) => note(line, opts) });
+        // No "compacting…" line and no "Context compacted." afterwards: the report
+        // block below says both, with the numbers, and in one settled piece rather
+        // than three rows arriving separately around it.
+        await compactNow(s, {
+          onActivity: (line, opts) => note(line, opts),
+          onCompaction: (report) => dispatch({ type: "compaction", report }),
+        });
         await saveSession(s);
-        say("Context compacted.");
       } catch (error) {
         say(`⚠ ${errText(error)}`);
       } finally {
@@ -1003,33 +1247,58 @@ export function App() {
         return;
       }
 
+      // One structured tool-shaped block (● Undo … ⎿ branch) instead of a stack of
+      // separate note/say text lines — same restored/conflict/failed/skipped facts,
+      // rendered the same way an edit's diff or a command's output is.
       if (restored.length > 0) {
         // The files on disk are back to their pre-turn state; drop them from the read
         // ledger so the model must re-read before it can edit them again.
         for (const p of restored) s.toolContext.reads.delete(p);
-        const from = results.length === 1 ? `“${results[0]!.label}”` : `${results.length} turns`;
-        note(`reverted ${restored.length} file${restored.length === 1 ? "" : "s"} from ${from}:`);
-        say(restored.map((p) => `  ↩ ${rel(p)}`).join("\n"));
+      }
+      const detailLines: string[] = [];
+      const summaryBits: string[] = [];
+      if (restored.length > 0) {
+        const from = results.length === 1 ? `"${results[0]!.label}"` : `${results.length} turns`;
+        detailLines.push(`Reverted ${restored.length} file${restored.length === 1 ? "" : "s"} from ${from}:`);
+        detailLines.push(...restored.map((p) => `  ↩ ${rel(p)}`));
+        summaryBits.push(`${restored.length} restored`);
       }
       if (conflicts.length > 0) {
-        // Changed since we wrote them. Rolling back would have destroyed that work.
-        note(`left alone — changed since I wrote ${conflicts.length === 1 ? "it" : "them"}:`);
-        say(conflicts.map((p) => `  • ${rel(p)}`).join("\n"));
+        detailLines.push(`Left alone — changed since I wrote ${conflicts.length === 1 ? "it" : "them"}:`);
+        detailLines.push(...conflicts.map((p) => `  • ${rel(p)}`));
+        summaryBits.push(`${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}`);
       }
       if (failed.length > 0) {
         const retry = results.some((r) => r.retryable)
           ? " — /undo again to retry"
           : " — giving up; they're still in their edited state";
-        note(`couldn't write ${failed.length === 1 ? "this file" : "these files"}${retry}:`);
-        say(failed.map((p) => `  ! ${rel(p)}`).join("\n"));
+        detailLines.push(`Couldn't write ${failed.length === 1 ? "this file" : "these files"}${retry}:`);
+        detailLines.push(...failed.map((p) => `  ! ${rel(p)}`));
+        summaryBits.push(`${failed.length} failed`);
       }
       if (skipped.length > 0) {
-        note(`never checkpointed (too large) — still in their edited state:`);
-        say(skipped.map((p) => `  · ${rel(p)}`).join("\n"));
+        detailLines.push(`Never checkpointed (too large) — still in their edited state:`);
+        detailLines.push(...skipped.map((p) => `  · ${rel(p)}`));
+        summaryBits.push(`${skipped.length} skipped`);
       }
       if (results.some((r) => r.ranShell)) {
-        say("Shell commands also ran — those changes aren't covered by /undo.");
+        detailLines.push("Shell commands also ran — those changes aren't covered by /undo.");
       }
+      const undoToolId = `undo-${crypto.randomUUID()}`;
+      dispatch({
+        type: "toolStart",
+        toolId: undoToolId,
+        name: "Undo",
+        arg: results.length === 1 ? results[0]!.label : `${results.length} turns`,
+        action: "checkpoint",
+      });
+      dispatch({
+        type: "toolEnd",
+        toolId: undoToolId,
+        ok: failed.length === 0,
+        summary: summaryBits.join(" · "),
+        detail: detailLines.join("\n"),
+      });
 
       // Tell the MODEL too. Without this the transcript still claims the edits are in
       // place, and the next turn reasons about code that is no longer on disk.
@@ -1079,12 +1348,18 @@ export function App() {
       return;
     }
 
+    // Both pickers refresh discovered providers first, so a model pulled since the
+    // session started appears without a restart. Awaited rather than fired off: the
+    // picker renders from the list, and opening on a stale one that then changes
+    // under the cursor is the exact "two-stage reveal" the UI work removed.
     if (name === "/provider") {
+      await refreshModels();
       setOverlay({ kind: "provider" });
       return;
     }
 
     if (name === "/model") {
+      await refreshModels();
       setOverlay({ kind: "model" });
       return;
     }
@@ -1364,7 +1639,10 @@ export function App() {
           <Text bold color="cyan">{"  key › "}</Text>
           <TextInput
             value={keyInput}
-            onChange={setKeyInput}
+            // Same guard as the prompt: wheel reports reach this field as typed
+            // text, and an API key with `[<64;25;26M` spliced through it fails
+            // in a way that looks like the key itself is wrong.
+            onChange={(v) => setKeyInput(stripMouse(v))}
             onSubmit={handleKeySubmit}
             placeholder="sk-…  (paste, then press Enter)"
             mask="•"
@@ -1388,6 +1666,9 @@ export function App() {
   // Record the sent text in history (no consecutive dupes). While busy, queue it
   // (the input stays live); the turn-end effect sends it next. Otherwise handle now.
   function onSend(text: string) {
+    // Sending snaps back to the newest: your own message arriving off-screen,
+    // above where you are scrolled to, reads as the app having ignored you.
+    setScrollUp(0);
     setHistory((h) => (h[h.length - 1] === text ? h : [...h, text]));
     if (busy) {
       queueRef.current.push(text);
@@ -1453,7 +1734,7 @@ export function App() {
       const active = providerOf(cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model).id;
       const providers = allProviders();
       const items = providers.map((p) => {
-        const n = p.models.length;
+        const n = modelsOf(p).length;
         const models = `${n} model${n === 1 ? "" : "s"}`;
         // Say up front which ones you can actually run — finding out at the next
         // request is the worse place to learn it.
@@ -1474,7 +1755,7 @@ export function App() {
     if (overlay.kind === "model") {
       const id = cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model;
       // Only the current provider's models. Switching provider is /provider's job.
-      const models = modelsOf(id);
+      const models = modelsOfProvider(id);
       const items = models.map((m) => ({ label: m.label + (m.id === id ? "  ✓" : ""), description: m.description }));
       return (
         <Picker
@@ -1503,11 +1784,13 @@ export function App() {
         />
       );
     }
-    // approval — the forbidden-lift Yes/No/other prompt
+    // approval — a plan, a Sentinel action, a forbidden-path lift. Bordered rather than
+    // listed: it interrupts the user's work and the answer commits them to something,
+    // so it should read as a stop, not as more output.
     return (
-      <Picker
-        title={overlay.question}
-        items={overlay.options.map((o) => ({ label: o }))}
+      <ApprovalBox
+        question={overlay.question}
+        options={overlay.options}
         width={width}
         onSelect={onOverlaySelect}
         onCancel={onOverlayCancel}
@@ -1516,104 +1799,310 @@ export function App() {
   }
   const overlayView = buildOverlayView();
 
-  // Committed blocks → <Static> (scrollback), with the banner pinned first.
+  // Alt-screen owns every row, so the app decides for itself what is on screen.
+  //
+  // Two hard constraints, both found by measuring Ink rather than reasoning about it:
+  //
+  //  1. The frame must be STRICTLY SHORTER than the terminal. At `outputHeight >=
+  //     stdout.rows`, Ink abandons its normal erase-and-redraw and writes
+  //     `clearTerminal + output` instead (ink.js), which never updates
+  //     log-update's `previousLineCount`. The next ordinary frame then erases the
+  //     wrong number of lines, so old text stays behind and new text lands on top
+  //     of it — the overlapping, half-drawn screen with the header scrolled away.
+  //  2. Yoga cannot clip a chat. Children default to `flexShrink: 1` so an
+  //     overfull column COMPRESSES (rows silently dropped from the middle), and
+  //     with `flexShrink: 0` every layout clips the END of the axis — which is
+  //     the newest message.
+  //
+  // So the transcript renders in FULL inside a clipped viewport, and a negative
+  // top margin slides it — the same mechanism a scrollable pane uses anywhere
+  // else. `measureElement` reports the rendered height, so the scroll maths runs
+  // on what the terminal actually drew rather than a guess about it.
+  //
+  // An earlier cut estimated each block's height and rendered only the ones that
+  // fit. It scrolled a whole block per step, which meant a long block jumped the
+  // view past everything inside it, and any drift between the estimate and the
+  // real render made content shift around. Measuring removes the estimate, and
+  // scrolling by LINES removes the jumping.
   const committed = stateRef.current.committed;
   const tail = stateRef.current.tail;
-  const items: StaticItem[] = [BANNER_ITEM, ...committed];
+  const allBlocks: Block[] = [...committed, ...tail];
+
+  // Never render a frame as tall as the terminal (constraint 1). `stdout.rows`
+  // is read live as well as from state, because during a resize the polled
+  // state can briefly lag the real terminal, and being one row too TALL is the
+  // failure mode that corrupts the screen.
+  const liveRows = stdout?.rows ?? rows;
+  const frameHeight = Math.max(3, Math.min(rows, liveRows) - 1);
+  // The chat's HEIGHT is no longer computed here — Yoga is given the job instead
+  // (the viewport below is flexGrow:1 beside a flexShrink:0 footer), and this
+  // measurement is now only read for the SCROLL maths.
+  //
+  // It used to be `frameHeight - BANNER_ROWS - footerHeight`, and that arithmetic
+  // could not be right at the moment it mattered most. `footerHeight` is measured
+  // from the PREVIOUS render, so on the frame where the input box grows a line —
+  // exactly when a message wraps — the chat was still sized against the old,
+  // shorter footer. Total content then exceeded the frame by one row and the
+  // excess clipped from the bottom, which is where the tip line lives. REPRODUCED
+  // with a bare Ink render: at 3 wrapped input lines with a stale footerHeight,
+  // the tip vanishes; with the flex layout it survives 1, 3, 6 and 11 lines.
+  //
+  // Yoga computes both in a single pass, so there is no frame where the two
+  // disagree. `chatRows` is measured from the viewport itself; a lag there costs
+  // nothing, because it only clamps how far the user may scroll.
+  const chatRows = Math.max(1, chatHeight || frameHeight - BANNER_ROWS - footerHeight);
+  // How many command-palette rows the footer could safely grow by. Reserves a
+  // conservative fixed cost for what's always there (status line, the bordered
+  // input box, the tip line) and a floor of MIN_CHAT_ROWS so the chat is never
+  // fully eclipsed by an open menu; MENU_CHROME_ROWS is the palette's own
+  // border/title/hint. What's left becomes item rows, floored at a usable
+  // minimum and capped so a huge terminal doesn't show an ungainly wall.
+  const menuBudget = frameHeight - BANNER_ROWS - MIN_CHAT_ROWS - FOOTER_BASE_ROWS - MENU_CHROME_ROWS;
+  const maxMenuItems = Math.max(3, Math.min(12, menuBudget));
+  const runningShells = session.current?.toolContext.backgroundShells?.running() ?? [];
+  // Where the transcript sits in the viewport, and how far it can travel. Extracted
+  // to `chatAnchor.ts` so the rule is unit-tested rather than eyeballed — see there
+  // for why a short transcript now rests ON the input box instead of stranding
+  // itself at the top of the screen, and why that cannot disturb a scrolled frame.
+  const { marginTop: chatOffset, restsOnFooter } = chatLayout(contentHeight, chatRows, scrollUp);
+  // Only the blocks that can still be reached are worth laying out. Yoga lays
+  // out every child on every render — including one caused by a keystroke — so
+  // an unbounded transcript makes typing slower the longer you have been
+  // talking. This is generous enough to scroll through comfortably.
+  const rendered = allBlocks.length > SCROLLBACK_BLOCKS ? allBlocks.slice(-SCROLLBACK_BLOCKS) : allBlocks;
+  const offset = allBlocks.length - rendered.length;
 
   return (
-    <Box flexDirection="column">
-      {/* Committed history → terminal scrollback (printed once, scrollable up). */}
-      <Static items={items}>
-        {(item, index) => {
-          if (item === BANNER_ITEM) return <Banner key="banner" />;
-          const prev = index > 1 ? (items[index - 1] as Block) : undefined;
-          const tight = item.kind === "tool" && !!prev && typeof prev !== "string" && prev.kind === "tool";
-          return <BlockView key={item.id} block={item} columns={width} tightTop={tight} />;
-        }}
-      </Static>
+    <Box flexDirection="column" height={frameHeight} overflow="hidden">
+      {/* flexShrink:0 on the banner and the chat wrapper below (NOT on anything
+          inside the chat viewport itself — that's untouched) protects against a
+          real, confirmed failure mode: for one frame right when the command
+          palette opens/resizes, chatRows is still computed from the PREVIOUS
+          footerHeight (measurement lags a render), so the frame's total content
+          can transiently exceed frameHeight. Without flexShrink:0 here, Yoga's
+          default (shrink to fit) silently compresses the banner or drops the
+          header text outright — verified with a bare Ink render. With it, the
+          excess instead clips cleanly from the BOTTOM of the frame (the tail of
+          the command palette), which is the harmless direction to lose content
+          in, and only for the one frame until the real footerHeight lands. */}
+      <Box flexShrink={0}>
+        <Banner width={width} mode={mode} modelConfig={session.current?.modelConfig} />
+      </Box>
 
-      {/* Live tail: the streaming block + any still-running tool. Stays tiny. */}
-      {tail.map((b, i) => {
-        const prev = i > 0 ? tail[i - 1] : committed[committed.length - 1];
-        const tight = b.kind === "tool" && !!prev && prev.kind === "tool";
-        return <BlockView key={b.id} block={b} columns={width} tightTop={tight} />;
-      })}
+      {/* flexGrow:1 + minHeight:1, NOT a computed height: the footer takes what it
+          needs and the chat takes the rest, decided in one Yoga pass. This is what
+          stops the tip line being clipped on the frame where the input box grows. */}
+      <Box ref={chatRef} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={1} overflow="hidden">
+        {/* A short conversation rests ON the footer instead of floating at the top
+            of the screen. This is a flex SPACER rather than a computed margin on
+            purpose: Yoga sizes it from the leftover space in the same pass that lays
+            the frame out, where a margin would have to be derived from `chatRows`,
+            which lags a frame and is unknown entirely on the first render. A render
+            probe rejected the margin version — it left a gap on a settled frame and
+            pushed the whole transcript past the clip edge on the first one.
 
-      {/* Persistent status line: spinner + timer while working,
-          "✻ Cooked for 1m 23s · N tokens" once finished. */}
-      <StatusLine busy={busy} startedAt={turnStart.current} lastMs={lastMs} usage={taskUsage} />
-
-      {/* Live count of background shells, just under the chat. */}
-      <BackgroundBar shells={session.current?.toolContext.backgroundShells?.running() ?? []} />
-
-      {/* Messages queued while busy — sent in order when the turn ends. */}
-      <QueuedBar queued={queued} />
-
-      {overlayView ? (
-        overlayView
-      ) : ready ? (
-        <PromptInput
-          onSubmit={onSend}
-          disabled={false}
-          placeholder={busy ? "type to queue a message…" : "say something…"}
-          width={width}
-          history={history}
-          completions={completions}
-          pathComplete={pathComplete.current}
-          onLargePaste={registerPaste}
-        />
-      ) : (
-        <Box paddingX={1}>
-          <Text dimColor>starting…</Text>
+            It shrinks to nothing the moment the transcript overflows, so the
+            scrolling path below is untouched. */}
+        {restsOnFooter ? <Box flexGrow={1} flexShrink={1} /> : null}
+        <Box flexDirection="column" flexShrink={0} marginTop={chatOffset}>
+          {/* The ref sits on a box with NO margin of its own, so the measured
+              height is the content's alone and cannot drift as it scrolls. */}
+          <Box ref={contentRef} flexDirection="column" flexShrink={0}>
+            {rendered.map((b, idx) => (
+              // flexShrink:0 is load-bearing — without it Yoga compresses an
+              // overfull column and silently drops rows out of the middle.
+              <Box key={b.id} flexShrink={0} flexDirection="column">
+                <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
+              </Box>
+            ))}
+          </Box>
         </Box>
-      )}
+      </Box>
 
-      {/* Interaction mode (Lightning / Architect / Sentinel) — sits BELOW the input,
-          a mode line below the input. shift-tab cycles it. Hidden while an overlay
-          owns the screen. */}
-      {overlayView ? null : <ModeBar mode={mode} />}
+      {/* Everything below is what footerHeight (above) measures — one Box, so a
+          single measurement covers the status line, the input box, and whatever
+          the command palette currently costs, whether that's open or closed. */}
+      <Box ref={footerRef} flexDirection="column" flexShrink={0}>
+        {/* Every direct child here gets its own flexShrink:0 too — same reason
+            as the banner/chat wrapper above: a footer that's itself allowed to
+            compress can eat its own border lines and merge rows together
+            (confirmed with a bare Ink render) instead of the clean bottom-clip
+            flexShrink:0 actually gives. */}
+        {/* Persistent status line: spinner + timer while working,
+            "✻ Cooked for 1m 23s · N tokens" once finished. */}
+        <Box flexShrink={0}>
+          <StatusLine busy={busy} startedAt={turnStart.current} lastMs={lastMs} usage={taskUsage} received={receivedTokens} />
+        </Box>
+
+        {/* Messages queued while busy — sent in order when the turn ends. */}
+        <Box flexShrink={0}>
+          <QueuedBar queued={queued} />
+        </Box>
+
+        <Box flexShrink={0} flexDirection="column">
+          {overlayView ? (
+            overlayView
+          ) : ready ? (
+            <PromptInput
+              onSubmit={onSend}
+              disabled={false}
+              placeholder={busy ? "type to queue a message…" : "say something…"}
+              width={width}
+              history={history}
+              completions={completions}
+              pathComplete={pathComplete.current}
+              onLargePaste={registerPaste}
+              maxMenuRows={maxMenuItems}
+              onMenuChange={onMenuChange}
+            />
+          ) : (
+            <Box paddingX={1}>
+              <Text dimColor>starting…</Text>
+            </Box>
+          )}
+        </Box>
+
+        {/* Below the input: the reference (NEWUI.txt) shows a "[BG] N running:
+            $ cmd1 • $ cmd2" line in exactly this spot while anything is
+            backgrounded, with the tip explicitly absent until it's done — not
+            a separate line above the input, and not shown alongside the tip. */}
+        {overlayView ? null : runningShells.length > 0 ? (
+          <Box flexShrink={0}>
+            <BackgroundBar shells={runningShells} />
+          </Box>
+        ) : (
+          <Box flexShrink={0}>
+            <Text dimColor>{"  tip: "}{tip}</Text>
+          </Box>
+        )}
+      </Box>
     </Box>
   );
 }
 
-// "banner" is a sentinel <Static> item (the one-time header) so it scrolls with
-// the transcript and prints exactly once, like any other committed block.
-const BANNER_ITEM = "__banner__" as const;
-type StaticItem = typeof BANNER_ITEM | Block;
+// The banner's own rows: the title line, the rule under it, and its bottom
+// margin. Subtracted from the frame so the chat gets exactly what's left —
+// see the layout comment at the render site.
+const BANNER_ROWS = 3;
+/** Always keep at least this much chat visible, even with the command palette open. */
+const MIN_CHAT_ROWS = 3;
+/** Conservative fixed footer cost besides the palette: status line + the
+ *  bordered input box + the tip line. */
+const FOOTER_BASE_ROWS = 6;
+/** The palette's own chrome: title, the "Tab completes" hint, top+bottom border. */
+const MENU_CHROME_ROWS = 4;
 
-function Banner() {
+/** Whether a block hugs the one above it — consecutive tool rows have no blank
+ *  line between them. Takes the FULL list, not the rendered slice, so the first
+ *  visible block still spaces correctly against the one scrolled off above it. */
+function isTight(all: readonly Block[], i: number): boolean {
+  const block = all[i];
+  const prev = i > 0 ? all[i - 1] : undefined;
+  return !!block && block.kind === "tool" && !!prev && prev.kind === "tool";
+}
+
+/** Lines PageUp/PageDown move per press. */
+const PAGE_LINES = 10;
+/** Lines one wheel notch moves. Three is the usual terminal step, and a flick
+ *  sends several reports, so it accumulates into a natural glide. */
+const WHEEL_LINES = 3;
+/** How much of the transcript stays scrollable. Every rendered block is laid out
+ *  on every render, so this bounds what typing costs in a long conversation. */
+const SCROLLBACK_BLOCKS = 150;
+
+function Banner({ width, mode, modelConfig }: { width: number; mode: ModeId; modelConfig?: ModelConfig }) {
+  const m = modeById(mode);
+  const left = `Mindweave${appVersion() ? ` v${appVersion()}` : ""}`;
+  // Three separate facts, so three separate colours. As one run they read as a single
+  // undifferentiated status string and the eye has to parse the pipes to find the part
+  // it wants. The mode keeps its own colour because that colour IS the mode's identity
+  // (it is the same one the mode uses everywhere else); the model gets the teal of the
+  // "reaching outside the machine" family; and the effort level is plain white, the
+  // brightest thing in the row, because it is what changes most often.
+  const modeText = `${m.name.toUpperCase()} MODE ON`;
+  const modelText = modelConfig ? modelLabel(modelConfig.model) : "";
+  const effortText = modelConfig ? thinkLabel(modelConfig).toUpperCase() : "";
+  const right = modelConfig ? `${modeText} | ${modelText} | ${effortText}` : modeText;
+  // The title row gets a 1-col inset (same idea as the box's own paddingX),
+  // but the rule spans the FULL width, edge to edge — same as the box's
+  // border below it, so the two anchor the screen the same way instead of
+  // the header floating in from the sides while the box touches both edges.
+  const innerWidth = Math.max(1, width - 2);
+  const gap = Math.max(1, innerWidth - left.length - right.length);
   return (
-    <Box marginBottom={1}>
-      <Text bold color="yellow">Mindweave</Text>
-      <Text dimColor>{versionLabel()}</Text>
+    <Box flexDirection="column" marginBottom={1}>
+      <Box paddingX={1}>
+        <Text bold color="yellow">{left}</Text>
+        <Text>{" ".repeat(gap)}</Text>
+        <Text dimColor color={m.color}>{modeText}</Text>
+        {modelConfig ? (
+          <>
+            <Text dimColor>{" | "}</Text>
+            <Text color={KIND_COLOR.websearch}>{modelText}</Text>
+            <Text dimColor>{" | "}</Text>
+            <Text>{effortText}</Text>
+          </>
+        ) : null}
+      </Box>
+      <Text dimColor>{"─".repeat(width)}</Text>
     </Box>
   );
 }
 
 /**
- * Terminal width that updates on resize — DEBOUNCED. A drag-resize fires a flood
+ * Terminal size that updates on resize — DEBOUNCED. A drag-resize fires a flood
  * of resize events; re-rendering on each one makes a slow host (legacy cmd.exe)
  * leave stale copies of the live region in the scrollback. Updating only once the
  * resize settles (~150ms) collapses that to a single clean re-layout.
+ *
+ * Rows matter now in a way they didn't before alt-screen: the outer frame
+ * is height-bound to this value (the middle chat region flexGrows to fill
+ * whatever the header/footer don't use), so a stale row count leaves dead
+ * space at the bottom instead of the frame reaching the terminal's actual edge.
  */
-function useTerminalWidth(): number {
+function useTerminalSize(): { columns: number; rows: number } {
   const { stdout } = useStdout();
-  const [cols, setCols] = useState(stdout?.columns ?? 80);
+  const [size, setSize] = useState({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
   useEffect(() => {
     if (!stdout) return;
-    let timer: ReturnType<typeof setTimeout>;
+
+    const read = () => setSize((prev) => {
+      const next = { columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 };
+      return next.columns === prev.columns && next.rows === prev.rows ? prev : next;
+    });
+
+    // The 'resize' event is NOT reliable on native Windows consoles — Node has a
+    // long-standing open issue (nodejs/node#13197): unlike Unix's SIGWINCH, Windows
+    // has no real signal for it, so the event can simply never fire. Relying on it
+    // alone means a wrong initial read (see below) can stick forever until the user
+    // happens to trigger whatever DOES make it fire. So this polls too — cheap (two
+    // integer reads, ~4x/sec) and it's the standard workaround for that exact gap,
+    // not a hack: it's what a resize event is supposed to give us, gotten a
+    // different way when the event can't be trusted to arrive at all.
+    let debounce: ReturnType<typeof setTimeout>;
     const onResize = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => setCols(stdout.columns ?? 80), 150);
+      clearTimeout(debounce);
+      debounce = setTimeout(read, 150);
     };
     stdout.on("resize", onResize);
+    const poll = setInterval(read, 250);
+
+    // The size read at THIS exact instant can be stale too: entering alt-screen
+    // (a raw escape code written before Ink even mounts, see altScreen.ts) makes
+    // the terminal reconfigure its buffer, and querying dimensions mid-reconfigure
+    // can return the wrong ones. One re-read shortly after mount, once that's
+    // settled, catches a wrong FIRST render that the poll above would otherwise
+    // take up to 250ms to correct.
+    const settle = setTimeout(read, 60);
+
     return () => {
-      clearTimeout(timer);
+      clearTimeout(debounce);
+      clearTimeout(settle);
+      clearInterval(poll);
       stdout.off("resize", onResize);
     };
   }, [stdout]);
-  return cols;
+  return size;
 }
 
 // The built-in slash commands offered by the input's autocomplete. Project skills
@@ -1680,6 +2169,7 @@ function StatusLine({
   startedAt,
   lastMs,
   usage,
+  received,
 }: {
   busy: boolean;
   startedAt: number | null;
@@ -1687,6 +2177,12 @@ function StatusLine({
   /** The task's summary, known only once the turn ends. Null while working — no
    *  number is reliable mid-stream. */
   usage: TaskUsage | null;
+  /** Tokens RECEIVED so far this turn — the running total of completion tokens.
+   *  Deliberately not the grand total: a prompt is re-sent (and mostly re-cached) on
+   *  every step, so summing prompt tokens counts the same text again per tool round
+   *  and the number climbs for reasons the user cannot see. What has come back is
+   *  additive, so it only ever means one thing. */
+  received: () => number;
 }) {
   // A once-a-second tick, only while busy, so the elapsed timer advances. No
   // animation — the changing seconds are the only motion, which keeps it calm.
@@ -1697,18 +2193,38 @@ function StatusLine({
     return () => clearInterval(id);
   }, [busy]);
 
-  const dot = busy ? <Text color="cyan">●</Text> : <Text dimColor>●</Text>;
-
   let label = null;
   if (busy && startedAt != null) {
-    // Working: timer only. No numbers — none would be accurate yet.
-    label = <Text> Working… ({fmtElapsed(Math.floor((Date.now() - startedAt) / 1000))})</Text>;
+    // `< Scampering… < 45s · ↓ 1.8k tokens >` — the reference shape. The angle brackets
+    // are what make it read as a live gauge rather than a sentence, and the verb is
+    // held for the whole turn (see workingVerb) so the line does not flicker between
+    // words while the seconds tick.
+    const secs = Math.floor((Date.now() - startedAt) / 1000);
+    const got = received();
+    label = (
+      <Text>
+        {" "}
+        {workingVerb(startedAt)}…{"  "}
+        <Text dimColor>{"< "}{fmtElapsed(secs)}{got > 0 ? ` · ↓ ${formatTokens(got)} tokens` : ""}{" >"}</Text>
+      </Text>
+    );
   } else if (lastMs != null) {
-    // Settled receipt: elapsed time and the task's real token total, dim so it recedes
-    // once the answer is on screen but stays present. Shown at once, no count-up.
-    const meter = usage ? ` · ${formatTokens(usage.totalTokens)} tokens` : "";
+    // Settled receipt: elapsed time and the turn's real token cost, shown at once,
+    // no count-up.
+    //
+    // `billedTokens`, NOT `totalTokens`. The prompt is re-sent every tool round, so
+    // a per-call total counts the same text once per step and the figure grows with
+    // tool use rather than with work — a five-step turn over a 30K context read
+    // ~150K. Misses plus output counts each token exactly once.
+    const meter = usage ? ` · ${formatTokens(usage.billedTokens)} tokens` : "";
     label = <Text bold> Worked for {fmtElapsed(Math.round(lastMs / 1000))}{meter}</Text>;
   }
+
+  // A fresh session that has never run a turn has nothing to report — no dot,
+  // no line at all, rather than a marker floating with nothing beside it.
+  if (!busy && label === null) return null;
+
+  const dot = busy ? <Text color="cyan">●</Text> : <Text dimColor>●</Text>;
 
   return (
     <Box marginTop={1} marginBottom={0}>
@@ -1778,43 +2294,34 @@ export function mcpDetail(server: McpStatus, blocked = 0): string {
  * command + elapsed; several collapse to a count. It self-ticks once a second while
  * anything runs (so the timer moves), and renders nothing when idle.
  */
+/** `[BG] 2 running: $ npm run dev (3000) • $ docker compose up` — every running
+ *  command, not just the first or a bare count, each with the port it announced.
+ *  The port comes from the process's own startup line (see detectPort), so it is
+ *  shown only when the server actually said where it is listening. */
 function BackgroundBar({ shells }: { shells: ShellInfo[] }) {
-  const [, force] = useState(0);
-  useEffect(() => {
-    if (shells.length === 0) return;
-    const id = setInterval(() => force((x) => x + 1), 1000);
-    return () => clearInterval(id);
-  }, [shells.length]);
-
   if (shells.length === 0) return null;
-  const head = shells[0]!;
-  const label =
-    shells.length === 1
-      ? `shell #${head.id} running — ${clipCmd(head.command)} (${shellElapsed(head)})`
-      : `${shells.length} shells running`;
+  const cmds = shells.map((s) => `$ ${clipCmd(s.command)}${s.port ? ` (${s.port})` : ""}`).join(" • ");
   return (
     <Box>
-      <Text color="yellow">▶ </Text>
-      <Text dimColor wrap="truncate-end">{label}</Text>
+      <Text color="yellow">{"[BG] "}</Text>
+      <Text dimColor wrap="truncate-end">{`${shells.length} running: ${cmds}`}</Text>
     </Box>
   );
 }
 
-/**
- * The under-the-chat mode indicator: the current mode's icon + name (colored),
- * its one-line descriptor, and the shift-tab hint. Always visible so the mode
- * reads at a glance — the point of an always-on indicator. Cycled with shift-tab.
- */
-function ModeBar({ mode }: { mode: ModeId }) {
-  const m = modeById(mode);
-  return (
-    <Box>
-      <Text color={m.color} bold>{"⏵⏵ "}{m.name}</Text>
-      <Text dimColor> · {m.descriptor}</Text>
-      <Text dimColor>{"  (shift+tab to cycle)"}</Text>
-    </Box>
-  );
-}
+// One short, useful line rendered inside the input box (see PromptInput's
+// `tip` prop) — picked once per session, not rewritten every render. The
+// mode/model/thinking readout already lives in the header, so this slot is
+// free for the shift-tab hint (nothing else states it anymore) and a few of
+// the less-obvious commands.
+const TIPS = [
+  "shift+tab cycles Lightning / Architect / Sentinel",
+  "/help lists every command",
+  "/model switches which model answers, /think sets its reasoning level",
+  "@ mentions a file to attach it",
+  "esc interrupts a running turn",
+  "/undo restores the last checkpoint",
+];
 
 /** Messages typed while Mindweave is working, waiting to be sent when the turn ends. */
 function QueuedBar({ queued }: { queued: string[] }) {
@@ -1826,6 +2333,16 @@ function QueuedBar({ queued }: { queued: string[] }) {
       ))}
     </Box>
   );
+}
+
+/**
+ * Whether some OTHER installed provider has a key, so `/provider` is worth
+ * suggesting. With a single key configured there is nothing to switch to, and
+ * offering the command is just noise on a screen the user is already unhappy with.
+ */
+function otherProviderHasKey(currentModel: string): boolean {
+  const current = manifestForModel(currentModel).id;
+  return allProviders().some((p) => p.id !== current && hasApiKey(p.apiKeyEnv));
 }
 
 function errText(error: unknown): string {

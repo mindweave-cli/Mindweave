@@ -7,7 +7,7 @@ import { promises as fs, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { outlineTool, definitionTool, referencesTool, relevantTool } from "./codeIntel.js";
-import { grepTool } from "./grep.js";
+import { grepDef } from "./grep.js";
 import { readSymbolTool } from "./readSymbol.js";
 import { CodeChassis } from "../alternator/chassis/index.js";
 import { CodeGraph } from "../alternator/chassis/graph.js";
@@ -144,8 +144,8 @@ test("references' stated cap is the real one", () => {
 test("grep's pointer at references does not overclaim", () => {
   // grep used to say references would not match "an unrelated file", which is false
   // at name-level. The two descriptions have to agree about what references can do.
-  assert.doesNotMatch(grepTool.description, /unrelated file/i);
-  assert.match(grepTool.description, /name-level answer/i);
+  assert.doesNotMatch(grepDef.description, /unrelated file/i);
+  assert.match(grepDef.description, /name-level answer/i);
 });
 
 // ── definition: every claim, pinned to observed behaviour ────────────────────

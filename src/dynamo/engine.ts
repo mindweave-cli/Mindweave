@@ -16,9 +16,10 @@
 import { activeDriver, ensureDriver, manifestForModel } from "../drivers/registry.js";
 import type { ChatMessage, ImagePart, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
-import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, narrationFault, narrationNudge, VERIFY_NUDGE } from "./verify.js";
-import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, interpretGuardChoice } from "./guard.js";
-import { findTool, toolSchemas } from "../tools/registry.js";
+import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, narrationFault, narrationNudge, unknownToolError, replyFault, replyRewrite, VERIFY_NUDGE } from "./verify.js";
+import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, guardDetail, interpretGuardChoice } from "./guard.js";
+import { findTool, toolSchemas, TOOLS } from "../tools/registry.js";
+import { deferredToolsIndex } from "../tools/deferredNative.js";
 import { commandShellLabel } from "../tools/runCommand.js";
 import { isInteractiveServerCommand } from "../tools/backgroundShells.js";
 import { basePrompt } from "./prompt.js";
@@ -28,8 +29,8 @@ import { relativize, resolvePath, rootLabel } from "../tools/paths.js";
 import { todoListText } from "../tools/todo.js";
 import { renderRules, renderSkillCatalog } from "../governor/index.js";
 import type { Session, Entry, ToolCallRecord } from "../memory/types.js";
-import { forkSession } from "../memory/session.js";
-import { buildWorkingSet } from "../memory/workingSet.js";
+import { forkSession, reloadProjectMemory } from "../memory/session.js";
+import { buildWorkingSet, selectActiveFiles } from "../memory/workingSet.js";
 import { fullReadPaths } from "../memory/presence.js";
 import {
   KEEP_LAST_N,
@@ -43,7 +44,14 @@ import {
   spliceSummary,
   usableSummary,
 } from "../memory/compaction.js";
-import { autoCompactThreshold, microCompactThreshold, measuredOverhead } from "./contextWindow.js";
+import { loadPlanArtifact, renderPlanBlock, planDivergenceStop } from "./planArtifact.js";
+import {
+  autoCompactThreshold,
+  microCompactThreshold,
+  measuredOverhead,
+  sharpContextWindow,
+  type CompactionReport,
+} from "./contextWindow.js";
 import { renderSessionMemory, shouldUpdateSessionMemory, updateSessionMemory } from "../memory/sessionMemory.js";
 
 /** Stop retrying autocompact after this many consecutive failures in a session, so a
@@ -146,6 +154,16 @@ ${memoryIndex || "(empty — nothing has been saved to memory yet)"}
 </memory_index>`;
   }
 
+  // The deferred pool's index. Roughly forty tokens standing in for several hundred of
+  // schema, and it earns them: without it a deferred tool is indistinguishable from a
+  // missing feature, and the model routes around a capability it actually has.
+  const deferred = deferredToolsIndex();
+  if (deferred) {
+    prompt += `
+
+${deferred}`;
+  }
+
   return prompt;
 }
 
@@ -163,6 +181,9 @@ export function volatileContext(
   workingFiles: string,
   planMode: boolean,
   sessionMemory: string,
+  approvedPlan = "",
+  /** Whether the ranked map was narrowed to files the model has actually worked on. */
+  mapPersonalized = true,
 ): string {
   const parts: string[] = [];
   // Standing rules FIRST in the volatile tail. They're rebuilt every turn here (not
@@ -175,6 +196,13 @@ export function volatileContext(
         "override your own defaults and habits. Do not violate them or work around them:\n" +
         `<rules>\n${rules}\n</rules>`,
     );
+  }
+  // The approved plan is standing knowledge: rendered fresh here every request
+  // (never from the transcript), which is what makes it immune to compaction. It
+  // binds EXECUTION turns; while planning, the model is deliberately not anchored
+  // to the previous agreement — the artifact stays on disk if it wants history.
+  if (approvedPlan && !planMode) {
+    parts.push(approvedPlan);
   }
   // Plan mode (Architect) lives in the VOLATILE tail, not the cached prefix, so
   // toggling it with shift-tab never invalidates the cached system prompt.
@@ -195,8 +223,17 @@ export function volatileContext(
   const memBlock = renderSessionMemory(sessionMemory);
   if (memBlock) parts.push(memBlock);
   if (relevantMap) {
+    // Two different things wear the same block. Once files have been read the ranking is
+    // personalized to them and "most relevant to your current focus" is true. Before
+    // that there is no focus to rank against, so it is whatever the graph ranks highest
+    // overall — on a frontend task in a Tauri project, twelve Rust file-IO functions,
+    // presented as the code most relevant to what the model was about to do. Say which
+    // one this is rather than letting the model act on a claim we cannot support.
     parts.push(
-      "Code most relevant to your current focus (from the code map; use the code-map tools for more):\n" +
+      (mapPersonalized
+        ? "Code most relevant to your current focus (from the code map; use the code-map tools for more):\n"
+        : "The most-connected symbols in this project (from the code map). Nothing has been read yet this " +
+          "session, so this is NOT yet narrowed to your task — treat it as a starting point, not an answer:\n") +
         `<relevant_code>\n${relevantMap}\n</relevant_code>`,
     );
   }
@@ -274,14 +311,22 @@ function governancePrompt(session: Session): GovernancePrompt {
 // relevance feed). Personalized to the files recently read. A pure in-memory
 // chassis query — no I/O, no model call — so the engine stays filesystem-pure.
 const AUTO_MAP_LIMIT = 12;
+/** How many recently-worked-on files personalize the ranking. */
+const AUTO_MAP_FOCUS = 5;
 
-async function relevantMapText(session: Session): Promise<string> {
+async function relevantMapText(session: Session): Promise<{ text: string; personalized: boolean }> {
   const chassis = session.toolContext.chassis;
-  if (!chassis || !chassis.status().ready) return "";
-  const focus = [...session.toolContext.reads.keys()].slice(-5);
+  if (!chassis || !chassis.status().ready) return { text: "", personalized: false };
+  // By RECENCY, which is not what iterating the ledger gives. `ctx.reads` is a Map, and
+  // neither `touch()` (mutates the record in place) nor `recordWrite()` (re-sets an
+  // existing key) changes insertion order — so slicing the key list returned the five
+  // files first SEEN, not the five most recently worked on. In a session that keeps
+  // returning to one file, that file dropped out of its own relevance feed as soon as
+  // five others had been opened. `selectActiveFiles` already sorts the right way.
+  const focus = selectActiveFiles(session.toolContext.reads, AUTO_MAP_FOCUS).map((f) => f.path);
   const ranked = await chassis.relevant(focus, AUTO_MAP_LIMIT);
-  if (ranked.length === 0) return "";
-  return ranked
+  if (ranked.length === 0) return { text: "", personalized: false };
+  const text = ranked
     .map((r) => {
       const s = r.symbol;
       const where = `${relativize(session.toolContext, s.file)}:${s.line}`;
@@ -290,6 +335,7 @@ async function relevantMapText(session: Session): Promise<string> {
       return `- ${s.name} (${s.kind}) ${where}${doc}`;
     })
     .join("\n");
+  return { text, personalized: focus.length > 0 };
 }
 
 /** A positive integer from the environment, or the fallback. */
@@ -351,6 +397,10 @@ const REPEAT_FAIL_LIMIT = envInt("MINDWEAVE_REPEAT_FAIL_LIMIT", 3);
 export type EngineEvent =
   | { type: "reasoning"; delta: string }
   | { type: "text"; delta: string }
+  /** The draft reply was rejected by the reply gate — discard whatever text has been
+   *  buffered for this turn's reply, because a rewrite is about to stream in its place.
+   *  Nothing has been rendered yet (text reveals whole, on seal), so this is invisible. */
+  | { type: "replyReset" }
   // `agent` (a sub-agent id) tags a tool event that came from a spawned worker, so the
   // UI can nest it under that worker's row instead of the main stream. Absent on the
   // lead agent's own calls.
@@ -363,10 +413,17 @@ export type EngineEvent =
       summary: string;
       error: boolean;
       detail?: string;
+      /** See ToolResult.detailKind — whether `detail` is a real +/- diff (colour it)
+       *  or ordinary text (do not). Absent means text. */
+      detailKind?: "diff" | "text" | "shell";
       agent?: string;
       /** Display-only: a failure the model resolves itself, so the UI drops the row
        *  rather than painting an error the user can do nothing about. See ToolResult.quiet. */
       quiet?: boolean;
+      /** See ToolResult.displayKind/displayName — a result-driven override of the
+       *  row's category/name (a governance decision, not an ordinary outcome). */
+      displayKind?: import("../cli/toolDisplay.js").ToolKind;
+      displayName?: string;
     }
   // A spawned sub-agent's lifecycle: `start` when it's dispatched (with its task +
   // read-only flag), `end` when it reports back. Between them, its own tool events
@@ -380,6 +437,15 @@ export interface RespondOptions {
    *  UI. `opts.error` marks a failed tool so the UI can flag it; `opts.context`
    *  marks a context-housekeeping line (compaction) so the UI sets it apart. */
   onActivity?: (line: string, opts?: { error?: boolean; context?: boolean }) => void;
+  /**
+   * A compaction pass finished, with what it cost and recovered.
+   *
+   * Separate from `onActivity` because it is numbers, not a line of text — the client
+   * draws its own bars from them, and a pre-formatted string would force the engine to
+   * know about terminal width. Automatic and manual compactions both report here, so a
+   * user who never typed /compact still learns their conversation was summarized.
+   */
+  onCompaction?: (report: CompactionReport) => void;
   /** Called for every live event of the turn (deltas, tool lifecycle, usage). The
    *  streaming UI renders from these; omit it for a non-interactive caller. */
   onEvent?: (event: EngineEvent) => void;
@@ -464,7 +530,7 @@ async function loadImagePayloads(session: Session): Promise<Map<string, string>>
 
 function buildRequest(
   session: Session,
-  relevantMap: string,
+  relevantMap: { text: string; personalized: boolean },
   workingFiles: string,
   bgEvents: string[],
   tools: ReturnType<typeof toolSchemas>,
@@ -520,11 +586,19 @@ function buildRequest(
     messages,
     context: volatileContext(
       gov.rules,
-      relevantMap,
+      relevantMap.text,
       todoListText(session.toolContext),
       workingFiles,
       session.toolContext.planMode ?? false,
       session.sessionMemory ?? "",
+      session.toolContext.activePlan
+        ? renderPlanBlock({
+            plan: session.toolContext.activePlan,
+            approvedAt: session.toolContext.activePlanApprovedAt ?? "",
+            mode: "lightning",
+          })
+        : "",
+      relevantMap.personalized,
     ),
     tools,
     model: session.modelConfig,
@@ -630,6 +704,16 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // every subsequent turn, and it keeps `activeDriver()` safe to call synchronously
   // from here down (including from inside a tool).
   await ensureDriver(session.modelConfig.model);
+
+  // Resume an approved plan from disk, once per session (undefined = unchecked).
+  // A plan approved last session is still the agreed scope this session — that is
+  // the point of it being an artifact — and the user deleting the file (or its
+  // status flipping) is a complete off switch, honored here by loading nothing.
+  if (session.toolContext.activePlan === undefined) {
+    const artifact = await loadPlanArtifact(session.cwd).catch(() => null);
+    session.toolContext.activePlan = artifact?.plan ?? "";
+    session.toolContext.activePlanApprovedAt = artifact?.approvedAt;
+  }
   const planMode = session.toolContext.planMode ?? false;
   // Built-in tools plus whatever the connected MCP servers offer. An MCP tool is
   // dispatched, displayed and gated by exactly the same machinery as a built-in — the
@@ -661,6 +745,13 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       ...toolSchemas({
         planMode: session.toolContext.planMode ?? false,
         readOnlyOnly: session.toolContext.readOnlyTools,
+        // Deferred native tools appear once find_tools has activated them, and then
+        // stay for the session — same sticky contract as the MCP pool above.
+        activated: session.toolContext.activatedTools,
+        // Lets `relevantWhen` tools (use_skill) check the live session, so a tool with
+        // nothing to act on is not advertised and a skill created mid-session brings
+        // it back next turn.
+        ctx: session.toolContext,
       }),
       ...(mcpTurn?.exposedSchemas() ?? []),
     ];
@@ -752,6 +843,11 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   let pendingNarrationFault: ReturnType<typeof narrationFault> = null;
   let lastFailSig: string | null = null;
   let lastFailOutput = "";
+  // Reply gate: ONE rewrite per turn. `overlongReplyAt` is where the rejected draft sits
+  // in the transcript, so it and its instruction can be spliced back out once the
+  // rewrite lands — history should hold what the user actually saw, not the draft.
+  let replyRegated = false;
+  let overlongReplyAt: number | null = null;
 
   // Seal whatever files this turn edits into one restorable checkpoint (/undo),
   // no matter how the turn ends (finish, pause, interrupt, throw). Labeled with
@@ -771,7 +867,18 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     if (!options.signal?.aborted) await sweepSessionMemory(session, options);
     return reply;
   } finally {
+    const before = session.toolContext.checkpoints?.list().length ?? 0;
     session.toolContext.checkpoints?.seal(turnLabel);
+    // Say that a restore point exists. It was made silently, so `/undo` was a feature
+    // you had to already know about — and the moment to learn it is the moment there is
+    // something to undo, not after you have lost it.
+    const sealed = session.toolContext.checkpoints?.list()[0];
+    if (sealed && (session.toolContext.checkpoints?.list().length ?? 0) > before) {
+      options.onActivity?.(
+        `Checkpoint sealed · ${sealed.files} file${sealed.files === 1 ? "" : "s"} · /undo restores it`,
+        { context: true },
+      );
+    }
   }
 
   // The turn's model↔tool loop. Kept as a closure so the try/finally above owns
@@ -863,6 +970,30 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         session.transcript.push({ role: "user", content: VERIFY_NUDGE, synthetic: true });
         continue;
       }
+
+      // Reply gate. The prompt has asked for this budget in three wordings and a model
+      // mid-flow still answers a finished job with a page, so here it is enforced rather
+      // than requested: the draft is rejected, the model rewrites it, and the rewrite is
+      // what the user sees. ONE retry — a gate that can fire twice is a loop.
+      if (!replyRegated) {
+        const fault = replyFault(content, mutatedThisTurn);
+        if (fault) {
+          replyRegated = true;
+          overlongReplyAt = session.transcript.length - 1; // the draft pushed just above
+          session.transcript.push({ role: "user", content: replyRewrite(fault), synthetic: true });
+          // The draft has been streaming into the UI's buffer, unrendered. Drop it, or
+          // the rewrite would append to it and the user would read both.
+          options.onEvent?.({ type: "replyReset" });
+          continue;
+        }
+      }
+      // The rewrite landed. Drop the rejected draft and its instruction so what is saved
+      // (and resumed, and compacted) is the answer that was actually given.
+      if (overlongReplyAt !== null) {
+        session.transcript.splice(overlongReplyAt, 2);
+        overlongReplyAt = null;
+        await options.persist?.();
+      }
       return content;
     }
 
@@ -925,7 +1056,12 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       }
       const tool = lookup(call.name);
       if (!tool) {
-        return { call, output: `Error: unknown tool '${call.name}'.`, summary: `unknown tool '${call.name}'`, isError: true, detail: undefined as string | undefined, fullContentOf: undefined as string | undefined };
+        // A name the model invented. The row renders as "Unknown tool(index_results)"
+        // (see toolDisplay), and the model gets the near misses so it can correct on
+        // the next step instead of guessing again at a bare "unknown tool".
+        // Built-ins only: an MCP tool is always `mcp__server__tool`, which is never a
+        // near miss for a plain name, so including them would only add noise.
+        return { call, output: unknownToolError(call.name, TOOLS.map((t) => t.name)), summary: `unknown tool '${call.name}'`, isError: true, detail: undefined as string | undefined, fullContentOf: undefined as string | undefined };
       }
       // Belt-and-suspenders for plan mode: the schema filter already hides mutating
       // tools, but if the model calls one anyway, refuse it instead of running it.
@@ -957,8 +1093,11 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       const ctx = session.toolContext;
       if (!tool.readOnly && ctx.guarded && !ctx.guardAllowAll) {
         const args = parseArgs(call.arguments);
+        // The question is one line; WHAT is about to happen rides as detail, which the
+        // CLI prints into the transcript. A gate the user cannot read is a gate they
+        // learn to wave through.
         const choice = ctx.requestApproval
-          ? await ctx.requestApproval(guardQuestion(call.name, args), [...GUARD_OPTIONS])
+          ? await ctx.requestApproval(guardQuestion(), [...GUARD_OPTIONS], guardDetail(call.name, args), "Permission Request")
           : undefined;
         const decision = interpretGuardChoice(choice);
         if (decision === "refuse") {
@@ -967,7 +1106,19 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         if (decision === "allow-all") ctx.guardAllowAll = true;
       }
       const result = await tool.execute(parseArgs(call.arguments), session.toolContext);
-      return { call, output: result.output, summary: result.summary, isError: result.isError, detail: result.detail, quiet: result.quiet, fullContentOf: result.fullContentOf, images: result.images };
+      return {
+        call,
+        output: result.output,
+        summary: result.summary,
+        isError: result.isError,
+        detail: result.detail,
+        detailKind: result.detailKind,
+        quiet: result.quiet,
+        fullContentOf: result.fullContentOf,
+        images: result.images,
+        displayKind: result.displayKind,
+        displayName: result.displayName,
+      };
     };
 
     // Emit each tool's END the instant IT finishes — not batched after the whole
@@ -984,7 +1135,10 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         summary: r.summary ?? r.call.name,
         error: r.isError ?? false,
         detail: r.detail,
+        ...(r.detailKind ? { detailKind: r.detailKind } : {}),
         ...(r.quiet ? { quiet: true } : {}),
+        ...(r.displayKind ? { displayKind: r.displayKind } : {}),
+        ...(r.displayName ? { displayName: r.displayName } : {}),
       });
       return r;
     };
@@ -1006,6 +1160,14 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     for (const r of results) {
       if (!r.isError && mutationNeedsVerification(r.call.name, parseArgs(r.call.arguments))) mutatedThisTurn = true;
       if (!r.isError && isVerification(r.call.name, parseArgs(r.call.arguments))) verifiedThisTurn = true;
+      // A write to MINDWEAVE.md means the frozen copy in the cached system prompt is
+      // behind the file. Noted, NOT acted on: re-reading it here would rewrite the
+      // system prompt string and throw away the whole cached prefix mid-turn. The
+      // model just wrote the content so it already has it; the prefix catches up at
+      // the next compaction, where the cache is being discarded anyway.
+      if (!r.isError && touchesProjectMemory(r.call.name, parseArgs(r.call.arguments))) {
+        session.projectMemoryStale = true;
+      }
     }
 
     for (const result of results) {
@@ -1116,15 +1278,26 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       if (action === "stop") return pauseForRepeatedFailure(session, options, lastFailOutput);
       if (action === "nudge") {
         repeatFailNudged = true;
+        const failedLabel = failed
+          ? failedActionLabel(failed.call.name, parseArgs(failed.call.arguments))
+          : "the same step";
+        // A repeat failure DURING an approved plan is the mechanical divergence
+        // signal: the agreed step is not working. The interrupt then orders a stop
+        // and a return to planning, never a sideways improvisation — that is the
+        // plan contract, enforced at the one point the engine can detect it.
+        const inApprovedWork =
+          !!session.toolContext.activePlan && !(session.toolContext.planMode ?? false);
         session.transcript.push({
           role: "user",
-          content: repeatFailureNudge({
-            attempts: repeatFailStreak,
-            action: failed ? failedActionLabel(failed.call.name, parseArgs(failed.call.arguments)) : "the same step",
-            error: firstErrorLine(lastFailOutput),
-            // Only when `cd` has actually moved us — otherwise it's noise.
-            cwd: session.toolContext.cwd !== session.cwd ? session.toolContext.cwd : undefined,
-          }),
+          content: inApprovedWork
+            ? planDivergenceStop(failedLabel)
+            : repeatFailureNudge({
+                attempts: repeatFailStreak,
+                action: failedLabel,
+                error: firstErrorLine(lastFailOutput),
+                // Only when `cd` has actually moved us — otherwise it's noise.
+                cwd: session.toolContext.cwd !== session.cwd ? session.toolContext.cwd : undefined,
+              }),
           synthetic: true,
         });
         await options.persist?.();
@@ -1136,7 +1309,7 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     }
 
     // Batching gate: it keeps editing ONE file a single change at a time, where one
-    // multi_edit call belonged. Mechanical rather than a line in the tool description,
+    // edit call belonged. Mechanical rather than a line in the tool description,
     // because the same task with the same descriptions routes correctly on one run and
     // not the next — prose biases a choice, it cannot make it hold, and this has to hold
     // on every provider. Nudge once and let the turn continue; nothing is blocked, since
@@ -1327,6 +1500,35 @@ async function sweepSessionMemory(session: Session, options: RespondOptions): Pr
   await options.persist?.(); // durable: the notes sidecar is written by the persister
 }
 
+/**
+ * How much of the context window is in use, in tokens.
+ *
+ * ONE definition, because two would be worse than none: the compaction thresholds fire
+ * on this number and the bars shown to the user are drawn from it, so if the estimate
+ * is off, the display is wrong in exactly the way the decision was — rather than
+ * disagreeing with the machinery it is supposed to explain.
+ *
+ * Everything outside the transcript counts too, because this is about how full the
+ * CONTEXT is, not how long the transcript is. Once a call has reported usage we know
+ * that overhead exactly (system prompt + every tool schema + working set + relevance
+ * map + todos + governor); until then, fall back to the one piece we could always
+ * estimate. MCP schemas are inside the measured figure, so they are only added in the
+ * fallback — counting both would double them.
+ *
+ * A measurement taken on a DIFFERENT model does not transfer: switching provider
+ * changes the tool-schema serialisation and the prompt shape. Falling back is the safe
+ * direction — it under-counts for one call, which fires the bars early rather than
+ * late, and the next call re-measures.
+ */
+function contextUsed(session: Session): number {
+  const measured = session.contextOverhead;
+  const overhead =
+    measured && measured.model === session.modelConfig.model
+      ? measured.tokens
+      : (session.toolContext.mcp?.estimatedTokens() ?? 0);
+  return estimateEntriesTokens(session.transcript) + overhead;
+}
+
 async function maybeCompact(session: Session, options: RespondOptions): Promise<void> {
   const model = session.modelConfig.model;
   // Model-anchored bars (env still overrides), so the thresholds are right per model
@@ -1350,10 +1552,7 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
   // changes the tool-schema serialisation and the prompt shape. Falling back is the
   // safe direction — it under-counts for one call, which fires the bars early rather
   // than late, and the next call re-measures.
-  const measured = session.contextOverhead;
-  const overhead =
-    measured && measured.model === model ? measured.tokens : (session.toolContext.mcp?.estimatedTokens() ?? 0);
-  const used = () => estimateEntriesTokens(session.transcript) + overhead;
+  const used = () => contextUsed(session);
 
   if (used() >= microBar) {
     // Assigned unconditionally, on purpose. Gating this on a hand-picked subset of the
@@ -1362,7 +1561,17 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
     // remember to add itself here or be silently discarded. `microcompact` already
     // returns a copy when it changed nothing, so taking the result always is both
     // correct and the shape that cannot rot.
-    session.transcript = microcompact(session.transcript).entries;
+    // `workingSetFull` is the set of files the <working_files> block is currently
+    // carrying WHOLE. Their transcript copies are the redundant half of a double
+    // representation, so this pass is allowed to clear them even inside the recent
+    // window that is otherwise protected — the model still sees them, fresher, at the
+    // boundary. Empty on the first step of a session, which is correct: nothing has
+    // been superseded yet.
+    session.transcript = microcompact(
+      session.transcript,
+      undefined,
+      session.toolContext.workingSetFull,
+    ).entries;
     // Silent by design — trimming stale context is background machinery.
   }
   // Circuit-breaker: once autocompact has failed MAX_COMPACT_FAILURES times this
@@ -1390,8 +1599,9 @@ export async function compactNow(session: Session, options: RespondOptions = {})
  */
 async function autocompact(session: Session, options: RespondOptions): Promise<void> {
   if (session.transcript.length === 0) return;
-  // Automatic compaction is silent (background machinery). The user-invoked /compact
-  // path shows its own progress line from the command handler.
+  // Measured BEFORE the summarizer runs, with the same arithmetic the thresholds use,
+  // so the bar the user sees is the number the system actually acted on.
+  const before = contextUsed(session);
 
   const fail = () => {
     // Keep the full transcript rather than lose it, and count the failure so the
@@ -1412,6 +1622,11 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
     });
     // The reply is untrusted: a cut-off or all-scratchpad summary must not be allowed
     // to replace the conversation. See usableSummary.
+    // Compaction is not free, and the user did not ask for it. Reporting its usage
+    // is what keeps the meter honest: a turn that happened to trip the bar spends
+    // a whole extra summarisation call, and leaving that out made the figure short
+    // by exactly the work nobody could see.
+    if (turn.usage) options.onEvent?.({ type: "usage", ...turn.usage });
     const usable = usableSummary(turn.content, turn.stop);
     if (!usable) return void fail();
     summary = usable;
@@ -1424,6 +1639,35 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
   // injects the current contents of the files being worked on in the volatile tail
   // every step, so nothing the model was mid-edit on is lost across the summary.
   session.transcript = spliceSummary(session.transcript, summary, KEEP_LAST_N);
+
+  // Report it. Compaction is the one context operation worth showing: it REWRITES the
+  // conversation, so a user who is not told will later wonder why the model forgot the
+  // middle of it. Reported for the automatic pass as well as `/compact`.
+  options.onCompaction?.({
+    before,
+    after: contextUsed(session),
+    window: sharpContextWindow(session.modelConfig.model),
+  });
+
+  // A compaction rewrites the transcript, so any MINDWEAVE.md edit the model was
+  // relying on having written is now summarized away — and the prompt cache is being
+  // discarded for this request regardless. Both reasons point the same way: this is
+  // the moment to pick the file back up, and it costs nothing extra here.
+  await reloadProjectMemory(session).catch(() => {});
+}
+
+/**
+ * Did this call write the project's MINDWEAVE.md?
+ *
+ * Matched on the path's basename rather than resolved against the session root: the
+ * model may pass it relative, absolute, or through a workspace root, and the cost of a
+ * false positive is one extra re-read at the next compaction, while the cost of a false
+ * negative is a stale project memory carried into the next session.
+ */
+function touchesProjectMemory(name: string, args: Record<string, unknown>): boolean {
+  if (name !== "edit" && name !== "write_file" && name !== "replace_symbol_body") return false;
+  const path = typeof args.path === "string" ? args.path : "";
+  return /(^|[\\/])MINDWEAVE\.md$/i.test(path.trim());
 }
 
 /** Parse a tool call's raw JSON arguments; malformed payload → {} so the tool

@@ -97,15 +97,13 @@ test("compaction counts the whole prompt, not just the transcript", () => {
   // Everything sent every turn but living outside the transcript — the system prompt,
   // every tool schema, the working-set block, the relevance map — used to be invisible
   // to the bars, so they fired that much too late. Also silent when broken.
-  const body = engineSource.match(/async function maybeCompact\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
-  assert.ok(body, "maybeCompact not found — did it get renamed?");
-  // Computing an overhead is not enough: the figure the bars are compared against has
-  // to actually include it. Asserting only that the term appears passes even when the
-  // result is dropped on the floor.
-  const used = body.match(/const used = \(\) =>([^;]*);/)?.[1];
-  assert.ok(used, "the budget helper not found — did it get renamed?");
-  assert.match(used, /estimateEntriesTokens\(session\.transcript\)/, "the transcript is part of the budget");
-  assert.match(used, /overhead/, "and so is everything outside the transcript");
+  // The arithmetic lives in ONE place now, because the user-facing compaction bars are
+  // drawn from the same figure the thresholds fire on. Two copies could drift, and the
+  // display would then contradict the decision it is meant to explain.
+  const body = engineSource.match(/function contextUsed\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(body, "contextUsed not found — did it get renamed?");
+  assert.match(body, /estimateEntriesTokens\(session\.transcript\)/, "the transcript is part of the budget");
+  assert.match(body, /\+ overhead/, "and so is everything outside the transcript");
   // Both halves of the overhead must survive: the MEASURED prompt size once a call has
   // reported one, and the catalog estimate as the fallback before that. Lose either and
   // the bars go blind again to whichever is missing.
@@ -116,7 +114,14 @@ test("compaction counts the whole prompt, not just the transcript", () => {
   // tool-schema serialisation and the prompt shape, so the figure stops being about this
   // request. Without this comparison the first call after a /provider switch sizes its
   // bars from the old provider's prompt.
-  assert.match(body, /\.model === model/, "a measurement from another model must not be reused");
+  assert.match(body, /\.model === session\.modelConfig\.model/, "a measurement from another model must not be reused");
+
+  // And the thresholds must actually USE it rather than keeping their own copy.
+  const compactBody = engineSource.match(/async function maybeCompact\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(compactBody, "maybeCompact not found — did it get renamed?");
+  assert.match(compactBody, /contextUsed\(session\)/, "the bars must fire on the shared figure");
+  // As must the report the user is shown, or the bars become a second opinion.
+  assert.match(engineSource, /before,\s*\n\s*after: contextUsed\(session\)/, "the report must use it too");
   // And the measured branch must actually be fed, or it is dead code that reads as safety.
   assert.match(
     engineSource,
@@ -168,8 +173,13 @@ test("microcompaction's result is never discarded on a counter nobody remembered
   // or only evicted images did the work and threw it away.
   const body = engineSource.match(/if \(used\(\) >= microBar\) \{[\s\S]*?\n  \}/)?.[0];
   assert.ok(body, "microcompact block not found");
-  assert.match(body, /session\.transcript = microcompact\(session\.transcript\)\.entries;/);
+  // Matched loosely on the ASSIGNMENT rather than on an exact call, so adding an
+  // argument to microcompact does not read as removing the guarantee. What must hold is
+  // that the result is assigned unconditionally, not that the call has a fixed shape.
+  assert.match(body, /session\.transcript = microcompact\(/, "the result must still be taken");
+  assert.match(body, /\)\.entries;/, "and assigned, not inspected first");
   assert.doesNotMatch(body, /cleared > 0 \|\| recapsCleared > 0/, "no counter subset may gate the write");
+  assert.doesNotMatch(body, /if \([a-z]+\.cleared/i, "nor any single counter");
 });
 
 test("nothing is pushed to the transcript between tool_calls and their results", () => {
@@ -201,4 +211,17 @@ test("the reply-style rules sit at the BOUNDARY, not in the cached prefix", () =
   const promptSource = readFileSync(fileURLToPath(new URL("./prompt.ts", import.meta.url)), "utf8");
   assert.doesNotMatch(promptSource, /FOUR LINES OR FEWER/, "the rule must not live in the cached prefix");
   assert.match(engineSource, /parts\.push\(REPLY_STYLE\)/, "it belongs in the volatile tail");
+});
+
+test("the reply gate fires at the turn-end boundary and can only fire once", () => {
+  // Prose asked for this budget in three wordings and was ignored each time; this is
+  // the version that holds, so the wiring is worth pinning.
+  assert.match(engineSource, /const fault = replyFault\(content, mutatedThisTurn\)/, "gated on the turn's own work flag");
+  assert.match(engineSource, /if \(!replyRegated\)/, "one retry per turn — a gate that can fire twice is a loop");
+  assert.match(engineSource, /options\.onEvent\?\.\(\{ type: "replyReset" \}\)/, "the draft must be dropped from the UI buffer");
+});
+
+test("a rejected draft is spliced out of history, so what is saved is what was shown", () => {
+  // Otherwise a resumed session replays the wall of text the gate just removed.
+  assert.match(engineSource, /session\.transcript\.splice\(overlongReplyAt, 2\)/);
 });

@@ -11,6 +11,7 @@
  */
 import { useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { clipRows } from "../wrap.js";
 
 export interface PickerItem {
   /** The main line shown for the row. */
@@ -29,11 +30,38 @@ interface PickerProps {
   active?: boolean;
   /** Row preselected on open (e.g. the newest session). Defaults to 0. */
   initialIndex?: number;
+  /** Hard ceiling on the title's rendered height. See MAX_TITLE_ROWS. */
+  maxTitleRows?: number;
 }
 
 const MAX_VISIBLE = 10;
 
-export function Picker({ title, items, onSelect, onCancel, width, active = true, initialIndex = 0 }: PickerProps) {
+/**
+ * The title is clipped to this many rendered rows, wrapping included.
+ *
+ * The list has always been windowed; the title was not, and that was the whole bug.
+ * A picker renders in the FOOTER, whose height is measured and subtracted from the
+ * chat — but nothing bounded it, so a caller passing long text (exit_plan passed an
+ * entire 40-step plan) pushed the frame past `stdout.rows`. Ink then swaps to
+ * clearTerminal-and-redraw, stops tracking how many lines it wrote, and the screen
+ * tears: header stranded at the top, no input box, scrolling moves a sliver.
+ *
+ * The fix that lasts is here rather than in the callers. A caller can be careless and
+ * the worst outcome is a truncated prompt, not an unusable app — long context belongs
+ * in `detail`, which prints to the transcript (see ToolContext.requestApproval).
+ */
+const MAX_TITLE_ROWS = 6;
+
+export function Picker({
+  title,
+  items,
+  onSelect,
+  onCancel,
+  width,
+  active = true,
+  initialIndex = 0,
+  maxTitleRows = MAX_TITLE_ROWS,
+}: PickerProps) {
   const [sel, setSel] = useState(Math.min(Math.max(0, initialIndex), Math.max(0, items.length - 1)));
 
   useInput(
@@ -51,9 +79,13 @@ export function Picker({ title, items, onSelect, onCancel, width, active = true,
   const shown = items.slice(start, start + MAX_VISIBLE);
   const labelWidth = Math.min(40, Math.max(...items.map((i) => i.label.length), 1));
 
+  const titleRows = clipRows(title, width, maxTitleRows);
+
   return (
     <Box flexDirection="column" width={width} marginTop={1}>
-      <Text bold color="cyan">{title}</Text>
+      {titleRows.map((line, i) => (
+        <Text key={i} bold color="cyan" wrap="truncate-end">{line}</Text>
+      ))}
       {shown.map((item, i) => {
         const idx = start + i;
         const activeRow = idx === sel;

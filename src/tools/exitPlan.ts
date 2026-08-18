@@ -20,6 +20,7 @@
  * ends, because the mode was left by a tool call, not by the user.
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
+import { savePlanArtifact } from "../dynamo/planArtifact.js";
 
 /** What the user chose at the approval prompt. Order is the display order. */
 export const PLAN_CHOICES = [
@@ -89,7 +90,12 @@ export const exitPlan: Tool = {
       );
     }
 
-    const choice = await ctx.requestApproval(planQuestion(plan), [...PLAN_CHOICES]);
+    // The plan travels as DETAIL, not as the question. It is the longest thing any
+    // tool asks about, and putting it in the prompt made the frame taller than the
+    // terminal — the screen tore and the app looked hung with no way to answer. As
+    // detail it prints into the transcript, which scrolls, and the prompt stays one
+    // line. Nothing is summarised: the user still reads the whole plan.
+    const choice = await ctx.requestApproval(PLAN_QUESTION, [...PLAN_CHOICES], plan);
     const verdict = readVerdict(choice);
 
     if (verdict === "reject") {
@@ -109,7 +115,20 @@ export const exitPlan: Tool = {
       };
     }
 
-    // Approved. Leave planning for the rest of this turn only — `planResume` is the
+    // Approved. The plan is now the agreed scope of the work, so it becomes a
+    // durable artifact: written to .mindweave/plan.md (user-visible, user-editable,
+    // survives compaction BY CONSTRUCTION because the engine re-renders it from
+    // here every request instead of trusting the transcript) and carried on the
+    // context for this session. A failure to write must not un-approve the plan —
+    // the in-memory copy still governs this session; only persistence is lost.
+    ctx.activePlan = plan;
+    ctx.activePlanApprovedAt = new Date().toISOString();
+    try {
+      await savePlanArtifact(ctx.roots?.[0] ?? ctx.cwd, plan, verdict === "sentinel" ? "sentinel" : "lightning");
+    } catch {
+      // Read-only filesystem or similar: session-local plan still applies.
+    }
+    // Leave planning for the rest of this turn only — `planResume` is the
     // engine's instruction to put it back when the work ends.
     ctx.planMode = false;
     ctx.guarded = verdict === "sentinel";
@@ -132,10 +151,9 @@ export const exitPlan: Tool = {
   },
 };
 
-/** The approval prompt: the plan in full, then the question. */
-export function planQuestion(plan: string): string {
-  return `${plan}\n\nStart on this?`;
-}
+/** The prompt itself — one line, because it renders in the height-bounded footer.
+ *  The plan is passed alongside it as detail and printed into the transcript. */
+export const PLAN_QUESTION = "Start on this?";
 
 function fail(message: string): ToolResult {
   return { output: `Error: ${message}`, isError: true, summary: message };

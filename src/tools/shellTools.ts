@@ -10,17 +10,39 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { relativize } from "./paths.js";
 import { MAX_READ_CHARS, type ShellInfo } from "./backgroundShells.js";
 
-export const shellOutput: Tool = {
-  name: "shell_output",
+/**
+ * One read-only tool at two levels of specificity: no `id` lists, an `id` reads.
+ *
+ * These were `list_shells` and `shell_output`. Same manager, same questions ("what is
+ * running" then "what did that one say"), and reading was almost always the direct
+ * follow-up to listing — so the split cost two advertised schemas and gave the model a
+ * routing decision it did not need.
+ *
+ * `kill_shell` deliberately stays a separate tool. It is the only mutating one of the
+ * three, and the plan-mode filter runs on `tool.readOnly` while BUILDING the advertised
+ * list — before any arguments exist. Folding a kill into this tool would therefore force
+ * a choice between hiding shell inspection from Architect mode and read-only sub-agents,
+ * or offering them a way to kill processes. Neither is acceptable, so the merge stops
+ * exactly where the read/write line is.
+ */
+export const shellsTool: Tool = {
+  name: "shells",
   readOnly: true,
   // The description never mentioned polling, while the tool itself pushes a strong
   // don't-poll nudge at runtime; the two now agree. It also never mentioned either cap,
   // and the buffer one matters: a chatty process can roll output out of the retained
   // log between reads, so "everything since last time" is not always literally true.
   description:
-    "Read new output from a background shell started by run_command. Returns only what " +
-    "has been printed since your last check, plus whether it is still running or has " +
-    "finished and with what exit code. " +
+    "Look at the background shells run_command has started.\n" +
+    "With no `id` it LISTS them, running and recently finished. Each line answers the " +
+    "two questions worth asking about a background process: IS IT UP, distinguishing a " +
+    "server still starting from one that has come up, and WHY DID IT STOP, " +
+    "distinguishing a crash from the user closing it themselves from you stopping it. " +
+    "Check this before restarting anything: a process the user shut down should not be " +
+    "reopened, and an exit code alone cannot tell you which case you are in.\n" +
+    "With an `id` it READS that shell's new output — only what has been printed since " +
+    "your last check, plus whether it is still running or has finished and with what " +
+    "exit code. " +
     "You normally do NOT need to call this on a loop: whether you are told about the " +
     "shell is set by run_command's 'notify', and when you will be told, you are told " +
     "automatically. Use this when you want the output itself, not to find out whether " +
@@ -32,14 +54,18 @@ export const shellOutput: Tool = {
   parameters: {
     type: "object",
     additionalProperties: false,
-    required: ["id"],
     properties: {
-      id: { type: "integer", description: "The background shell id (e.g. 1)." },
+      id: {
+        type: "integer",
+        description: "A background shell id to read (e.g. 1). Omit entirely to list the shells instead.",
+      },
     },
   },
   async execute(args, ctx): Promise<ToolResult> {
     const mgr = ctx.backgroundShells;
     if (!mgr) return { output: "No background shells are available in this context.", summary: "no background shells" };
+    // The dispatch: naming a shell reads it, otherwise list what there is.
+    if (args.id === undefined || args.id === null) return listAll(ctx);
     const id = toId(args.id);
     if (id === null) return fail("`id` must be a shell number.");
 
@@ -99,27 +125,16 @@ export const killShell: Tool = {
   },
 };
 
-export const listShells: Tool = {
-  name: "list_shells",
-  readOnly: true,
-  description:
-    "List background shells, running and recently finished. Each line answers the two " +
-    "questions worth asking about a background process: IS IT UP, distinguishing a " +
-    "server still starting from one that has come up, and WHY DID IT STOP, " +
-    "distinguishing a crash from the user closing it themselves from you stopping it. " +
-    "Reach for this before restarting anything: a process the user shut down should not " +
-    "be reopened, and an exit code alone cannot tell you which case you are in.",
-  parameters: { type: "object", additionalProperties: false, properties: {} },
-  async execute(_args, ctx): Promise<ToolResult> {
-    const mgr = ctx.backgroundShells;
-    const shells = mgr?.list() ?? [];
-    if (shells.length === 0) return { output: "No background shells.", summary: "no background shells" };
-    return {
-      output: shells.map((s) => statusLine(s, ctx)).join("\n"),
-      summary: `${mgr!.runningCount()} running, ${shells.length} total`,
-    };
-  },
-};
+/** The no-`id` half of `shells`: what is running, and why anything stopped. */
+function listAll(ctx: ToolContext): ToolResult {
+  const mgr = ctx.backgroundShells;
+  const shells = mgr?.list() ?? [];
+  if (shells.length === 0) return { output: "No background shells.", summary: "no background shells" };
+  return {
+    output: shells.map((s) => statusLine(s, ctx)).join("\n"),
+    summary: `${mgr!.runningCount()} running, ${shells.length} total`,
+  };
+}
 
 /**
  * One line describing a shell, including the facts that decide whether anything needs

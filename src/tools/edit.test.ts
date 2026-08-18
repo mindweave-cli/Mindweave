@@ -6,18 +6,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolContext } from "./types.js";
 import { readFile } from "./readFile.js";
-import { multiEdit } from "./multiEdit.js";
+import { edit } from "./edit.js";
 
 function freshCtx(): ToolContext {
   const dir = mkdtempSync(join(tmpdir(), "mindweave-test-"));
   return { cwd: dir, reads: new Map(), todos: [] };
 }
 
-test("multi_edit applies several edits to one file in order", async () => {
+test("edit applies several edits to one file in order", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha beta gamma");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await multiEdit.execute(
+  const r = await edit.execute(
     {
       path: "c.txt",
       edits: [
@@ -33,11 +33,11 @@ test("multi_edit applies several edits to one file in order", async () => {
   assert.match(r.output, /3 edits, 3 replacements/);
 });
 
-test("multi_edit lets a later edit target text an earlier edit produced", async () => {
+test("edit lets a later edit target text an earlier edit produced", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "hello world");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await multiEdit.execute(
+  const r = await edit.execute(
     {
       path: "c.txt",
       edits: [
@@ -51,11 +51,11 @@ test("multi_edit lets a later edit target text an earlier edit produced", async 
   assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "hi there");
 });
 
-test("multi_edit is atomic: one bad edit writes nothing", async () => {
+test("edit is atomic: one bad edit writes nothing", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha beta");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await multiEdit.execute(
+  const r = await edit.execute(
     {
       path: "c.txt",
       edits: [
@@ -71,22 +71,28 @@ test("multi_edit is atomic: one bad edit writes nothing", async () => {
   assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "alpha beta");
 });
 
-test("multi_edit refuses a file that wasn't read", async () => {
+test("edit refuses a file that wasn't read WHEN the edit does not match it", async () => {
+  // This used to refuse ANY edit to an unread file, before looking. That cost a whole
+  // extra round trip plus a full re-read every time the model already knew the text —
+  // measured on a real session as four refusals, four ~9,000-token reads, and then the
+  // same four edits applying first try. An `old_string` is matched against the file's
+  // current bytes, so a unique match is the evidence; a guess like this one is not.
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha");
-  const r = await multiEdit.execute(
-    { path: "c.txt", edits: [{ old_string: "alpha", new_string: "A" }] },
+  const r = await edit.execute(
+    { path: "c.txt", edits: [{ old_string: "beta", new_string: "B" }] },
     ctx,
   );
   assert.equal(r.isError, true);
   assert.match(r.output, /has not been read/);
+  assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "alpha", "nothing may be written");
 });
 
-test("multi_edit preserves CRLF line endings", async () => {
+test("edit preserves CRLF line endings", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "a\r\nb\r\nc");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await multiEdit.execute(
+  const r = await edit.execute(
     { path: "c.txt", edits: [{ old_string: "a\nb", new_string: "A\nB" }] },
     ctx,
   );
@@ -94,11 +100,11 @@ test("multi_edit preserves CRLF line endings", async () => {
   assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "A\r\nB\r\nc");
 });
 
-test("multi_edit rejects an empty edits array", async () => {
+test("edit rejects an empty edits array", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await multiEdit.execute({ path: "c.txt", edits: [] }, ctx);
+  const r = await edit.execute({ path: "c.txt", edits: [] }, ctx);
   assert.equal(r.isError, true);
   assert.match(r.output, /non-empty array/);
 });

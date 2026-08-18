@@ -99,7 +99,7 @@ test("the tools read_file says require a prior read really do check for one", ()
   const write = readFileSync(fileURLToPath(new URL("./writeFile.ts", import.meta.url)), "utf8");
   assert.match(gate, /has not been read this session/);
   assert.match(write, /hasn't been read this session/);
-  for (const name of ["edit_file", "multi_edit", "replace_symbol_body", "write_file", "read_symbol"]) {
+  for (const name of ["edit", "replace_symbol_body", "write_file", "read_symbol"]) {
     assert.match(readFile.description, new RegExp(name), `${name} is named in the description`);
   }
 });

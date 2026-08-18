@@ -29,7 +29,7 @@ import type { ChildProcess } from "node:child_process";
 import { killTree, killTreeSync } from "./killTree.js";
 
 const MAX_BUFFER_CHARS = 5_000_000; // cap one shell's retained output (runaway server)
-export const MAX_READ_CHARS = 30_000; // cap a single shell_output read
+export const MAX_READ_CHARS = 30_000; // cap a single `shells` read
 const TAIL_CHARS = 2_000; // how much trailing output rides on a completion note
 
 /**
@@ -182,6 +182,10 @@ export interface ShellInfo {
   signal?: string;
   startedAt: number;
   finishedAt: number | null;
+  /** The port this process announced in its own output, when it announced one.
+   *  Read from the buffer, never guessed — a dev server prints where it is listening,
+   *  and that line is the only thing that actually knows. */
+  port?: number;
   /** What this shell's caller asked to be told about. */
   notify: NotifyPolicy;
   /** Who stopped it, when somebody did. Absent means it ended on its own — which is
@@ -508,6 +512,7 @@ function view(e: Entry): ShellInfo {
     ...(e.signal ? { signal: e.signal } : {}),
     ...(e.stoppedBy ? { stoppedBy: e.stoppedBy } : {}),
     ...(e.truncated ? { truncated: true } : {}),
+    ...(detectPort(e.buffer) !== undefined ? { port: detectPort(e.buffer) } : {}),
   };
 }
 
@@ -519,4 +524,25 @@ function registerCleanup(): void {
     // Synchronous kill: an async one never reaches the OS from here.
     for (const mgr of active) mgr.dispose(true);
   });
+}
+
+/**
+ * The port a process announced in its own output.
+ *
+ * A backgrounded dev server is only useful if you know where it is listening, and the
+ * one thing that knows is the server itself — it prints the URL on startup. So this
+ * reads the buffer rather than inspecting sockets: no privileges, no platform-specific
+ * netstat parsing, and it cannot report a port belonging to some other process.
+ *
+ * The FIRST announcement wins. A framework often prints a local URL and then a network
+ * one for the same port, and some print a proxy target afterwards; the first line is
+ * the one describing the server that just came up.
+ */
+export function detectPort(output: string): number | undefined {
+  const m =
+    /(?:https?:\/\/)(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})/i.exec(output) ??
+    /\b(?:listening|running|started|ready)\b[^\n]*?\bport\b\s*:?\s*(\d{2,5})/i.exec(output);
+  if (!m) return undefined;
+  const port = Number(m[1]);
+  return port >= 1 && port <= 65535 ? port : undefined;
 }

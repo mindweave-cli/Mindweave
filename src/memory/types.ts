@@ -115,6 +115,15 @@ export interface Session {
   /** Contents of the project's MINDWEAVE.md, injected into the system prompt. "" if none. */
   projectMemory: string;
   /**
+   * Set when MINDWEAVE.md has been edited and the frozen copy above is behind the file.
+   *
+   * It is deliberately NOT acted on immediately: re-reading changes the system prompt
+   * string, which throws away the entire cached prefix at 1.25x rewrite cost. The flag
+   * is cleared at the next point where the cache is being discarded anyway (a
+   * compaction), so the refresh rides along for free. See reloadProjectMemory.
+   */
+  projectMemoryStale?: boolean;
+  /**
    * The cross-session memory directory for this project (where MEMORY.md and the
    * topic files live) and the loaded MEMORY.md index. The index is injected into
    * the system prompt each turn; the directory path is given to the model so it

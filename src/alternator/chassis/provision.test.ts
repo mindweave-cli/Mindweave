@@ -127,12 +127,31 @@ test("the timed-out child is actually killed, not just abandoned", async () => {
   await runBounded(process.execPath, ["-e", script], { stdio: "ignore" }, 5_000);
   assert.ok(readFileSync(marker, "utf8").length > 0, "child never ran, so this proves nothing");
 
-  // killTree is asynchronous (it spawns taskkill / escalates signals), so the child
-  // may write a few more beats after runBounded resolves. Settle first, THEN measure
-  // twice: a dead child leaves the two measurements equal.
-  await new Promise((r) => setTimeout(r, 1000));
-  const settled = readFileSync(marker, "utf8").length;
-  await new Promise((r) => setTimeout(r, 1000)); // room for ~20 more beats
-  const later = readFileSync(marker, "utf8").length;
-  assert.equal(later, settled, "child survived the timeout and kept running");
+  // killTree is asynchronous (it spawns taskkill / escalates signals), so the child may
+  // write a few more beats after runBounded resolves.
+  //
+  // POLL for the file to stop growing rather than sleeping a fixed second and hoping.
+  // The fixed version was flaky under full-suite load for a reason that says nothing
+  // about the product: with the machine saturated, the kill itself takes longer to be
+  // scheduled, so the "settled" reading was sometimes taken while the doomed child was
+  // still beating. Waiting for two equal consecutive readings measures the thing the
+  // test is actually about — that the child STOPS — and a child that never stops still
+  // fails, on the deadline, which is the failure worth having.
+  const deadline = Date.now() + 15_000;
+  let settled = readFileSync(marker, "utf8").length;
+  let stable = false;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
+    const now = readFileSync(marker, "utf8").length;
+    if (now === settled) {
+      stable = true;
+      break;
+    }
+    settled = now;
+  }
+  assert.ok(stable, "child was still writing 15s after the timeout — it survived the kill");
+
+  // Then confirm it stays stopped, rather than having merely paused between beats.
+  await new Promise((r) => setTimeout(r, 500)); // room for ~10 more beats
+  assert.equal(readFileSync(marker, "utf8").length, settled, "child resumed after appearing to stop");
 });

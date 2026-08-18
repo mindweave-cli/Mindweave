@@ -38,12 +38,14 @@ import type {
   TurnOptions,
   Usage,
 } from "../types.js";
-import { BUFFERED_OUTPUT_TOKENS, DEFAULT_MODEL } from "./manifest.js";
+import { BUFFERED_OUTPUT_TOKENS, DEFAULT_MODEL, surfaceOf } from "./manifest.js";
 
 const MODEL = process.env.MINDWEAVE_MODEL ?? DEFAULT_MODEL;
 
 /** Output ceiling. This caps thinking AND answer together, so it needs headroom
- *  at the higher effort levels; both models accept up to 128K when streaming. */
+ *  at the higher effort levels. The current-surface models accept up to 128K when
+ *  streaming; Haiku 4.5 caps at exactly this number, which is why it is the value
+ *  chosen rather than anything larger — one ceiling that is legal on all of them. */
 const MAX_TOKENS_STREAM = 64_000;
 /** Buffered calls are the small internal ones (summaries, page distillation), and
  *  a non-streaming request that runs long risks an HTTP timeout. The value lives
@@ -185,6 +187,63 @@ function renderTools(req: ModelRequest): Anthropic.Tool[] {
  * map or todo list never invalidates the prefix — the property the ModelRequest
  * split exists to guarantee.
  */
+/**
+ * The thinking budget sent on the LEGACY surface (Haiku 4.5), which asks for a
+ * token count instead of an effort rung.
+ *
+ * Half the output ceiling, and the API's own two constraints decide the shape: the
+ * budget must be strictly below `max_tokens` (it is spent from the same allowance
+ * as the answer, so an equal budget leaves nothing to answer with) and at least
+ * 1024. Deriving it from the ceiling rather than fixing it means the small buffered
+ * calls get a small budget and a streamed turn gets a real one.
+ *
+ * Those two constraints can contradict each other: below a ceiling of 1025 there is
+ * no number that satisfies both. That returns 0, meaning "no room to think here",
+ * and the caller omits the field rather than sending a value the API would reject.
+ * Neither of this driver's real ceilings is anywhere near that, but a caller passing
+ * a small one should get a working request, not a 400.
+ */
+export function thinkingBudget(maxTokens: number): number {
+  const budget = Math.max(1024, Math.floor(maxTokens / 2));
+  return budget < maxTokens ? budget : 0;
+}
+
+/**
+ * Put the reasoning selection on the body in the shape THIS model accepts.
+ *
+ * The three branches are the three wire surfaces described in `manifest.ts`, and
+ * each rejects the other two's shape outright rather than ignoring it:
+ *
+ *   - Fable 5 thinks unconditionally and rejects any explicit `thinking` config,
+ *     `{type:"disabled"}` included, so the field is simply omitted.
+ *   - Haiku 4.5 predates adaptive thinking and `effort` both: it takes a token
+ *     budget, and sending `output_config` is an error.
+ *   - Everything else takes adaptive thinking plus an effort rung.
+ *
+ * `normalize` has already made the config legal for the model (Fable never arrives
+ * here with thinking off, Opus 5 never with no-thinking above `high`), so this only
+ * has to render it.
+ */
+function applyReasoning(
+  body: Anthropic.MessageCreateParamsNonStreaming,
+  model: string,
+  cfg: ModelRequest["model"],
+  maxTokens: number,
+): void {
+  const surface = surfaceOf(model);
+
+  if (!surface.canDisableThinking) {
+    // Omit `thinking` entirely — the model is always thinking regardless.
+  } else if (!surface.takesEffort) {
+    const budget = thinkingBudget(maxTokens);
+    if (cfg?.thinking && budget > 0) body.thinking = { type: "enabled", budget_tokens: budget };
+  } else {
+    body.thinking = cfg?.thinking ? { type: "adaptive" } : { type: "disabled" };
+  }
+
+  if (surface.takesEffort) body.output_config = { effort: cfg?.effort ?? "high" };
+}
+
 export function buildBody(req: ModelRequest, maxTokens: number): Anthropic.MessageCreateParamsNonStreaming {
   const cfg = req.model;
   const { messages, extraSystem } = renderMessages(req);
@@ -208,17 +267,17 @@ export function buildBody(req: ModelRequest, maxTokens: number): Anthropic.Messa
     messages.push({ role: "user", content: [{ type: "text", text: "(no input)" }] });
   }
 
+  const model = cfg?.model ?? MODEL;
   const body: Anthropic.MessageCreateParamsNonStreaming = {
-    model: cfg?.model ?? MODEL,
+    model,
     max_tokens: maxTokens,
     system,
     messages,
-    // Thinking is adaptive: the model decides depth per request, and `effort` sets
-    // the overall budget. Fixed thinking budgets and sampling parameters are both
-    // rejected by these models, so neither is ever sent.
-    thinking: cfg?.thinking ? { type: "adaptive" } : { type: "disabled" },
-    output_config: { effort: cfg?.effort ?? "high" },
   };
+  // How reasoning is expressed differs by model; the sampling parameters do not —
+  // `temperature`, `top_p` and `top_k` are rejected across this lineup, so none of
+  // them is ever sent on any path.
+  applyReasoning(body, model, cfg, maxTokens);
 
   const tools = renderTools(req);
   if (tools.length > 0) {
@@ -298,23 +357,25 @@ export async function webSearch(query: string, options: SearchOptions = {}): Pro
       max_tokens: MAX_TOKENS_BUFFERED,
       system: SEARCH_SYSTEM,
       messages: [{ role: "user", content: query }],
-      // The dated variant is the tool version, not a date to keep current. This
-      // one filters results before they reach the context window, and it runs
-      // code execution internally to do it — which is why `code_execution` must
+      // The dated variant is the tool VERSION, not a date to keep current, and
+      // which one is legal depends on the model — the manifest holds that fact.
+      // The newer one filters results before they reach the context window, and it
+      // runs code execution internally to do it, which is why `code_execution` must
       // NOT also be declared here: two execution environments confuse the model.
-      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: SEARCH_MAX_USES }],
+      tools: [{ type: surfaceOf(MODEL).searchTool, name: "web_search", max_uses: SEARCH_MAX_USES }],
     },
     { signal: options.signal },
   );
   return extractSearch(message);
 }
 
-/** Ask the model for one turn. */
+/** Ask the model for one turn. Usage rides back with it: these are core's internal
+ *  calls, and they spend real tokens that the meter would otherwise never see. */
 export async function toolTurn(req: ModelRequest, options: TurnOptions = {}): Promise<Turn> {
   const message = await api().messages.create(buildBody(req, MAX_TOKENS_BUFFERED), {
     signal: options.signal,
   });
-  return toTurn(message);
+  return { ...toTurn(message), usage: toUsage(message.usage) };
 }
 
 /**

@@ -141,3 +141,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Per-session agent state written into the user's own project (approved plan,
+# and anything else the session persists). Runtime state, not source.
+.mindweave/

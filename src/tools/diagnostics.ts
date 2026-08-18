@@ -10,6 +10,7 @@
  * Read-only: it only reads what the servers report. Degrade-safe: no server for the
  * language (or none reported) → a clean "no diagnostics" result.
  */
+import { promises as fs } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import type { CodeDiagnostic } from "../alternator/chassis/types.js";
 import { chassisForPath } from "./chassisMux.js";
@@ -20,6 +21,10 @@ import { selectActiveFiles } from "../memory/workingSet.js";
  *  Exported so the number quoted in the description is pinned to the real value. */
 export const MAX_WORKING_SET = 3;
 const MAX_SHOWN = 50;
+/** Full caret context is built for at most this many diagnostics (errors first) —
+ *  reading source lines and drawing a caret for all 50 shown would bury the ones
+ *  that matter under a wall of low-value warnings. */
+const MAX_CARETS = 5;
 
 export const diagnosticsTool: Tool = {
   name: "diagnostics",
@@ -76,15 +81,84 @@ export const diagnosticsTool: Tool = {
     for (const r of results) all.push(...r.diags);
     if (all.length === 0) {
       const label = targets.map((t) => relativize(ctx, t)).join(", ");
-      return { output: `No diagnostics for ${label}.`, summary: "no diagnostics" };
+      // Silent when it finds nothing. A model runs this in a burst right after editing,
+      // and a row per file saying "no diagnostics" is a wall of rows reporting the
+      // absence of news. The model still gets the answer; the user gets the screen back.
+      return { output: `No diagnostics for ${label}.`, summary: "no diagnostics", quiet: true };
     }
 
     const output = formatDiagnostics(all.map((d) => ({ ...d, file: relativize(ctx, d.file) })));
     const errors = all.filter((d) => d.severity === "error").length;
     const warnings = all.filter((d) => d.severity === "warning").length;
-    return { output, summary: `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}` };
+    return {
+      output,
+      summary: `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}`,
+      detail: await buildCaretDetail(all, ctx),
+      // Named for what it IS. "Check(app.ts)" reads as a routine step that happened to
+      // return something; the caret block under it is a compiler error, and the header
+      // should say so before the user has read a single line of it.
+      displayName: errors > 0 ? "Build Error" : "Check",
+    };
   },
 };
+
+/**
+ * The UI-only compiler-caret block — never sent to the model (`formatDiagnostics`'s
+ * flat text is what the model sees). Reads each diagnostic's own source line fresh
+ * from disk (never sent, so a fetch failure just drops that one caret rather than
+ * failing the tool) and draws a `~~~~~~~~` under the exact failing token when the
+ * server gave us an end column (see CodeDiagnostic.endColumn).
+ */
+async function buildCaretDetail(all: CodeDiagnostic[], ctx: ToolContext): Promise<string> {
+  const rank = { error: 0, warning: 1, info: 2, hint: 3 } as const;
+  const sorted = [...all].sort((a, b) => rank[a.severity] - rank[b.severity]);
+  const shown = sorted.slice(0, MAX_CARETS);
+
+  const blocks = await Promise.all(shown.map((d) => caretBlock(d, ctx)));
+  const parts = blocks.filter((b): b is string => b !== null);
+  const hidden = sorted.length - shown.length;
+  if (hidden > 0) parts.push(`(+${hidden} more — see the full list above)`);
+  return parts.join("\n\n");
+}
+
+/** One diagnostic's caret block, or null if its source line couldn't be read. */
+async function caretBlock(d: CodeDiagnostic, ctx: ToolContext): Promise<string | null> {
+  const lines = await readLines(d.file);
+  if (!lines) return null;
+  const line = lines[d.line - 1];
+  if (line == null) return null;
+
+  const rel = relativize(ctx, d.file);
+  const lineLabel = `${d.line}: `;
+  const out: string[] = [`${rel}:${d.line}:${d.column}`];
+
+  const prev = lines[d.line - 2];
+  if (prev != null) out.push(`│ ${String(d.line - 1).padStart(lineLabel.length - 2)}: ${prev}`);
+  out.push(`│ ${lineLabel}${line}`);
+  out.push(caretLine(d, lineLabel.length));
+
+  const codeLabel = d.source ? `${d.source}: ` : "";
+  out.push(`⎿ ${codeLabel}${d.message}`); // same branch glyph ToolLine/SubagentView use, not the mockup's literal "└─"
+  return out.join("\n");
+}
+
+/** The `~~~~~~~~` (or `^` when no end column is known) aligned under the failing
+ *  token, indented to match the `│ N: ` gutter the source line itself sits under. */
+function caretLine(d: CodeDiagnostic, gutterWidth: number): string {
+  const indent = " ".repeat(2 + gutterWidth + Math.max(0, d.column - 1));
+  const width = d.endColumn != null ? Math.max(1, d.endColumn - d.column) : 1;
+  return indent + (d.endColumn != null ? "~".repeat(width) : "^");
+}
+
+/** The file's lines, or null if it can't be read — a caret is a nice-to-have, not
+ *  worth failing the whole diagnostics call over. */
+async function readLines(absPath: string): Promise<string[] | null> {
+  try {
+    return (await fs.readFile(absPath, "utf8")).split("\n");
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The absolute paths to check: the given path, else the most recently touched files.

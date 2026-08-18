@@ -1,28 +1,43 @@
 /**
- * mcpSearch.ts — the way in to a large MCP catalog.
+ * mcpSearch.ts — the one door to any capability that is not in the tool list.
  *
- * When a project wires up several MCP servers the tool count can run into the hundreds.
- * Showing all of them to the model makes it choose worse, so past a threshold they are
- * held back and this tool is the door: search, and what matches becomes callable.
+ * Two pools sit behind it, for the same reason and with the same mechanics:
+ *
+ *  - MCP tools. A project wiring up several servers can reach into the hundreds, and a
+ *    model choosing among hundreds chooses worse, so past a threshold they are held back.
+ *  - Mindweave's OWN occasional tools (`deferred: true` in the registry). Their schemas
+ *    were being paid for on every uncached request in every session, including the many
+ *    that never touch them.
+ *
+ * One door rather than two because the model's question is the same either way — "I need
+ * to do X and I cannot see a tool for it" — and it has no reason to know which side of
+ * the native/external line the answer falls on. Searching ACTIVATES what it finds, for
+ * the rest of the session, so the cost is one round trip per capability rather than per
+ * call, and the tool list changes once instead of never being right.
  *
  * Registered as an ordinary built-in, so it is always present and costs one tool's worth
- * of schema rather than a catalog's worth. It is inert (and says so) when there is
- * nothing deferred, which is the common case — most projects have a handful of servers
- * and see every tool directly.
+ * of schema rather than a catalog's worth.
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { MAX_SEARCH_RESULTS, renderResults } from "../mcp/deferred.js";
+import { DEFERRED_TOOLS, matchDeferred } from "./deferredNative.js";
 
-export const findMcpTools: Tool = {
-  name: "find_mcp_tools",
+
+export const findTools: Tool = {
+  name: "find_tools",
   readOnly: true,
   // Two corrections. It searches the WHOLE catalog, not just the unloaded part, so the
   // old "that aren't already loaded" was simply wrong. And the result cap was invisible
   // — see the note at the call site for why that one is worse than it sounds.
   description:
-    "Search this project's MCP tools and load the matches so you can call them. Use it " +
-    "whenever a task needs an external integration you cannot already see a tool for " +
-    "(issue trackers, databases, cloud APIs, docs systems). Query with a server name " +
+    "Search for a tool you cannot see in your list, and load the matches so you can call " +
+    "them. Covers both your own occasional tools (saving a memory, creating a skill, " +
+    "standing rules and forbidding paths/commands, past sessions, workspace folders, " +
+    "screenshots) and this project's external MCP integrations (issue trackers, " +
+    "databases, cloud APIs, docs systems). Use it whenever a task needs a capability " +
+    "you cannot already see a tool for, rather than concluding you do not have it. " +
+    "Query with a plain capability word ('memory', 'skill', 'rule', 'screenshot'), " +
+    "a server name " +
     "('github'), an action ('create issue', 'search'), or the exact tool name if you " +
     "know it — an exact name and a bare server name are both handled specially, so " +
     "neither is a wasted guess. Matching is on names and descriptions, not meaning: if " +
@@ -46,14 +61,35 @@ export const findMcpTools: Tool = {
     const query = typeof args.query === "string" ? args.query.trim() : "";
     if (!query) return { output: "Error: `query` is required.", isError: true, summary: "no query" };
 
+    // BOTH pools are searched, and the native one does NOT short-circuit. It used to,
+    // and the tests caught what that costs: "create issue" name-matches the native
+    // `create_skill` on the word "create", which would swallow a query plainly aimed at
+    // an MCP issue tracker and report success while never touching the catalog. A weak
+    // keyword hit in one pool must never hide a strong hit in the other, so results are
+    // gathered from both and reported together.
+    const native = matchDeferred(query).filter((t) => !ctx.activatedTools?.has(t.name));
+    if (native.length > 0) {
+      ctx.activatedTools ??= new Set<string>();
+      for (const tool of native) ctx.activatedTools.add(tool.name);
+    }
+    const nativeBlock =
+      native.length > 0
+        ? `Loaded ${native.length} of your own tool${native.length === 1 ? "" : "s"}, available for the rest of this session:\n\n` +
+          native.map((t) => `- ${t.name} — ${t.description.split("\n")[0]?.trim() ?? ""}`).join("\n")
+        : "";
+
     const mcp = ctx.mcp;
     const snapshot = mcp?.snapshot();
+
+    // No MCP at all: the native pool is the whole answer, for better or worse.
     if (!mcp || !snapshot || snapshot.toolCount === 0) {
+      if (nativeBlock) return { output: nativeBlock, summary: `loaded ${native.map((t) => t.name).join(", ")}` };
       return {
         output:
-          "No MCP servers are connected in this project, so there are no external tools to find. " +
-          "Use your built-in tools.",
-        summary: "no mcp servers",
+          `Nothing matches "${query}". No MCP servers are connected in this project, and none of your own ` +
+          `deferred tools (${DEFERRED_TOOLS.map((t) => t.name).join(", ")}) match either. Solve it with the ` +
+          `tools you already have rather than guessing a tool name.`,
+        summary: `no match for "${query}"`,
       };
     }
 
@@ -61,22 +97,24 @@ export const findMcpTools: Tool = {
     // returning results that are already in the tool list — a model that searches here
     // and gets a list back may reasonably conclude it had to.
     if (!snapshot.deferred) {
+      const note =
+        `All ${snapshot.toolCount} MCP tool${snapshot.toolCount === 1 ? " is" : "s are"} already loaded and visible in ` +
+        `your tool list — nothing is hidden there, so you don't need this tool for them. Call the one you want directly.`;
       return {
-        output:
-          `All ${snapshot.toolCount} MCP tool${snapshot.toolCount === 1 ? " is" : "s are"} already loaded and visible in ` +
-          `your tool list — nothing is hidden, so you don't need this tool here. Call the one you want directly.`,
-        summary: "nothing deferred",
+        output: nativeBlock ? `${nativeBlock}\n\n${note}` : note,
+        summary: nativeBlock ? `loaded ${native.map((t) => t.name).join(", ")}` : "nothing deferred",
       };
     }
 
     const found = mcp.searchAndActivate(query);
     if (found.length === 0) {
+      const note =
+        `No MCP tool matches "${query}". There ${snapshot.toolCount === 1 ? "is" : "are"} ${snapshot.toolCount} ` +
+        `available in total — try a broader term, or a server name on its own. If nothing fits, this project ` +
+        `has no integration for that and you should solve it another way rather than guessing a tool name.`;
       return {
-        output:
-          `No MCP tool matches "${query}". There ${snapshot.toolCount === 1 ? "is" : "are"} ${snapshot.toolCount} ` +
-          `available in total — try a broader term, or a server name on its own. If nothing fits, this project ` +
-          `has no integration for that and you should solve it another way rather than guessing a tool name.`,
-        summary: `no match for "${query}"`,
+        output: nativeBlock ? `${nativeBlock}\n\n${note}` : note,
+        summary: nativeBlock ? `loaded ${native.map((t) => t.name).join(", ")}` : `no match for "${query}"`,
       };
     }
 
@@ -90,11 +128,12 @@ export const findMcpTools: Tool = {
         ? `\n\nThat is the top ${MAX_SEARCH_RESULTS}, which is all one search returns — there may be more. ` +
           `If what you need is not here, search again with a narrower term or the server's name.`
         : "";
+    const mcpBlock =
+      `Loaded ${found.length} MCP tool${found.length === 1 ? "" : "s"} — you can call ` +
+      `${found.length === 1 ? "it" : "them"} now:\n\n${renderResults(found)}${capped}`;
     return {
-      output:
-        `Loaded ${found.length} tool${found.length === 1 ? "" : "s"} — you can call ${found.length === 1 ? "it" : "them"} now:\n\n` +
-        `${renderResults(found)}${capped}`,
-      summary: `loaded ${found.length} tool${found.length === 1 ? "" : "s"}`,
+      output: nativeBlock ? `${nativeBlock}\n\n${mcpBlock}` : mcpBlock,
+      summary: `loaded ${found.length + native.length} tool${found.length + native.length === 1 ? "" : "s"}`,
     };
   },
 };

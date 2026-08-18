@@ -15,10 +15,21 @@ import { join } from "node:path";
 import type { ToolContext } from "./types.js";
 import { readFile } from "./readFile.js";
 import { writeFile } from "./writeFile.js";
-import { editFile, numberedWindow } from "./editFile.js";
+import { edit } from "./edit.js";
+import { numberedWindow } from "./editWindow.js";
+
+/** The single-edit case, spelled the way it reads: `edit` takes an edits[] array,
+ *  and a lone change is an array of one. */
+function editOne(
+  args: { path: string; old_string: string; new_string: string; replace_all?: boolean },
+  ctx: ToolContext,
+) {
+  const { path, ...one } = args;
+  return edit.execute({ path, edits: [one] }, ctx);
+}
 import { runCommand } from "./runCommand.js";
-import { globTool } from "./glob.js";
-import { grepTool } from "./grep.js";
+import { globDef } from "./glob.js";
+import { grepDef } from "./grep.js";
 import { MAX_ENTRIES, listDir } from "./listDir.js";
 import { protectedPathReason, catastrophicCommandReason } from "./guard.js";
 
@@ -140,49 +151,57 @@ test("write_file refuses a protected path", async () => {
 });
 
 // ── edit_file ─────────────────────────────────────────────────────────────
-test("edit_file refuses to edit a file that wasn't read", async () => {
+test("edit on an unread file is allowed only when the edit proves it knows the content", async () => {
+  // An unread file no longer refuses outright — quoting a line that matches uniquely is
+  // itself evidence the model has seen it, and the refuse-first rule was costing a full
+  // re-read of files the model already knew (see editFreshness.test.ts for the numbers).
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha beta");
-  const r = await editFile.execute({ path: "c.txt", old_string: "alpha", new_string: "ALPHA" }, ctx);
-  assert.equal(r.isError, true);
-  assert.match(r.output, /has not been read/);
+  const ok = await editOne({ path: "c.txt", old_string: "alpha", new_string: "ALPHA" }, ctx);
+  assert.ok(!ok.isError, `an exact match should apply: ${ok.output}`);
+  assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "ALPHA beta");
+
+  await fs.writeFile(join(ctx.cwd, "d.txt"), "alpha beta");
+  const guess = await editOne({ path: "d.txt", old_string: "gamma", new_string: "G" }, ctx);
+  assert.equal(guess.isError, true);
+  assert.match(guess.output, /has not been read/);
 });
 
-test("edit_file errors when old_string is not found", async () => {
+test("edit errors when old_string is not found", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await editFile.execute({ path: "c.txt", old_string: "zzz", new_string: "y" }, ctx);
+  const r = await editOne({ path: "c.txt", old_string: "zzz", new_string: "y" }, ctx);
   assert.equal(r.isError, true);
   assert.match(r.output, /not found/);
 });
 
-test("edit_file errors on an ambiguous (multi) match without replace_all", async () => {
+test("edit errors on an ambiguous (multi) match without replace_all", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "x x x");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await editFile.execute({ path: "c.txt", old_string: "x", new_string: "y" }, ctx);
+  const r = await editOne({ path: "c.txt", old_string: "x", new_string: "y" }, ctx);
   assert.equal(r.isError, true);
   assert.match(r.output, /matches 3 places/);
 });
 
-test("edit_file replaces a unique match", async () => {
+test("edit replaces a unique match", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "alpha beta");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await editFile.execute({ path: "c.txt", old_string: "beta", new_string: "GAMMA" }, ctx);
+  const r = await editOne({ path: "c.txt", old_string: "beta", new_string: "GAMMA" }, ctx);
   assert.equal(r.isError, undefined);
   assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "alpha GAMMA");
 });
 
-test("edit_file matches a multi-line old_string against a CRLF file (LF from the model)", async () => {
+test("edit matches a multi-line old_string against a CRLF file (LF from the model)", async () => {
   const ctx = freshCtx();
   // A Windows-style file on disk (CRLF). The model, shown LF lines by read_file,
   // sends an LF old_string. This used to fail every time ("old_string not found").
   const onDisk = ".section h2 {\r\n    font-size: 30px;\r\n}\r\n";
   await fs.writeFile(join(ctx.cwd, "style.css"), onDisk);
   await readFile.execute({ path: "style.css" }, ctx);
-  const r = await editFile.execute(
+  const r = await editOne(
     {
       path: "style.css",
       old_string: ".section h2 {\n    font-size: 30px;\n}", // LF, as the model would send
@@ -197,30 +216,30 @@ test("edit_file matches a multi-line old_string against a CRLF file (LF from the
   assert.ok(!after.includes("\r\r"), "no doubled carriage returns");
 });
 
-test("edit_file handles a `$` in the replacement literally", async () => {
+test("edit handles a `$` in the replacement literally", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "price here");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await editFile.execute({ path: "c.txt", old_string: "price here", new_string: "$9.99 ($&)" }, ctx);
+  const r = await editOne({ path: "c.txt", old_string: "price here", new_string: "$9.99 ($&)" }, ctx);
   assert.equal(r.isError, undefined);
   assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "$9.99 ($&)");
 });
 
-test("edit_file replace_all changes every occurrence", async () => {
+test("edit replace_all changes every occurrence", async () => {
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "c.txt"), "x x x");
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await editFile.execute({ path: "c.txt", old_string: "x", new_string: "y", replace_all: true }, ctx);
+  const r = await editOne({ path: "c.txt", old_string: "x", new_string: "y", replace_all: true }, ctx);
   assert.equal(r.isError, undefined);
   assert.equal(await fs.readFile(join(ctx.cwd, "c.txt"), "utf8"), "y y y");
 });
 
-test("edit_file returns the changed region with line numbers (so no re-read is needed)", async () => {
+test("edit returns the changed region with line numbers (so no re-read is needed)", async () => {
   const ctx = freshCtx();
   const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
   await fs.writeFile(join(ctx.cwd, "c.txt"), lines);
   await readFile.execute({ path: "c.txt" }, ctx);
-  const r = await editFile.execute({ path: "c.txt", old_string: "line 10", new_string: "LINE TEN" }, ctx);
+  const r = await editOne({ path: "c.txt", old_string: "line 10", new_string: "LINE TEN" }, ctx);
   assert.equal(r.isError, undefined, r.output);
   // The window shows the edited line, numbered, with surrounding context.
   assert.match(r.output, /10  LINE TEN/);
@@ -253,7 +272,7 @@ async function seed(ctx: ToolContext) {
 test("glob matches by pattern and skips ignored dirs", async () => {
   const ctx = freshCtx();
   await seed(ctx);
-  const r = await globTool.execute({ pattern: "**/*.ts" }, ctx);
+  const r = await globDef.execute({ pattern: "**/*.ts" }, ctx);
   assert.match(r.output, /src\/a\.ts/);
   assert.match(r.output, /src\/b\.ts/);
   assert.doesNotMatch(r.output, /node_modules/); // ignored
@@ -262,7 +281,7 @@ test("glob matches by pattern and skips ignored dirs", async () => {
 test("grep content mode finds matches with locations, ignoring node_modules", async () => {
   const ctx = freshCtx();
   await seed(ctx);
-  const r = await grepTool.execute({ pattern: "TODO", output_mode: "content" }, ctx);
+  const r = await grepDef.execute({ pattern: "TODO", output_mode: "content" }, ctx);
   assert.match(r.output, /src\/a\.ts:2:/);
   assert.match(r.output, /readme\.md:2:/);
   assert.doesNotMatch(r.output, /node_modules/);
@@ -271,7 +290,7 @@ test("grep content mode finds matches with locations, ignoring node_modules", as
 test("grep files_with_matches lists only matching files", async () => {
   const ctx = freshCtx();
   await seed(ctx);
-  const r = await grepTool.execute({ pattern: "export const", glob: "*.ts" }, ctx);
+  const r = await grepDef.execute({ pattern: "export const", glob: "*.ts" }, ctx);
   assert.match(r.output, /src\/a\.ts/);
   assert.match(r.output, /src\/b\.ts/);
   assert.doesNotMatch(r.output, /readme\.md/);
@@ -280,7 +299,7 @@ test("grep files_with_matches lists only matching files", async () => {
 test("grep reports an invalid regex instead of throwing", async () => {
   const ctx = freshCtx();
   await seed(ctx);
-  const r = await grepTool.execute({ pattern: "(" }, ctx);
+  const r = await grepDef.execute({ pattern: "(" }, ctx);
   assert.equal(r.isError, true);
   assert.match(r.output, /invalid regular expression/);
 });
@@ -442,15 +461,15 @@ test("grep really refuses secrets, so 'no matches' there is a refusal not a fact
   await fs.writeFile(join(dir, "ok.ts"), "const x = 'supersecret';\n");
   const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
 
-  const r = await grepTool.execute({ pattern: "supersecret", output_mode: "files_with_matches" }, ctx);
+  const r = await grepDef.execute({ pattern: "supersecret", output_mode: "files_with_matches" }, ctx);
   assert.doesNotMatch(r.output, /\.env/, "a secrets file must never be searched");
   assert.match(r.output, /ok\.ts/, "…but ordinary files still are");
-  assert.match(grepTool.description, /refused rather than missing/i);
+  assert.match(grepDef.description, /refused rather than missing/i);
 });
 
 test("grep's stated output cap is the real one", () => {
   // A number in a description that drifts from the constant is a quiet lie.
-  assert.match(grepTool.description, /stops after 250 matching lines/i);
+  assert.match(grepDef.description, /stops after 250 matching lines/i);
 });
 
 test("grep points at references for named symbols", () => {
@@ -458,14 +477,14 @@ test("grep points at references for named symbols", () => {
   // exact words "prefer references", and broke the moment that sentence was reworded
   // to stop overclaiming what references can do. A test that fails on a rewrite of
   // the same true statement is a test that punishes correcting the text.
-  assert.match(grepTool.description, /\breferences\b/, "grep must name references as the alternative");
-  assert.match(grepTool.description, /symbol you can NAME/i, "…and say when it is the better choice");
+  assert.match(grepDef.description, /\breferences\b/, "grep must name references as the alternative");
+  assert.match(grepDef.description, /symbol you can NAME/i, "…and say when it is the better choice");
 });
 
 // ── glob's description claims, pinned ────────────────────────────────────────
 
 test("glob's stated result cap is the real one", () => {
-  assert.match(globTool.description, /stop after 100 paths/i);
+  assert.match(globDef.description, /stop after 100 paths/i);
 });
 
 test("glob matches against the ROOT-RELATIVE path, as the description says", async () => {
@@ -474,12 +493,12 @@ test("glob matches against the ROOT-RELATIVE path, as the description says", asy
   await fs.writeFile(join(dir, "src", "deep", "a.ts"), "x\n");
   const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
 
-  const hit = await globTool.execute({ pattern: "src/**/*.ts" }, ctx);
+  const hit = await globDef.execute({ pattern: "src/**/*.ts" }, ctx);
   assert.match(hit.output, /a\.ts/, "a root-relative pattern must match");
   // A leading slash is an absolute path, which never matches a relative one.
-  const miss = await globTool.execute({ pattern: "/src/**/*.ts" }, ctx);
+  const miss = await globDef.execute({ pattern: "/src/**/*.ts" }, ctx);
   assert.match(miss.output, /No files found/, "a leading slash must not match");
-  assert.match(globTool.description, /RELATIVE to the root/i);
+  assert.match(globDef.description, /RELATIVE to the root/i);
 });
 
 test("glob does NOT list secrets or other agents' data, matching grep and read_file", async () => {
@@ -494,7 +513,7 @@ test("glob does NOT list secrets or other agents' data, matching grep and read_f
   await fs.writeFile(join(dir, "src", "ok.ts"), "export const a = 1;\n");
   const ctx = { cwd: dir, reads: new Map(), todos: [] } as unknown as ToolContext;
 
-  const r = await globTool.execute({ pattern: "**/*" }, ctx);
+  const r = await globDef.execute({ pattern: "**/*" }, ctx);
   assert.doesNotMatch(r.output, /\.env/, "a secrets file must not be listed");
   assert.doesNotMatch(r.output, /id_rsa/, "a private key must not be listed");
   assert.match(r.output, /ok\.ts/, "…while ordinary files still are");
@@ -589,4 +608,55 @@ test("with no working set, a ranged read always returns the lines", async () => 
 
   const r = await readFile.execute({ path: "big.ts", offset: 120, limit: 20 }, ctx);
   assert.match(r.output, /line 125/);
+});
+
+// ── search findings are durable ──────────────────────────────────────────────────
+// A grep's result used to live only in the transcript, which keeps the last 8 tool
+// results and sweeps to 2 at a task boundary, while a read is re-rendered from disk into
+// <working_files> on every step forever. That asymmetry taught the model, mechanically,
+// that reading sticks and searching does not — so it read narrowly and repeatedly where
+// one search would have answered it.
+
+test("a content grep puts the region it found into the working set", async () => {
+  const ctx = freshCtx();
+  await seed(ctx);
+  await grepDef.execute({ pattern: "TODO", output_mode: "content" }, ctx);
+
+  const hit = ctx.reads.get(join(ctx.cwd, "src/a.ts"));
+  assert.ok(hit, "the file a search matched inside is not tracked at all");
+  assert.deepEqual(hit!.focus, [{ start: 1, end: 4 }], "the match and its context should be the focus");
+});
+
+test("a search does NOT count as having read the file", async () => {
+  // grep returns matching lines, never the file. write_file's read-before-overwrite gate
+  // must not open on the strength of a search, or the model overwrites what it never saw.
+  const ctx = freshCtx();
+  await seed(ctx);
+  await grepDef.execute({ pattern: "TODO", output_mode: "content" }, ctx);
+
+  const hit = ctx.reads.get(join(ctx.cwd, "src/a.ts"));
+  assert.equal(hit!.viaSearch, true, "a search-sourced entry must be marked as one");
+  const r = await writeFile.execute({ path: "src/a.ts", content: "wiped\n" }, ctx);
+  assert.match(r.output, /hasn't been read this session/, "a grep opened the overwrite gate");
+});
+
+test("one search cannot flood the working set", async () => {
+  const ctx = freshCtx();
+  await fs.mkdir(join(ctx.cwd, "many"), { recursive: true });
+  for (let i = 0; i < 12; i++) {
+    await fs.writeFile(join(ctx.cwd, `many/f${i}.ts`), "const x = 1; // TODO\n".repeat(8));
+  }
+  await grepDef.execute({ pattern: "TODO", output_mode: "content" }, ctx);
+
+  assert.ok(ctx.reads.size <= 5, `a broad search tracked ${ctx.reads.size} files`);
+  for (const rec of ctx.reads.values()) {
+    assert.ok((rec.focus ?? []).length <= 4, "too many spans kept for one file");
+  }
+});
+
+test("files_with_matches leaves no focus behind — it showed no lines", async () => {
+  const ctx = freshCtx();
+  await seed(ctx);
+  await grepDef.execute({ pattern: "TODO", output_mode: "files_with_matches" }, ctx);
+  assert.equal(ctx.reads.size, 0, "a path list is not something the model was shown");
 });
