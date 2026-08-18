@@ -37,6 +37,7 @@
 import type OpenAI from "openai";
 import type { Responses } from "openai/resources/responses/responses";
 import { basename } from "node:path";
+import { clientId } from "../clientId.js";
 import type {
   ModelRequest,
   StreamEvent,
@@ -75,7 +76,7 @@ async function api(): Promise<OpenAI> {
       );
     }
     const { default: OpenAIClient } = await import("openai");
-    client = new OpenAIClient({ apiKey });
+    client = new OpenAIClient({ apiKey, defaultHeaders: { "User-Agent": clientId() } });
   }
   return client;
 }

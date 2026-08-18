@@ -24,6 +24,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { basename } from "node:path";
+import { clientId } from "../clientId.js";
 import { extractSearch, SEARCH_MAX_USES, SEARCH_SYSTEM } from "../searchBlocks.js";
 import type {
   ModelRequest,
@@ -67,7 +68,7 @@ function api(): Anthropic {
           "(A per-project .env or an exported shell variable also works.)",
       );
     }
-    client = new Anthropic({ apiKey });
+    client = new Anthropic({ apiKey, defaultHeaders: { "User-Agent": clientId() } });
   }
   return client;
 }

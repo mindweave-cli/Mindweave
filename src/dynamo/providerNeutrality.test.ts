@@ -53,6 +53,8 @@ const VENDOR_PREFIXES = [
   "mistral-",
   "ministral-",
   "llama-",
+  "muse-spark-",
+  "minimax-",
   "gpt-oss-",
   "gpt-",
 ];

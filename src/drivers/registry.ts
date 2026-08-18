@@ -28,6 +28,9 @@ import { xaiManifest } from "./xai/manifest.js";
 import { mistralManifest } from "./mistral/manifest.js";
 import { groqManifest } from "./groq/manifest.js";
 import { cerebrasManifest } from "./cerebras/manifest.js";
+import { geminiManifest } from "./gemini/manifest.js";
+import { metaManifest } from "./meta/manifest.js";
+import { minimaxManifest } from "./minimax/manifest.js";
 
 /** Every provider's cheap metadata, in display order. Always loaded. */
 const MANIFESTS: DriverManifest[] = [
@@ -41,6 +44,9 @@ const MANIFESTS: DriverManifest[] = [
   mistralManifest,
   groqManifest,
   cerebrasManifest,
+  geminiManifest,
+  metaManifest,
+  minimaxManifest,
 ];
 
 /** How to load each provider's wire code, on demand. Keyed by manifest id. */
@@ -55,6 +61,9 @@ const LOADERS: Record<string, () => Promise<Driver>> = {
   mistral: async () => (await import("./mistral/index.js")).mistralDriver,
   groq: async () => (await import("./groq/index.js")).groqDriver,
   cerebras: async () => (await import("./cerebras/index.js")).cerebrasDriver,
+  gemini: async () => (await import("./gemini/index.js")).geminiDriver,
+  meta: async () => (await import("./meta/index.js")).metaDriver,
+  minimax: async () => (await import("./minimax/index.js")).minimaxDriver,
 };
 
 /** The provider used when a model id doesn't match any other. */

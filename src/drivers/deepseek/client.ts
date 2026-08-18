@@ -25,6 +25,7 @@ import type {
   TurnOptions,
 } from "../types.js";
 import { compatStreamTurn, compatToolTurn, requireApiKey, type CompatProvider } from "../openaiCompat/wire.js";
+import { clientId } from "../clientId.js";
 import { extractSearch, SEARCH_MAX_USES, SEARCH_SYSTEM } from "../searchBlocks.js";
 import { parseInlineToolCalls } from "./inlineTools.js";
 import { DEFAULT_MODEL } from "./manifest.js";
@@ -185,6 +186,7 @@ export async function webSearch(query: string, options: SearchOptions = {}): Pro
     baseURL: ANTHROPIC_BASE_URL,
     // DeepSeek authenticates this endpoint with `x-api-key`, which is what the SDK
     // sends for `apiKey`. It ignores `anthropic-version` rather than requiring it.
+    defaultHeaders: { "User-Agent": clientId() },
   });
   const message = await client.messages.create(
     {

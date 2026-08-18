@@ -30,6 +30,7 @@ import type {
   Turn,
   Usage,
 } from "../types.js";
+import { clientId } from "../clientId.js";
 
 /** The facts one OpenAI-compatible provider has to supply. */
 export interface CompatProvider {
@@ -449,7 +450,7 @@ export function requireApiKey(provider: CompatProvider): string {
 async function post(provider: CompatProvider, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   const response = await fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}`, "User-Agent": clientId() },
     body: JSON.stringify(body),
     signal,
   });
@@ -468,7 +469,7 @@ async function postStream(
 ): Promise<Response> {
   const response = await fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}`, "User-Agent": clientId() },
     body: JSON.stringify(body),
     signal,
   });
@@ -502,7 +503,7 @@ export interface ListedModel {
  */
 export async function listModels(provider: CompatProvider): Promise<ListedModel[]> {
   const response = await fetch(`${provider.baseUrl}/models`, {
-    headers: { Authorization: `Bearer ${requireApiKey(provider)}` },
+    headers: { Authorization: `Bearer ${requireApiKey(provider)}`, "User-Agent": clientId() },
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
