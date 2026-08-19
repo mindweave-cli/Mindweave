@@ -1,5 +1,5 @@
 /**
- * chassis.test.ts — the pure graph + ranking core (no tree-sitter/LSP needed).
+ * chassis.test.ts — the pure graph core (no tree-sitter/LSP needed).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,7 +12,6 @@ process.env.USERPROFILE = FAKE_HOME;
 process.env.HOME = FAKE_HOME;
 
 import { CodeGraph, nestOutline } from "./graph.js";
-import { rankSymbols } from "./rank.js";
 import { CodeChassis, collectLspReferences } from "./index.js";
 import { asFileId, makeSymbolId, type FileId, type SymbolNode } from "./types.js";
 
@@ -56,20 +55,6 @@ test("confidence is name-level until the files are LSP-resolved", () => {
   assert.equal(g.references("hub").confidence, "name-level");
 });
 
-test("PageRank ranks a widely-referenced hub above an unreferenced leaf", () => {
-  const { g } = sampleGraph();
-  const ranked = rankSymbols(g, [], 10);
-  const hub = ranked.find((r) => r.symbol.name === "hub")!;
-  const leaf = ranked.find((r) => r.symbol.name === "leaf")!;
-  assert.ok(hub.score > leaf.score, `hub ${hub.score} should beat leaf ${leaf.score}`);
-});
-
-test("personalization boosts symbols in the focus files", () => {
-  const { g, leaf } = sampleGraph();
-  const unfocused = rankSymbols(g, [], 10).find((r) => r.symbol.name === "leaf")!.score;
-  const focused = rankSymbols(g, [leaf], 10).find((r) => r.symbol.name === "leaf")!.score;
-  assert.ok(focused > unfocused, `focusing leaf.ts should raise leaf (${focused} > ${unfocused})`);
-});
 
 test("clearFile removes a file's symbols and refs (for re-parsing)", () => {
   const { g, hub } = sampleGraph();
@@ -136,9 +121,6 @@ test("CodeChassis builds from a real project and answers queries end-to-end", as
 
   const outline = await ch.outline(join(dir, "src/main.ts"));
   assert.ok(outline.some((o) => o.name === "run"));
-
-  const rel = await ch.relevant([join(dir, "src/main.ts")], 10);
-  assert.ok(rel.length > 0);
 
   // span() bounds a symbol's full definition (tree-sitter tier → name-level).
   const spans = await ch.span("helper");

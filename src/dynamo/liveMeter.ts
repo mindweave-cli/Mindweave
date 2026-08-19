@@ -1,8 +1,8 @@
 /**
  * liveMeter.ts — the token figure that moves while a turn is working.
  *
- * Modelled directly on Claude Code's spinner counter, because a previous attempt to
- * improve on it was worse in a way worth recording.
+ * Shaped by how the best terminal agents do it, and by a previous attempt here that was
+ * worse in a way worth recording.
  *
  * THE QUANTITY IS OUTPUT ONLY, estimated from the characters that have streamed back.
  * Not billed tokens, not the prompt, not the context. The previous version showed a

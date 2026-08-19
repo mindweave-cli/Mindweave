@@ -1,18 +1,17 @@
 /**
- * codeIntel.test.ts — the chassis-backed tools (outline/definition/references/relevant).
+ * codeIntel.test.ts — the chassis-backed tools (outline/definition/references).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { outlineTool, definitionTool, referencesTool, relevantTool } from "./codeIntel.js";
+import { outlineTool, definitionTool, referencesTool } from "./codeIntel.js";
 import { grepDef } from "./grep.js";
 import { readSymbolTool } from "./readSymbol.js";
 import { CodeChassis } from "../alternator/chassis/index.js";
 import { CodeGraph } from "../alternator/chassis/graph.js";
 import { asFileId, makeSymbolId } from "../alternator/chassis/types.js";
-import { rankSymbols } from "../alternator/chassis/rank.js";
 import type { ToolContext } from "./types.js";
 
 async function projectCtx(): Promise<ToolContext> {
@@ -48,13 +47,6 @@ test("references tool finds use sites", async () => {
   assert.match(r.output, /src\/main\.ts:/);
 });
 
-test("relevant tool returns a ranked map", async () => {
-  const ctx = await projectCtx();
-  const r = await relevantTool.execute({ path: "src/main.ts" }, ctx);
-  assert.ok(r.output.length > 0);
-  assert.doesNotMatch(r.output, /isn't available/);
-});
-
 test("tools degrade gracefully when no chassis is present", async () => {
   const ctx: ToolContext = { cwd: "/p", reads: new Map(), todos: [] };
   const r = await definitionTool.execute({ name: "x" }, ctx);
@@ -65,50 +57,6 @@ test("tools degrade gracefully when no chassis is present", async () => {
 // It is the one code tool that answers "what matters here" rather than "where is X",
 // and the old wording never said so, which is why it went unused. The claims that
 // replaced it are structural facts about the ranking, so they are pinned to it.
-
-test("relevant needs NO input, which is the whole reason it exists", () => {
-  // The differentiator: grep/definition/references all require a name. If this tool
-  // ever gained a required parameter, the description's central claim would be false.
-  const required = (relevantTool.parameters as { required?: string[] }).required ?? [];
-  assert.deepEqual(required, [], "relevant must be callable with no arguments");
-  assert.match(relevantTool.description, /without needing to know/i);
-});
-
-test("the ranking really is structural, as the description says", () => {
-  // A symbol many files reference must outrank one nothing references. This is the
-  // claim that tells the model the tool is not doing text similarity.
-  const g = new CodeGraph();
-  const hub = asFileId("/p/hub.ts");
-  const leaf = asFileId("/p/leaf.ts");
-  const add = (file: ReturnType<typeof asFileId>, name: string) =>
-    g.addSymbol({ id: makeSymbolId(file, name, 1), name, kind: "function", file, line: 1 });
-  add(hub, "hub");
-  add(leaf, "leaf");
-  for (const p of ["/p/a.ts", "/p/b.ts", "/p/c.ts"]) {
-    const f = asFileId(p);
-    add(f, `s_${p}`);
-    g.addRef("hub", { file: f, line: 2, confidence: "name-level" });
-  }
-  const ranked = rankSymbols(g, [], 10);
-  const hubScore = ranked.find((r) => r.symbol.name === "hub")!.score;
-  const leafScore = ranked.find((r) => r.symbol.name === "leaf")!.score;
-  assert.ok(hubScore > leafScore, "a widely-depended-on symbol must outrank an unreferenced one");
-  assert.match(relevantTool.description, /references converge on it/i);
-});
-
-test("relevant returns locations, not code, exactly as the description promises", async () => {
-  const ctx = await projectCtx();
-  ctx.reads.set(join(ctx.cwd, "src/main.ts"), { mtimeMs: 0, size: 0, full: true, touchedAt: 1 });
-  const r = await relevantTool.execute({}, ctx);
-  // file:line rows, and no function bodies.
-  assert.match(r.output, /:\d+/, "rows carry a line number");
-  assert.doesNotMatch(r.output, /return 1;/, "bodies must not be inlined; that is read_symbol's job");
-  assert.match(relevantTool.description, /Returns locations only/i);
-});
-
-// ── references: the certainty distinction must survive ───────────────────────
-// A name-level list read as a resolved one is how a refactor edits the wrong file.
-// The description now draws that line, so it is pinned to the graph's own model.
 
 test("a reference in a comment or a string is NOT matched, as promised", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mindweave-refs-"));

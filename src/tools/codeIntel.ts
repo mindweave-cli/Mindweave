@@ -11,7 +11,7 @@
 import { promises as fs } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { relativize, resolvePath } from "./paths.js";
-import { allChassis, chassisForPath, mergedDefinition, mergedReferences, mergedRelevant } from "./chassisMux.js";
+import { allChassis, chassisForPath, mergedDefinition, mergedReferences } from "./chassisMux.js";
 import { walkFiles } from "./walk.js";
 import { excludedFromSearch } from "./guard.js";
 import { isSupported } from "../alternator/chassis/treesitter.js";
@@ -207,65 +207,6 @@ const referencesDef: Tool = {
   },
 };
 
-const relevantDef: Tool = {
-  name: "relevant",
-  readOnly: true,
-  // This tool was effectively invisible. The old description said it showed "the code
-  // most relevant right now", which sounds like every other search tool and gave the
-  // model no way to tell when it beats one. What makes it different is the one thing
-  // that went unsaid: it is the only code tool that does not need a name as input.
-  // grep, definition and references all answer "where is X"; this answers "what is X"
-  // when you cannot name X yet. The ranking really is structural (personalized
-  // PageRank over the reference graph — see alternator/chassis/rank.ts), so the
-  // description says so rather than calling it relevance and leaving the model to
-  // guess whether that means text similarity.
-  description:
-    "Rank the symbols that matter most where you are working, WITHOUT needing to know " +
-    "their names. That is what makes it different: grep, definition and references all " +
-    "need you to already know what you are looking for, so none of them can answer " +
-    "'what is important in this part of the codebase'. This can. " +
-    "The ranking is structural rather than textual: a symbol scores by how much the " +
-    "codebase's own references converge on it, weighted toward the files you have been " +
-    "working in. Something twenty places depend on outranks a private helper, and a " +
-    "symbol in a different folder that your current work leans on still surfaces, " +
-    "because the whole workspace is ranked as one graph. " +
-    "Returns locations only (file:line, kind, name), not code, so follow up with " +
-    "read_symbol on anything worth opening. " +
-    "Reach for it when you land in unfamiliar code, or before changing an area you do " +
-    "not know well and want to see what actually depends on what. Use outline for the " +
-    "shape of one file, definition or references for a symbol you can already name, and " +
-    "grep for text.",
-  parameters: {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      path: {
-        type: "string",
-        description:
-          "Aim the ranking at this file or directory. Omit it to rank around the files " +
-          "you have read most recently, which is usually what you want mid-task.",
-      },
-      limit: { type: "integer", minimum: 1, description: "Max symbols to return (default 25)." },
-    },
-  },
-  async execute(args, ctx): Promise<ToolResult> {
-    if (allChassis(ctx).length === 0) return degraded();
-    const focus =
-      typeof args.path === "string" && args.path.trim()
-        ? [resolvePath(ctx, args.path.trim())]
-        : [...ctx.reads.keys()].slice(-5);
-    const limit = typeof args.limit === "number" && args.limit > 0 ? Math.floor(args.limit) : 25;
-
-    const ranked = await mergedRelevant(ctx, focus, limit);
-    if (ranked.length === 0) {
-      return { output: `The code map has nothing to rank yet.${indexingNote(ctx)}`, summary: "relevant — none" };
-    }
-    const body = ranked
-      .map((r) => `${relativize(ctx, r.symbol.file)}:${r.symbol.line}  ${r.symbol.kind} ${r.symbol.name}`)
-      .join("\n");
-    return { output: body + indexingNote(ctx), summary: `relevant (${ranked.length})` };
-  },
-};
 
 /** Render a directory rollup: counts, its most central symbols, and folder deps. */
 function renderDirSummary(ctx: ToolContext, s: DirectorySummary): string {
@@ -281,7 +222,7 @@ function renderDirSummary(ctx: ToolContext, s: DirectorySummary): string {
 }
 
 /** Render a nested outline: indent by depth, show each symbol's doc when present. */
-function renderOutlineEntries(entries: readonly OutlineEntry[], depth = 0): string[] {
+export function renderOutlineEntries(entries: readonly OutlineEntry[], depth = 0): string[] {
   const out: string[] = [];
   for (const e of entries) {
     const indent = "  ".repeat(depth);
@@ -320,10 +261,10 @@ function navigational(tool: Tool): Tool {
   return {
     ...tool,
     /**
-     * Deferred, all four of them, matching how Claude Code holds its LSPTool behind tool
-     * search. They answer structural questions — where is this defined, what calls it,
-     * what is related — which is a phase of a task rather than a step in the edit loop,
-     * and four schemas is 1,257 tokens in front of the model on every single request.
+     * Deferred, all four of them. They answer structural questions — where is this
+     * defined, what calls it, what is related — which is a phase of a task rather than a
+     * step in the edit loop, and four schemas is 1,257 tokens in front of the model on
+     * every single request.
      *
      * Marked here rather than on each definition because it is one decision about one
      * family; splitting it four ways is four places for it to drift.
@@ -338,4 +279,3 @@ function navigational(tool: Tool): Tool {
 export const outlineTool = navigational(outlineDef);
 export const definitionTool = navigational(definitionDef);
 export const referencesTool = navigational(referencesDef);
-export const relevantTool = navigational(relevantDef);

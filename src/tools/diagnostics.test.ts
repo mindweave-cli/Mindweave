@@ -16,7 +16,6 @@ function chassisWith(diags: CodeDiagnostic[]): Chassis {
     async definition() { return { symbols: [], confidence: "name-level" }; },
     async references() { return { refs: [], confidence: "name-level" }; },
     async dependents() { return []; },
-    async relevant() { return []; },
     async span() { return []; },
     async directorySummary() { return null; },
     async diagnostics() { return diags; },

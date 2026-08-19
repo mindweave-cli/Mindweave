@@ -2327,8 +2327,7 @@ function StatusLine({
    *  includes the in-flight call this one cannot yet see. */
   usage: TaskUsage | null;
   /** Output tokens received so far this turn, estimated from the streamed characters and
-   *  eased toward the real total — the same quantity, and the same easing, Claude Code's
-   *  spinner shows. Deliberately NOT the turn's billed cost: input does not arrive over
+   *  eased toward the real total. Deliberately NOT the turn's billed cost: input does not arrive over
    *  time, so putting it here makes the counter leap and then freeze. The receipt below
    *  carries the cost. Read through a getter, fresh every frame. See dynamo/liveMeter.ts. */
   received: () => number;

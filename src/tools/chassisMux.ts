@@ -10,9 +10,8 @@
  */
 import { isAbsolute, relative } from "node:path";
 import type { ToolContext } from "./types.js";
-import { asFileId, type Chassis, type Confidence, type Ref, type RankedSymbol, type SymbolNode, type SymbolSpan } from "../alternator/chassis/types.js";
+import { asFileId, type Chassis, type Confidence, type Ref, type SymbolNode, type SymbolSpan } from "../alternator/chassis/types.js";
 import { CodeGraph, combineGraphs } from "../alternator/chassis/graph.js";
-import { rankSymbols } from "../alternator/chassis/rank.js";
 
 /** Every chassis in play (per-root set, or just the primary). */
 export function allChassis(ctx: ToolContext): Chassis[] {
@@ -101,33 +100,3 @@ function graphOf(chassis: Chassis): CodeGraph | null {
   return g instanceof CodeGraph ? g : null;
 }
 
-/**
- * Relevance across the whole workspace. With more than one root we rank over the
- * UNION of every root's graph (cross-root linking): a symbol defined in one folder
- * but referenced from another gains centrality from those references, so starting
- * in the backend surfaces the frontend code that leans on it, and vice versa. When
- * a chassis doesn't expose its graph (e.g. not yet built), we fall back to ranking
- * each root and merging by score.
- */
-export async function mergedRelevant(
-  ctx: ToolContext,
-  focusFiles: readonly string[],
-  limit: number,
-): Promise<readonly RankedSymbol[]> {
-  const list = allChassis(ctx);
-  if (list.length === 1) return list[0]!.relevant(focusFiles, limit);
-
-  const graphs = list.map(graphOf).filter((g): g is CodeGraph => g !== null);
-  if (graphs.length > 0) {
-    const unified = combineGraphs(graphs);
-    return rankSymbols(unified, focusFiles.map(asFileId), limit);
-  }
-
-  // Fallback: no exposed graphs — rank each root separately and merge by score.
-  const ranked: RankedSymbol[] = [];
-  for (const ch of list) {
-    const focus = focusFiles.filter((f) => chassisForPath(ctx, f) === ch);
-    ranked.push(...(await ch.relevant(focus, limit)));
-  }
-  return ranked.sort((a, b) => b.score - a.score).slice(0, limit);
-}

@@ -27,9 +27,9 @@ const STATUSES: TodoStatus[] = ["pending", "in_progress", "completed"];
 
 export const todoWrite: Tool = {
   name: "todo_write",
-  /** Deferred, on Claude Code's pattern (its TodoWrite is deferred too): a task list is
-   *  a planning instrument reached for once on a substantial task, not a step in the edit
-   *  loop, so its schema does not belong in front of the model on every request. */
+  /** Deferred: a task list is a planning instrument reached for once on a substantial
+   *  task, not a step in the edit loop, so its schema does not belong in front of the
+   *  model on every request. */
   deferred: true,
   readOnly: false,
   description:

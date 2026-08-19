@@ -18,7 +18,6 @@ import { loadCache, saveCache, type ChassisSnapshot, type FileStamp } from "./ca
 import { CodeGraph } from "./graph.js";
 import { LspManager } from "./lsp.js";
 import { ensureServers, languageIdFor } from "./servers.js";
-import { rankSymbols } from "./rank.js";
 import { isSupported, treeSitterExtract, treeSitterSpan } from "./treesitter.js";
 import { isMarkupSupported, extractMarkup, markupSpan } from "./markup.js";
 import type { LineSpan } from "../../tools/spanCore.js";
@@ -33,7 +32,6 @@ import {
   type FileId,
   type OutlineEntry,
   type Ref,
-  type RankedSymbol,
   type SymbolKind,
   type SymbolNode,
   type SymbolSpan,
@@ -247,11 +245,6 @@ export class CodeChassis implements Chassis {
     return this.graph.references(name);
   }
 
-  async relevant(focusFiles: readonly string[], limit = 25): Promise<readonly RankedSymbol[]> {
-    const focus: FileId[] = focusFiles.map(asFileId);
-    return rankSymbols(this.graph, focus, limit);
-  }
-
   async span(name: string, opts: { path?: string; line?: number } = {}): Promise<readonly SymbolSpan[]> {
     const wantFile = opts.path ? asFileId(opts.path) : null;
     // Locate the symbol (LSP-resolved or graph) to know which file(s) hold it.
@@ -311,12 +304,13 @@ export class CodeChassis implements Chassis {
     let symbolCount = 0;
     for (const f of files) symbolCount += this.graph.symbolsInFile(f).length;
 
-    // Central symbols within the folder (rank personalized to its files); fall back
-    // to the first few if ranking has nothing yet.
-    const ranked = await this.relevant(files, 8);
-    const topSymbols = ranked.length
-      ? ranked.map((r) => r.symbol)
-      : files.flatMap((f) => this.graph.symbolsInFile(f)).slice(0, 8);
+    // A few symbols from the folder, to say what lives here.
+    //
+    // This used to be the top of a personalized PageRank. The ranking is gone: across
+    // every stored session its only tool, `relevant`, was called zero times out of 774
+    // tool calls, and a summary listing the first few symbols answers the same question
+    // this line is asking without a graph walk behind it.
+    const topSymbols = files.flatMap((f) => this.graph.symbolsInFile(f)).slice(0, 8);
 
     // Folders this one depends on: imports that leave the directory, by their folder.
     const deps = new Set<FileId>();
@@ -469,9 +463,6 @@ export const NULL_CHASSIS: Chassis = {
   },
   async references() {
     return { refs: [], confidence: "name-level" };
-  },
-  async relevant() {
-    return [];
   },
   async span() {
     return [];

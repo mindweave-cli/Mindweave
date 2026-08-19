@@ -26,8 +26,7 @@ import { mcpResourceTool } from "./mcpResources.js";
 import { workspaceTool } from "./workspace.js";
 import { todoWrite } from "./todo.js";
 import { askUserTool } from "./askUser.js";
-import { readSymbolTool } from "./readSymbol.js";
-import { outlineTool, definitionTool, referencesTool, relevantTool } from "./codeIntel.js";
+import { outlineTool, definitionTool, referencesTool } from "./codeIntel.js";
 import { web } from "./web.js";
 import { replaceSymbolBody } from "./replaceSymbol.js";
 import { spawnSubagent } from "./subagent.js";
@@ -40,8 +39,6 @@ export const DEFERRED_TOOLS: Tool[] = [
   outlineTool,
   definitionTool,
   referencesTool,
-  relevantTool,
-  readSymbolTool,
   spawnSubagent,
   web,
   replaceSymbolBody,

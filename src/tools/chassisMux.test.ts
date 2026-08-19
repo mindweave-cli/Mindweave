@@ -5,8 +5,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { allChassis, chassisForPath, mergedDefinition, mergedReferences, mergedRelevant } from "./chassisMux.js";
-import { asFileId, makeSymbolId, type Chassis, type RankedSymbol, type SymbolNode } from "../alternator/chassis/types.js";
+import { allChassis, chassisForPath, mergedDefinition, mergedReferences } from "./chassisMux.js";
+import { asFileId, makeSymbolId, type Chassis, type SymbolNode } from "../alternator/chassis/types.js";
 import { CodeGraph } from "../alternator/chassis/graph.js";
 import type { ToolContext } from "./types.js";
 
@@ -15,13 +15,12 @@ function sym(file: string, name: string, line: number): SymbolNode {
   return { id: makeSymbolId(f, name, line), name, kind: "function", file: f, line };
 }
 
-function fakeChassis(defs: Record<string, SymbolNode[]>, ranked: RankedSymbol[]): Chassis {
+function fakeChassis(defs: Record<string, SymbolNode[]>): Chassis {
   return {
     outline: async () => [],
     definition: async (name) => ({ symbols: defs[name] ?? [], confidence: "name-level" }),
     references: async () => ({ refs: [], confidence: "name-level" }),
     dependents: async () => [],
-    relevant: async (_focus, limit = 25) => ranked.slice(0, limit),
     span: async () => [],
     directorySummary: async () => null,
     diagnostics: async () => [],
@@ -32,7 +31,7 @@ function fakeChassis(defs: Record<string, SymbolNode[]>, ranked: RankedSymbol[])
 /** A chassis backed by a real CodeGraph it exposes via graphRef (drives cross-root
  *  ranking, the same path CodeChassis takes). */
 function fakeWithGraph(graph: CodeGraph): Chassis {
-  return { ...fakeChassis({}, []), graphRef: () => graph } as Chassis & { graphRef: () => CodeGraph };
+  return { ...fakeChassis({}), graphRef: () => graph } as Chassis & { graphRef: () => CodeGraph };
 }
 
 const ROOT_A = process.platform === "win32" ? "C:\\a" : "/a";
@@ -53,8 +52,8 @@ function ctxTwo(a: Chassis, b: Chassis): ToolContext {
 }
 
 test("allChassis lists every root's map; chassisForPath routes by owner", () => {
-  const a = fakeChassis({}, []);
-  const b = fakeChassis({}, []);
+  const a = fakeChassis({});
+  const b = fakeChassis({});
   const ctx = ctxTwo(a, b);
   assert.equal(allChassis(ctx).length, 2);
   assert.equal(chassisForPath(ctx, join(ROOT_A, "src", "x.ts")), a);
@@ -62,8 +61,8 @@ test("allChassis lists every root's map; chassisForPath routes by owner", () => 
 });
 
 test("mergedDefinition unions hits from both roots", async () => {
-  const a = fakeChassis({ foo: [sym(join(ROOT_A, "x.ts"), "foo", 1)] }, []);
-  const b = fakeChassis({ foo: [sym(join(ROOT_B, "y.ts"), "foo", 9)] }, []);
+  const a = fakeChassis({ foo: [sym(join(ROOT_A, "x.ts"), "foo", 1)] });
+  const b = fakeChassis({ foo: [sym(join(ROOT_B, "y.ts"), "foo", 9)] });
   const { symbols } = await mergedDefinition(ctxTwo(a, b), "foo");
   assert.equal(symbols.length, 2);
 });
@@ -72,19 +71,19 @@ test("a merged list is only 'resolved' when EVERY root resolved it", async () =>
   // One root has a language server, the other is on the tree-sitter tier. The
   // merged list is one list to the reader, so it must not be marked resolved:
   // that is what suppresses the "verify with grep" caveat the name-level half needs.
-  const resolvedRoot = fakeChassis({}, []);
+  const resolvedRoot = fakeChassis({});
   resolvedRoot.definition = async (name) => ({
     symbols: [sym(join(ROOT_A, "x.ts"), name, 1)],
     confidence: "resolved",
   });
-  const nameLevelRoot = fakeChassis({ foo: [sym(join(ROOT_B, "y.ts"), "foo", 9)] }, []);
+  const nameLevelRoot = fakeChassis({ foo: [sym(join(ROOT_B, "y.ts"), "foo", 9)] });
 
   const mixed = await mergedDefinition(ctxTwo(resolvedRoot, nameLevelRoot), "foo");
   assert.equal(mixed.symbols.length, 2);
   assert.equal(mixed.confidence, "name-level");
 
   // Both resolved is still resolved — the rule must not just always downgrade.
-  const otherResolved = fakeChassis({}, []);
+  const otherResolved = fakeChassis({});
   otherResolved.definition = async (name) => ({
     symbols: [sym(join(ROOT_B, "y.ts"), name, 9)],
     confidence: "resolved",
@@ -94,12 +93,12 @@ test("a merged list is only 'resolved' when EVERY root resolved it", async () =>
 });
 
 test("mergedReferences carries the same weakest-wins rule", async () => {
-  const resolvedRoot = fakeChassis({}, []);
+  const resolvedRoot = fakeChassis({});
   resolvedRoot.references = async () => ({
     refs: [{ file: asFileId(join(ROOT_A, "x.ts")), line: 3, confidence: "resolved" as const }],
     confidence: "resolved",
   });
-  const nameLevelRoot = fakeChassis({}, []);
+  const nameLevelRoot = fakeChassis({});
   nameLevelRoot.references = async () => ({
     refs: [{ file: asFileId(join(ROOT_B, "y.ts")), line: 4, confidence: "name-level" as const }],
     confidence: "name-level",
@@ -109,26 +108,3 @@ test("mergedReferences carries the same weakest-wins rule", async () => {
   assert.equal(confidence, "name-level");
 });
 
-test("mergedRelevant merges by score and caps to the limit (no graphs)", async () => {
-  const a = fakeChassis({}, [{ symbol: sym(join(ROOT_A, "x.ts"), "lo", 1), score: 1 }]);
-  const b = fakeChassis({}, [{ symbol: sym(join(ROOT_B, "y.ts"), "hi", 1), score: 5 }]);
-  const ranked = await mergedRelevant(ctxTwo(a, b), [], 1);
-  assert.equal(ranked.length, 1);
-  assert.equal(ranked[0]!.symbol.name, "hi"); // highest score wins across roots
-});
-
-test("cross-root linking: a backend symbol referenced from the frontend ranks top", async () => {
-  // Backend defines Hub (and a leaf); the frontend references Hub from two files.
-  const back = new CodeGraph();
-  back.addSymbol(sym(join(ROOT_A, "models.ts"), "Hub", 1));
-  back.addSymbol(sym(join(ROOT_A, "util.ts"), "Leaf", 1));
-  const front = new CodeGraph();
-  front.addSymbol(sym(join(ROOT_B, "a.ts"), "feA", 1));
-  front.addSymbol(sym(join(ROOT_B, "b.ts"), "feB", 1));
-  front.addRef("Hub", { file: asFileId(join(ROOT_B, "a.ts")), line: 2, confidence: "name-level" });
-  front.addRef("Hub", { file: asFileId(join(ROOT_B, "b.ts")), line: 2, confidence: "name-level" });
-
-  const ranked = await mergedRelevant(ctxTwo(fakeWithGraph(back), fakeWithGraph(front)), [], 10);
-  // Centrality flowed across roots: the cross-root hub outranks every leaf.
-  assert.equal(ranked[0]!.symbol.name, "Hub");
-});

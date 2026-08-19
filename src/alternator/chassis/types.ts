@@ -83,11 +83,6 @@ export interface OutlineEntry {
   readonly children?: readonly OutlineEntry[];
 }
 
-/** A symbol with its PageRank score (for the relevance map). */
-export interface RankedSymbol {
-  readonly symbol: SymbolNode;
-  readonly score: number;
-}
 
 /** A directory-level rollup: what a folder contains and depends on, at a glance. */
 export interface DirectorySummary {
@@ -147,8 +142,6 @@ export interface Chassis {
   definition(name: string): Promise<{ symbols: readonly SymbolNode[]; confidence: Confidence }>;
   /** Who references a symbol named `name`. */
   references(name: string): Promise<{ refs: readonly Ref[]; confidence: Confidence }>;
-  /** PageRank-ranked symbols most relevant to a set of focus files. */
-  relevant(focusFiles: readonly string[], limit?: number): Promise<readonly RankedSymbol[]>;
   /** The line span(s) of a named symbol's definition, for reading/replacing its body.
    *  `opts.path` narrows to one file; `opts.line` (1-based) disambiguates overloads.
    *  Empty when the symbol can't be located or its span can't be bounded. */

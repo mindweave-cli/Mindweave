@@ -11,7 +11,7 @@ import { writeFile } from "./writeFile.js";
 import { edit } from "./edit.js";
 import { runCommand } from "./runCommand.js";
 import { search } from "./search.js";
-import { outlineTool, definitionTool, referencesTool, relevantTool } from "./codeIntel.js";
+import { outlineTool, definitionTool, referencesTool } from "./codeIntel.js";
 import { readSymbolTool } from "./readSymbol.js";
 import { replaceSymbolBody } from "./replaceSymbol.js";
 import { diagnosticsTool } from "./diagnostics.js";
@@ -40,7 +40,6 @@ export const TOOLS: Tool[] = [
   outlineTool,
   definitionTool,
   referencesTool,
-  relevantTool,
   readSymbolTool,
   diagnosticsTool,
   // Background shells (read-only: inspect long-running commands)

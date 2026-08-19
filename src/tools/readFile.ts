@@ -16,6 +16,9 @@ import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { requestAgentDataAccess } from "./approval.js";
 import { relativize, resolvePath, nextTouch, touch } from "./paths.js";
 import { addFocus, coversSpan } from "./focus.js";
+import { chassisForPath } from "./chassisMux.js";
+import { renderOutlineEntries } from "./codeIntel.js";
+import { estimateTokens } from "../memory/compaction.js";
 
 // Caps protect the model's context window, not the disk. They are deliberately
 // MODEL-AGNOSTIC fixed defaults, not derived from any one model's context window —
@@ -38,6 +41,24 @@ const MAX_OUTPUT_CHARS = 120_000;
  */
 const MAX_FILES = 10;
 
+/**
+ * Token budget for a WHOLE-file read, past which the file's structure is returned
+ * instead of its contents.
+ *
+ * The habit this exists to break: answering "where is this handled?" by reading a
+ * 1,700-line file. That costs its full length on the request that fetches it AND on
+ * every request afterwards for the rest of the turn, so one careless read is re-billed
+ * five or ten times. The usual answer is a hard token cap that refuses the read; this
+ * one does better, because the code map already knows the file's shape.
+ *
+ * ~8,000 tokens is roughly 700 lines of code. Below that a whole read is a reasonable
+ * way to understand a file. Above it, the model almost never wants all of it — it wants
+ * one function — and an outline plus a ranged follow-up costs a fraction of the same
+ * answer. A range is NEVER budgeted: asking for specific lines is already the careful
+ * behaviour, and second-guessing it would just cost a round trip.
+ */
+const WHOLE_READ_TOKEN_BUDGET = envInt("MINDWEAVE_WHOLE_READ_TOKENS", 8_000);
+
 // Returned instead of re-sending identical content when a file is unchanged
 // since the model last read it — pure token savings on a re-read.
 const FILE_UNCHANGED =
@@ -57,9 +78,16 @@ export const readFile: Tool = {
     `this once per file. Each extra call is a full model round-trip that re-sends the ` +
     `whole conversation, so four separate reads cost several times what one read of ` +
     `four files costs, and take four times as long. Up to ${MAX_FILES} at a time. ` +
-    `Reads up to ${MAX_LINES} lines per file from the start by default; pass \`offset\` ` +
-    `(and optionally \`limit\`) to read a specific range — a range applies to a SINGLE ` +
-    `file, so ask for one path when you use them. A file larger than ` +
+    `When you already know which part of a file you need, READ ONLY THAT PART: pass ` +
+    `\`offset\` (and optionally \`limit\`). A range applies to a SINGLE file, so ask for ` +
+    `one path when you use them. Reading a file whole costs its full length on this ` +
+    `request and on every later one this turn, so a needless whole read is paid for many ` +
+    `times over. ` +
+    `A whole read past ~${Math.round(WHOLE_READ_TOKEN_BUDGET / 1000)}k tokens returns the ` +
+    `file's STRUCTURE — its symbols with line numbers — instead of its contents, so you ` +
+    `can follow up with the exact range, or with read_symbol for one symbol by name. ` +
+    `That is an answer, not a failure. ` +
+    `Otherwise reads up to ${MAX_LINES} lines per file from the start. A file larger than ` +
     `${Math.round(MAX_BYTES / 1024)} KB must be read with \`limit\` set rather than whole. ` +
     `Very long output is truncated at the end, and says so. ` +
     `One unreadable path does not fail the others: it is reported in place and the rest ` +
@@ -218,6 +246,43 @@ async function readOne(
 
   const buf = await fs.readFile(filePath);
   if (looksBinary(buf)) return bad(`${trimmed} looks like a binary file; cannot read as text.`);
+
+  // A WHOLE read of a big file: answer with the file's shape instead of its contents.
+  //
+  // This is the one place the code map pays for itself. The alternative on offer
+  // elsewhere is an error telling the model to "use offset and limit" — which it cannot
+  // act on, because it does not know which lines it wants yet. That is the whole reason
+  // the whole-file read happens. An outline answers the question the read was really
+  // asking ("where in here is the thing I need?") and makes the follow-up a precise
+  // range instead of another guess.
+  //
+  // Ranges are exempt by construction: this branch only runs when `full` is true.
+  if (full) {
+    const estimate = estimateTokens(buf.toString("utf8"));
+    if (estimate > WHOLE_READ_TOKEN_BUDGET) {
+      const shown = relativize(ctx, filePath);
+      const lineTotal = buf.toString("utf8").split(/\r?\n/).length;
+      const head =
+        `${shown} is ${lineTotal} lines (~${Math.round(estimate / 100) / 10}k tokens), too large to read whole — ` +
+        `reading it would re-send all of that on every later request this turn.`;
+      const entries = (await chassisForPath(ctx, filePath)?.outline(filePath)) ?? [];
+      if (entries.length > 0) {
+        return {
+          label: shown,
+          body:
+            `${head}\n\nIts structure, with line numbers:\n\n` +
+            renderOutlineEntries(entries).join("\n") +
+            `\n\nRead the part you need with \`offset\`/\`limit\`, or read_symbol for one symbol by name.`,
+          summary: `outlined ${shown} (${lineTotal} lines — too large to read whole)`,
+        };
+      }
+      // No outline for this file type. Say the size and how to proceed, which is all a
+      // language the code map cannot parse allows us to say honestly.
+      return bad(
+        `${head} Read a range with \`offset\` and \`limit\`, or search it for the part you need.`,
+      );
+    }
+  }
 
   // Split on CRLF or LF so a Windows file doesn't show a trailing \r on every
   // line — the model can't see it, would omit it from an edit's old_string, and
