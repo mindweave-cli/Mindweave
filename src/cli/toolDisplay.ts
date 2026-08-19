@@ -43,7 +43,10 @@ const DISPLAY_NAME: Record<string, string> = {
   kill_shell: "Shell",
   add_mcp_server: "MCP",
   mcp_resource: "MCP",
-  find_tools: "MCP",
+  // "Tools", not "MCP". It searches BOTH pools — the deferred native tools and any MCP
+  // catalog — and the row was reading "MCP(sessions)" for a search that loaded three of
+  // Mindweave's own tools and never touched a server.
+  find_tools: "Tools",
   governor: "Governor",
   exit_plan: "Plan",
   ask_user: "Ask",
@@ -221,8 +224,17 @@ export function toolDisplay(name: string, args: Record<string, unknown>): ToolDi
   if (name === "screenshot") return { name: display, arg: str(args.window) || undefined, kind };
   if (name === "spawn_subagent") return { name: display, arg: clip(str(args.task), 48) || undefined, kind };
 
-  const path = str(args.path);
-  const detail = path ? base(path) : str(args.symbol) || str(args.name) || str(args.query) || str(args.label);
+  // `paths` is a LIST — read_file takes several files in one call, and the row has to
+  // say which. One file reads as its name; several read as a count, because four
+  // basenames do not fit a header and the group below already lists them.
+  const many = Array.isArray(args.paths) ? args.paths.filter((v): v is string => typeof v === "string") : [];
+  const path = many.length > 0 ? (many.length === 1 ? (many[0] ?? "") : "") : str(args.path);
+  const detail =
+    many.length > 1
+      ? `${many.length} files`
+      : path
+        ? base(path)
+        : str(args.symbol) || str(args.name) || str(args.query) || str(args.label);
   return { name: display, arg: detail || undefined, kind };
 }
 

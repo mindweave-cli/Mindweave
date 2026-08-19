@@ -169,17 +169,30 @@ test("EVERY summarizer rejection counts toward the circuit breaker", () => {
 });
 
 test("microcompaction's result is never discarded on a counter nobody remembered", () => {
-  // Gating the write on a hand-picked subset meant a pass that only cleared edit inputs
-  // or only evicted images did the work and threw it away.
-  const body = engineSource.match(/if \(used\(\) >= microBar\) \{[\s\S]*?\n  \}/)?.[0];
+  // The original defect: gating the write on a hand-picked subset of counters meant a
+  // pass that only cleared edit INPUTS, or only evicted IMAGES, did the work and threw
+  // it away — and every new kind of clearing had to remember to add itself to that
+  // condition or be silently dropped.
+  //
+  // The write IS conditional now, deliberately: clearing rewrites the cached prefix, so
+  // a clear reclaiming a little costs more than it saves (see `clearIsWorthIt`). That
+  // does not reintroduce the defect, and the reason is the point of this test — the
+  // decision is made on TOKENS, which every kind of clearing moves, rather than on
+  // counters, which each only see their own category. A measurement cannot forget a
+  // category the way a hand-written boolean can.
+  const body = engineSource.match(/if \(used\(\) >= microBar[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
   assert.ok(body, "microcompact block not found");
-  // Matched loosely on the ASSIGNMENT rather than on an exact call, so adding an
-  // argument to microcompact does not read as removing the guarantee. What must hold is
-  // that the result is assigned unconditionally, not that the call has a fixed shape.
-  assert.match(body, /session\.transcript = microcompact\(/, "the result must still be taken");
-  assert.match(body, /\)\.entries;/, "and assigned, not inspected first");
+  assert.match(body, /const proposed = microcompact\(/, "the result must still be computed in full");
+  assert.match(body, /session\.transcript = proposed;/, "and committed as a whole, not merged piecemeal");
+  // The decision must be a token measurement over the WHOLE proposed transcript.
+  assert.match(body, /estimateEntriesTokens\(session\.transcript\)/, "the before size must be measured");
+  assert.match(body, /estimateEntriesTokens\(proposed\)/, "and the after size, from the proposal itself");
+  assert.match(body, /clearIsWorthIt\(/, "the commit decision belongs in the tested pure function");
+  // No per-category counter may gate the write — that is the defect this test is named
+  // for, and it is still forbidden.
   assert.doesNotMatch(body, /cleared > 0 \|\| recapsCleared > 0/, "no counter subset may gate the write");
   assert.doesNotMatch(body, /if \([a-z]+\.cleared/i, "nor any single counter");
+  assert.doesNotMatch(body, /\.imagesCleared|\.inputsCleared|\.recapsCleared/, "nor any category counter at all");
 });
 
 test("nothing is pushed to the transcript between tool_calls and their results", () => {
@@ -205,12 +218,16 @@ test("nothing is pushed to the transcript between tool_calls and their results",
   );
 });
 
-test("the reply-style rules sit at the BOUNDARY, not in the cached prefix", () => {
-  // They were in the system prompt and were reliably ignored by turn three — the same
-  // burying the standing rules were moved out of the prefix to escape.
+test("the reply-style rules live in the CACHED prefix, not the per-request tail", () => {
+  // Reversed deliberately. They were moved to the boundary because the prefix buried
+  // them by turn three — but that cure cost 645 tokens re-sent on EVERY step of every
+  // turn, uncached, to govern one final message. Ten tool rounds paid for it ten times.
+  //
+  // If sprawling replies come back, the answer is a SHORT reassertion carried on
+  // something already in the conversation, never a block on every request.
   const promptSource = readFileSync(fileURLToPath(new URL("./prompt.ts", import.meta.url)), "utf8");
-  assert.doesNotMatch(promptSource, /FOUR LINES OR FEWER/, "the rule must not live in the cached prefix");
-  assert.match(engineSource, /parts\.push\(REPLY_STYLE\)/, "it belongs in the volatile tail");
+  assert.match(promptSource, /FOUR LINES OR FEWER/, "the rule belongs in the cached system prompt");
+  assert.doesNotMatch(engineSource, /parts\.push\(REPLY_STYLE\)/, "it must not be pushed into the tail");
 });
 
 test("the reply gate fires at the turn-end boundary and can only fire once", () => {

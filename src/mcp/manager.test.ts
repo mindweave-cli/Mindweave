@@ -526,28 +526,32 @@ test("searching activates a tool, and it is callable from the next step", async 
   try {
     await mgr.start([stdio("big", bigServerScript(40))]);
     const turn = mgr.snapshot();
-    const found = mgr.searchAndActivate("create issue");
-    assert.ok(found.some((d) => d.name === "create_issue"), `found ${found.map((d) => d.name).join(", ")}`);
+    const found = mgr.searchCatalogTools("create issue");
+    assert.ok(
+      found.some((d: { name: string }) => d.name === "create_issue"),
+      `found ${found.map((d: { name: string }) => d.name).join(", ")}`,
+    );
 
-    // Same snapshot — the turn already in flight — now advertises it.
-    const names = turn.exposedSchemas().map((s) => s.function.name);
-    assert.ok(names.includes("mcp__big__create_issue"), "a searched tool must be callable immediately");
-    assert.ok(turn.tokens() > 0, "and now it is billed, because it is actually sent");
+    // The advertised list does NOT move — that is what keeps the cached prefix intact.
+    // The tool is callable because dispatch resolves against the catalog, and because
+    // the search result handed the model its full schema.
+    assert.equal(turn.exposedSchemas().length, 0, "a search must not change the advertised list");
+    assert.ok(turn.asTool("mcp__big__create_issue"), "a searched tool must be callable immediately");
   } finally {
     await mgr.dispose();
   }
 });
 
-test("activation is sticky, so a tool is searched for once per session", async () => {
-  // Re-hiding a tool would cost another search round trip AND another change to the
-  // advertised list, which is the thing that invalidates the prompt cache.
+test("searching leaves the advertised list byte-identical", async () => {
+  // The regression this guards is the expensive one. Advertising a found tool changes
+  // the `tools` array, and the provider hashes that array as the head of its cached
+  // prefix — so one search re-billed the system prompt and the whole conversation too.
   const mgr = new McpManager();
   try {
     await mgr.start([stdio("big", bigServerScript(40))]);
-    mgr.searchAndActivate("create issue");
-    assert.deepEqual(mgr.activatedNames(), ["mcp__big__create_issue"]);
-    // A later, unrelated turn still sees it.
-    assert.ok(mgr.snapshot().exposedSchemas().some((s) => s.function.name === "mcp__big__create_issue"));
+    const before = JSON.stringify(mgr.snapshot().exposedSchemas());
+    mgr.searchCatalogTools("create issue");
+    assert.equal(JSON.stringify(mgr.snapshot().exposedSchemas()), before, "the search moved the tool list");
   } finally {
     await mgr.dispose();
   }
@@ -574,8 +578,8 @@ test("a deferred catalog is not billed to the compaction budget", async () => {
   try {
     await mgr.start([stdio("big", bigServerScript(40))]);
     assert.equal(mgr.estimatedTokens(), 0, "hidden tools cost nothing");
-    mgr.searchAndActivate("create issue");
-    assert.ok(mgr.estimatedTokens() > 0, "loaded ones do");
+    mgr.searchCatalogTools("create issue");
+    assert.equal(mgr.estimatedTokens(), 0, "and searching does not start sending them either");
   } finally {
     await mgr.dispose();
   }

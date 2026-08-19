@@ -65,6 +65,10 @@ const gate = new Semaphore(SUBAGENT_CONCURRENCY);
 
 export const spawnSubagent: Tool = {
   name: "spawn_subagent",
+  /** Deferred: fan-out is a decision made at planning time rather than a step in the edit
+   *  loop, and at ~750 tokens it is the most expensive schema outside the core four. The
+   *  index line names it, so the option is visible where the choice is made. */
+  deferred: true,
   readOnly: false,
   // A read-only worker changes nothing and is safe to fan out in parallel; an editing
   // worker must run alone (serial lane) so concurrent edits can't race. This is what

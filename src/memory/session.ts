@@ -426,5 +426,17 @@ export async function resumeSession(
     // The maintained session notes survive a resume, so a continued session keeps its
     // crisp running state. The watermark starts fresh; it'll refresh as it grows again.
     ...(sessionMemory ? { sessionMemory, sessionMemoryInit: true } : {}),
+    // What the session has already cost, and the per-call detail behind it.
+    //
+    // Restored, not restarted. Leaving these out did not merely forget the earlier
+    // turns — the next save OVERWRITES the meta file, so a resumed session replaced a
+    // true running total with a smaller one and the earlier spend was gone for good. A
+    // session's cost is the cost of the whole session; `/continue` is not a new session.
+    //
+    // Deliberately unlike `prefixPrint`, which is NOT restored: that one asserts the
+    // provider still holds a cache, and after a resume it does not. These are records of
+    // what happened, and what happened does not stop being true.
+    ...(meta.spend ? { spend: meta.spend } : {}),
+    ...(meta.callLog ? { callLog: meta.callLog } : {}),
   };
 }

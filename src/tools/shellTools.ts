@@ -28,6 +28,24 @@ import { MAX_READ_CHARS, type ShellInfo } from "./backgroundShells.js";
 export const shellsTool: Tool = {
   name: "shells",
   readOnly: true,
+  /**
+   * Advertised only once this session has actually started a background shell.
+   *
+   * Nothing is lost by hiding it before then: with no shells there is nothing to list
+   * and nothing to read, so the tool can only be called to be told so. It is worth
+   * roughly 600 tokens of standing prompt across this tool and `kill_shell`, paid on
+   * every uncached request of every session — including the many that never background
+   * anything.
+   *
+   * The condition is `list()`, which retains FINISHED shells, and not `running()`.
+   * That is deliberate and is about the prompt cache rather than about correctness: the
+   * tool list is part of the cached prefix, so a condition that flipped off again when
+   * the last process exited would invalidate the whole prefix twice per shell instead
+   * of once per session. `list()` only ever goes from empty to non-empty, so the cost
+   * is a single rebuild the first time a shell appears. Reading a finished shell's
+   * output is a real use anyway.
+   */
+  relevantWhen: (ctx) => (ctx.backgroundShells?.list().length ?? 0) > 0,
   // The description never mentioned polling, while the tool itself pushes a strong
   // don't-poll nudge at runtime; the two now agree. It also never mentioned either cap,
   // and the buffer one matters: a chatty process can roll output out of the retained
@@ -98,6 +116,10 @@ export const shellsTool: Tool = {
 export const killShell: Tool = {
   name: "kill_shell",
   readOnly: false,
+  /** Same gate as `shells`, and for the same reason — including using `list()` rather
+   *  than `running()` so the tool list latches once per session instead of flipping
+   *  with every process that starts and stops. */
+  relevantWhen: (ctx) => (ctx.backgroundShells?.list().length ?? 0) > 0,
   description:
     "Stop a running background shell by id. Kills the whole process tree, not just the " +
     "shell, so a dev server that spawned its own children goes down with it. " +

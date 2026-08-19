@@ -110,15 +110,25 @@ export function searchCatalog(query: string, defs: readonly McpToolDef[], max = 
   return scored.slice(0, max).map((s) => s.def);
 }
 
-/** Render search results for the model: the name it can call, plus why it might. */
+/**
+ * Render search results for the model: each match's full callable definition.
+ *
+ * The FULL schema, not a summary line, and that is what makes deferral pay. A summary
+ * only tells the model a tool exists; it then has to be added to the advertised `tools`
+ * array before it can be called, and that rewrites the provider's cached prefix — tools,
+ * system and messages — at full price. Delivered here instead, the schema rides in an
+ * appended message: every earlier byte is untouched, the cache survives, and the schema
+ * is itself cached from the next call onward. Dispatch resolves against the catalog
+ * rather than against what was advertised, so a name and a schema is all it takes.
+ */
 export function renderResults(defs: readonly McpToolDef[]): string {
   return defs
-    .map((d) => {
-      const name = mcpToolName(d.server, d.name);
-      // The first line of a description is nearly always the summary; the rest is
-      // parameter detail the model gets in the schema anyway once the tool is loaded.
-      const summary = d.description.split("\n")[0]?.trim() ?? "";
-      return summary ? `- ${name} — ${summary}` : `- ${name}`;
-    })
+    .map((d) =>
+      `<function>${JSON.stringify({
+        name: mcpToolName(d.server, d.name),
+        description: d.description,
+        parameters: d.inputSchema,
+      })}</function>`,
+    )
     .join("\n");
 }

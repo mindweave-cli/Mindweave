@@ -17,6 +17,9 @@ import { APPROVAL_DISMISSED } from "./approval.js";
 
 const askUserDef: Tool = {
   name: "ask_user",
+  /** Deferred, as Claude Code defers AskUserQuestion: asking is rare by design — the
+   *  prompt asks for a judgment call to be made, not a question, on most turns. */
+  deferred: true,
   readOnly: true,
   // The old text promised "the user's choice is returned to you" with no account of the
   // two ways that does not happen — dismissal, and no channel at all. Both now return a

@@ -27,6 +27,9 @@ import { writeFileAtomic } from "./atomicWrite.js";
 
 export const replaceSymbolBody: Tool = {
   name: "replace_symbol_body",
+  /** Deferred: `edit` handles ordinary changes, including most whole-function rewrites.
+   *  This is the specialised span-swap, wanted deliberately when it is wanted. */
+  deferred: true,
   readOnly: false,
   // Two problems. The description implied `path` resolves any ambiguity, but a name
   // defined TWICE IN ONE FILE cannot be narrowed by a path at all, and there is no

@@ -6,13 +6,45 @@
  * matches — the project is never loaded into the agent. We shell out to it and
  * parse the lines.
  *
- * Availability is probed once. When `rg` isn't on the machine, callers fall back
- * to the pure-Node walk (walk.ts) so search still works everywhere — just slower.
- * Point `MINDWEAVE_RIPGREP_PATH` at a binary to override discovery.
+ * WHERE THE BINARY COMES FROM, in order:
+ *   1. `MINDWEAVE_RIPGREP_PATH`, for anyone who wants a specific build.
+ *   2. The copy that ships with Mindweave (`@vscode/ripgrep`, an OPTIONAL dependency
+ *      resolving to a per-platform package, so npm installs the one binary this machine
+ *      needs and nothing is downloaded at install time).
+ *   3. `rg` on PATH, for a system install.
+ *
+ * Bundling matters more than it sounds. The two search engines are NOT equivalent: only
+ * ripgrep honours `.gitignore`, and the walk re-reads every candidate file in Node. A
+ * user who never installs ripgrep silently gets the slower, less accurate one forever,
+ * and nothing on screen says so — which is exactly the sort of invisible degradation
+ * this project keeps finding after the fact.
+ *
+ * OPTIONAL, deliberately. If the platform package is missing — an unsupported
+ * architecture, a locked-down registry, `--no-optional` — resolution simply falls
+ * through and the pure-Node walk (walk.ts) still answers every search. Search getting
+ * slower is an acceptable failure; `npm install mindweave` failing is not.
  */
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 
-const RG = process.env.MINDWEAVE_RIPGREP_PATH || "rg";
+/**
+ * The bundled binary's path, or undefined if this platform's package isn't installed.
+ *
+ * Resolved through `require.resolve` rather than an `import`, because the whole point is
+ * that this may legitimately be absent: a static import of a missing optional dependency
+ * is a module-load crash, and the fallback it was meant to allow never gets to run.
+ */
+function bundledRipgrep(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    const binary = process.platform === "win32" ? "rg.exe" : "rg";
+    return require.resolve(`@vscode/ripgrep-${process.platform}-${process.arch}/bin/${binary}`);
+  } catch {
+    return undefined;
+  }
+}
+
+const RG = process.env.MINDWEAVE_RIPGREP_PATH || bundledRipgrep() || "rg";
 const MAX_BUFFER = 20_000_000; // 20 MB — big monorepos can emit a lot of paths
 const TIMEOUT_MS = 20_000;
 
@@ -30,6 +62,12 @@ let probe: Promise<boolean> | undefined;
  * Setting this lets one machine test both, which is what the CI matrix uses.
  */
 const FORCED_OFF = process.env.MINDWEAVE_NO_RIPGREP === "1";
+
+/** Which binary search will use, for diagnostics and for the test that proves the
+ *  bundled one is actually reachable rather than merely declared in package.json. */
+export function ripgrepPath(): string {
+  return RG;
+}
 
 /** Reset the cached probe. Tests only — the env var is read per probe, not per call. */
 export function resetRipgrepProbe(): void {

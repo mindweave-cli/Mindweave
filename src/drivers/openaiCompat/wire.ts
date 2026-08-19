@@ -186,6 +186,45 @@ function repair(
  * anything volatile must come after everything worth caching. This is the property
  * the whole ModelRequest split exists to guarantee.
  */
+/**
+ * Put a stored tool call back on the wire, including whatever opaque provider data came
+ * with it.
+ *
+ * `meta.extra_content` is spliced back as a sibling of `function`, which is the shape it
+ * arrived in. Gemini 3 attaches a `thought_signature` there and returns 400 on the next
+ * request if it is missing — "Function call is missing a thought_signature" — so an
+ * OpenAI-compatible client that drops unknown fields can make exactly one tool call per
+ * conversation and then breaks. Passing it through unread is the whole fix.
+ */
+function wireToolCall(c: NonNullable<ChatMessage["tool_calls"]>[number]): Record<string, unknown> {
+  const extra = c.meta?.extra_content;
+  return {
+    id: c.id,
+    type: c.type,
+    function: c.function,
+    ...(extra ? { extra_content: extra } : {}),
+  };
+}
+
+/**
+ * Serialize messages for the body, converting each tool call's opaque `meta` into the
+ * field name the provider actually expects.
+ *
+ * Separate from `renderMessages` on purpose: that function answers "what messages, in
+ * what order", which is the part worth asserting in tests, while this one is the last
+ * step before the bytes leave. Sending `meta` verbatim would put an unknown key on the
+ * wire under a name no provider knows.
+ */
+export function toWireMessages(messages: ChatMessage[]): Record<string, unknown>[] {
+  return messages.map((m) => {
+    if (!m.tool_calls || m.tool_calls.length === 0) {
+      const { tool_calls: _drop, ...rest } = m;
+      return { ...rest };
+    }
+    return { ...m, tool_calls: m.tool_calls.map(wireToolCall) };
+  });
+}
+
 export function renderMessages(req: ModelRequest): ChatMessage[] {
   const messages: ChatMessage[] = [{ role: "system", content: req.system }, ...req.messages];
   if (req.context && req.context.trim()) {
@@ -212,7 +251,7 @@ export function buildBody(
   const tools = req.tools ?? [];
   const body: Record<string, unknown> = {
     model: req.model?.model ?? provider.defaultModel,
-    messages: renderMessages(req),
+    messages: toWireMessages(renderMessages(req)),
     ...provider.reasoningFields(req.model),
     ...(provider.sampling?.(req.model) ?? {}),
   };
@@ -260,6 +299,9 @@ interface StreamChunk {
         index?: number;
         id?: string;
         function?: { name?: string; arguments?: string };
+        /** Provider-specific passthrough. Gemini puts a `thought_signature` here and
+         *  rejects the next request that omits it — see ToolCall.meta. */
+        extra_content?: Record<string, unknown>;
       }[];
     };
   }[];
@@ -282,7 +324,10 @@ export async function consumeStream(
   let content = "";
   // Tool calls under construction, keyed by streaming index. `started` guards the
   // one-time tool_start emit, fired when the name first appears.
-  const tools = new Map<number, { id: string; name: string; args: string; started: boolean }>();
+  const tools = new Map<
+    number,
+    { id: string; name: string; args: string; started: boolean; extra?: Record<string, unknown> }
+  >();
   let usage: Usage | undefined;
   let finishReason: string | null | undefined;
 
@@ -313,10 +358,13 @@ export async function consumeStream(
       const index = tc.index ?? 0;
       let acc = tools.get(index);
       if (!acc) {
-        acc = { id: "", name: "", args: "", started: false };
+        acc = { id: "", name: "", args: "", started: false, extra: undefined };
         tools.set(index, acc);
       }
       if (tc.id) acc.id = tc.id;
+      // Carried, never interpreted. It arrives on whichever fragment the provider
+      // chooses, so the last non-empty one wins rather than the first.
+      if (tc.extra_content) acc.extra = tc.extra_content;
       // The name usually arrives whole in the first fragment, but append
       // defensively in case a provider splits it.
       if (tc.function?.name) acc.name += tc.function.name;
@@ -334,7 +382,12 @@ export async function consumeStream(
 
   const assembled: ToolCall[] = [...tools.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([, t]) => ({ id: t.id, name: t.name, arguments: t.args || "{}" }));
+    .map(([, t]) => ({
+      id: t.id,
+      name: t.name,
+      arguments: t.args || "{}",
+      ...(t.extra ? { meta: { extra_content: t.extra } } : {}),
+    }));
 
   const repaired = repair(provider, content, assembled);
   return { ...repaired, usage, stop: toStop(provider, finishReason) };
@@ -366,7 +419,14 @@ export function toUsage(provider: CompatProvider, raw: Record<string, unknown>):
 export function toTurn(provider: CompatProvider, data: unknown): Turn {
   const parsed = data as {
     choices?: {
-      message?: { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] };
+      message?: {
+        content?: string | null;
+        tool_calls?: {
+          id: string;
+          function: { name: string; arguments: string };
+          extra_content?: Record<string, unknown>;
+        }[];
+      };
       finish_reason?: string | null;
     }[];
     usage?: Record<string, unknown>;
@@ -377,6 +437,7 @@ export function toTurn(provider: CompatProvider, data: unknown): Turn {
     id: tc.id,
     name: tc.function.name,
     arguments: tc.function.arguments || "{}",
+    ...(tc.extra_content ? { meta: { extra_content: tc.extra_content } } : {}),
   }));
   const repaired = repair(provider, content, toolCalls);
   return {

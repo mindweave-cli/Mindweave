@@ -629,10 +629,19 @@ export class McpManager {
    * trip and another change to the advertised tool list — which is the thing that costs
    * a prompt-cache prefix. Paying once and keeping it is cheaper than paying repeatedly.
    */
-  searchAndActivate(query: string): McpToolDef[] {
-    const found = searchCatalog(query, this.allowedCatalog());
-    for (const def of found) this.activated.add(mcpToolName(def.server, def.name));
-    return found;
+  /**
+   * Find deferred tools matching a query. Deliberately does NOT advertise them.
+   *
+   * It used to, and that was the expensive half of deferral: adding a found tool to the
+   * `tools` array changes the bytes the provider hashes, so every request after a search
+   * paid to rewrite the whole cached prefix — tools, system AND messages. The saving was
+   * a few hundred tokens of schema; the bill was the entire prefix. The caller now hands
+   * the model the full schema in the search RESULT instead (see renderResults), which is
+   * an appended message the cache does not care about, and `asTool` dispatches against
+   * the allowed catalog rather than against what was advertised.
+   */
+  searchCatalogTools(query: string): McpToolDef[] {
+    return searchCatalog(query, this.allowedCatalog());
   }
 
   /** Tool names currently advertised out of a deferred catalog (for diagnostics). */

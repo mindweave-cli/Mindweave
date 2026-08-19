@@ -50,11 +50,14 @@ import { BlockView } from "./components/BlockView.js";
 import { initialState, reduce, trimNarration, type Action, type Block, type TranscriptState } from "./transcript.js";
 import { enableMouse, readWheel, stripMouse } from "./mouse.js";
 import { chatLayout } from "./chatAnchor.js";
+import { virtualWindow } from "./virtualWindow.js";
+import { perf, perfEnabled } from "./perfLog.js";
 import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./groupReveal.js";
 import { toolDisplay, isGroupable, KIND_COLOR } from "./toolDisplay.js";
 import { workingVerb } from "./workingVerb.js";
 import { narrationPending, revealWait } from "./revealPace.js";
 import { summarizeTask, formatTokens, type TaskUsage } from "../dynamo/pricing.js";
+import { meterReset, meterDelta, meterTick, meterValue, type MeterState } from "../dynamo/liveMeter.js";
 import type { Usage } from "../drivers/types.js";
 import type { ShellInfo } from "../tools/backgroundShells.js";
 import type { ConnectionStatus as McpStatus } from "../mcp/connection.js";
@@ -160,6 +163,27 @@ export function App() {
   // The transcript's real rendered height, from measureElement — never estimated.
   const contentRef = useRef<DOMElement | null>(null);
   const [contentHeight, setContentHeight] = useState(0);
+  // Each block's real rendered height, so blocks off screen can be replaced by a
+  // spacer of the exact same size instead of being laid out in full — see
+  // `virtualWindow.ts` for why that is the whole performance story, and why exact
+  // is the word that matters.
+  //
+  // Keyed by the BLOCK OBJECT, not its id, and that is load-bearing rather than
+  // stylistic: the transcript reducer returns a NEW object whenever a block changes
+  // (streaming text growing, `live` flipping at turn end) and the same object when it
+  // does not. So a changed block simply has no cached height, is rendered in full, and
+  // is re-measured — cache invalidation falls out of the data model instead of needing
+  // a rule that could be forgotten for some future block type. Weak, so blocks dropped
+  // past the scrollback cap do not pin their heights in memory forever.
+  const blockHeights = useRef<WeakMap<Block, number>>(new WeakMap());
+  // Nodes captured this render, waiting to be measured once Yoga has laid them out.
+  const toMeasure = useRef<Map<Block, DOMElement>>(new Map());
+  // Every height is only true for the width it was measured at, so a resize throws
+  // the whole table away rather than scrolling against stale numbers.
+  const heightsWidth = useRef(0);
+  // Bumped when a measurement lands, purely to re-render so the new height can be
+  // used. Never read.
+  const [, bumpHeights] = useState(0);
   // Same idea, for the footer (status line / background bar / queued bar / input
   // box / command palette / tip). Its height genuinely changes — the command
   // palette alone is 5+ rows taller open than closed — and guessing it drifted
@@ -196,10 +220,15 @@ export function App() {
   // Read live by the status line each tick. A getter rather than state so a usage event
   // does not force a re-render of the whole transcript — the line already re-renders
   // once a second for its timer, which is often enough for a running count.
-  const receivedTokens = useCallback(
-    () => usageSamples.current.reduce((sum, u) => sum + (u.completionTokens ?? 0), 0),
-    [],
-  );
+  // The live figure the status line reads each tick. Held in a ref, and advanced by the
+  // pure reducers in dynamo/liveMeter.ts, so a streamed delta does not re-render the
+  // transcript just to move a number: the status line re-renders on its own timer and
+  // reads the current value there.
+  const meter = useRef<MeterState>(meterReset());
+  const liveTokens = useCallback(() => meterValue(meter.current), []);
+  const advanceTokens = useCallback(() => {
+    meter.current = meterTick(meter.current);
+  }, []);
   // Aborts the in-flight turn when the user presses Esc (created fresh per turn).
   const abortRef = useRef<AbortController | null>(null);
   // Which provider's key we still need, or null once we have it. Not a bare
@@ -499,6 +528,7 @@ export function App() {
   function startTurn() {
     turnStart.current = Date.now();
     usageSamples.current = [];
+    meter.current = meterReset();
     setTaskUsage(null); // clear the previous task's summary while this one runs
     abortRef.current = new AbortController();
     setBusy(true);
@@ -546,6 +576,20 @@ export function App() {
   // transcript is made of, so a step never lands halfway through a diff.
   // Scrolls by LINES. The clamp to the content's real height happens at render,
   // where that height is known, so this only has to refuse to go below zero.
+  //
+  // The movement is EASED rather than applied in one step (`smoothScroll.ts`). A wheel
+  // notch is three lines, and jumping three lines in a single frame gives the eye
+  // nothing to track — a flick of the wheel reads as a stack of discrete jolts instead
+  // of movement. The destination is unchanged; only the values on the way there are new.
+  // APPLIED IMMEDIATELY, and that is a decision, not an omission.
+  //
+  // An eased version was built and shipped (200ms ease-in-out, copied from Gemini CLI's
+  // ScrollableList) and it was WORSE, immediately and obviously: a mouse wheel sends
+  // notches faster than 200ms apart, so every notch queued behind the last one and the
+  // view visibly trailed the wheel. Easing suits a scroll the PROGRAM initiates — jump
+  // to top, jump to a match — where the animation explains a movement the user did not
+  // make. A wheel notch is a direct manipulation, and direct manipulation must be 1:1
+  // with the input or it reads as lag, because it IS lag. Do not re-add it here.
   const scrollBy = useCallback((lines: number) => {
     setScrollUp((s) => Math.max(0, s + lines));
   }, []);
@@ -571,6 +615,31 @@ export function App() {
     if (!contentRef.current) return;
     const { height } = measureElement(contentRef.current);
     setContentHeight((h) => (h === height ? h : height));
+  });
+
+  // Measure each block that was rendered without a known height yet, so the next
+  // frame can replace it with an exact spacer when it scrolls out of view.
+  //
+  // No dependency list, for the same reason as the measurements around it: a block's
+  // height changes for reasons no dep could name. It settles rather than looping
+  // because a height is recorded once per block object and the re-render is only
+  // requested when something was actually recorded.
+  useEffect(() => {
+    if (toMeasure.current.size === 0) return;
+    let learned = false;
+    for (const [block, node] of toMeasure.current) {
+      if (blockHeights.current.has(block)) continue;
+      const { height } = measureElement(node);
+      // A height of 0 is not a measurement, it is a block that has not been laid out
+      // yet. Recording it would collapse the block to nothing the moment it scrolled
+      // off — the exact class of silent, permanent corruption this cache must not have.
+      if (height > 0) {
+        blockHeights.current.set(block, height);
+        learned = true;
+      }
+    }
+    toMeasure.current.clear();
+    if (learned) bumpHeights((t) => t + 1);
   });
 
   // Same measurement, for the footer — see footerHeight above.
@@ -891,7 +960,12 @@ export function App() {
         onCompaction: (report) => enqueueReveal({ type: "compaction", report }),
         onEvent: (e) => {
           if (e.type === "text") {
+            meter.current = meterDelta(meter.current, e.delta.length);
             enqueueReveal({ type: "token", delta: e.delta });
+          } else if (e.type === "reasoning") {
+            // Not rendered, but it is generated text the provider bills as output, so
+            // leaving it out would make the live figure undershoot on a thinking model.
+            meter.current = meterDelta(meter.current, e.delta.length);
           } else if (e.type === "replyReset") {
             enqueueReveal({ type: "resetReply" });
           } else if (e.type === "tool" && e.phase === "start") {
@@ -944,10 +1018,13 @@ export function App() {
               totalTokens: e.totalTokens,
               cacheHitTokens: e.cacheHitTokens,
               cacheMissTokens: e.cacheMissTokens,
+              // The written slice, so cache writes are priced at the rate the provider
+              // actually charges for them (1.25x base input on Anthropic) instead of
+              // the plain input rate. Absent on providers that don't report it.
+              ...(e.cacheWriteTokens !== undefined ? { cacheWriteTokens: e.cacheWriteTokens } : {}),
             });
             setTaskUsage(summarizeTask(usageSamples.current, s.modelConfig.model));
           }
-          // `reasoning` deltas are ignored: not shown and not counted.
         },
         signal: abortRef.current?.signal,
         // Persist after every step so a hard crash / PC shutdown mid-turn loses at
@@ -1872,6 +1949,44 @@ export function App() {
   const rendered = allBlocks.length > SCROLLBACK_BLOCKS ? allBlocks.slice(-SCROLLBACK_BLOCKS) : allBlocks;
   const offset = allBlocks.length - rendered.length;
 
+  // Which of those actually reach Yoga. Everything else becomes a spacer of exactly
+  // the height it would have occupied, so `contentHeight` — and therefore `chatOffset`
+  // above, and the whole scroll mechanism — is bit-for-bit what it was when every
+  // block was laid out in full. See `virtualWindow.ts`.
+  if (heightsWidth.current !== width) {
+    // Every recorded height was measured at a different width and is now a lie. Throw
+    // the table away; the frame below renders in full and re-measures.
+    blockHeights.current = new WeakMap();
+    heightsWidth.current = width;
+  }
+  // Only a MEASURED prefix can be virtualized: a block whose height is unknown cannot
+  // be replaced by a spacer, because there is no honest number to give the spacer.
+  // Unmeasured blocks are always the newest ones (the reducer appends, and a changed
+  // block is a new object), which are also the ones on screen when pinned to the
+  // bottom — so in practice this prefix is everything but the last block or two.
+  let known = 0;
+  const knownHeights: number[] = [];
+  while (known < rendered.length) {
+    const h = blockHeights.current.get(rendered[known]!);
+    if (h === undefined) break;
+    knownHeights.push(h);
+    known++;
+  }
+  const win = virtualWindow(knownHeights, -chatOffset, chatRows);
+  if (perfEnabled()) {
+    // The single fact that says whether the virtualization is doing anything at all:
+    // `drew` should be a small constant while `blocks` grows. If they track each
+    // other, heights are not being measured and every block is still being laid out.
+    const drew = win.end - win.start + (rendered.length - known);
+    perf(
+      `frame blocks=${rendered.length} known=${known} drew=${drew} ` +
+        `rows=${chatRows} shift=${-chatOffset} content=${contentHeight}`,
+    );
+  }
+  // Rows between the end of the window and the first unmeasured block. Rendering the
+  // unmeasured tail is not optional — it is how those blocks get measured at all.
+  const padMiddle = win.padBottom;
+
   return (
     <Box flexDirection="column" height={frameHeight} overflow="hidden">
       {/* flexShrink:0 on the banner and the chat wrapper below (NOT on anything
@@ -1908,13 +2023,45 @@ export function App() {
           {/* The ref sits on a box with NO margin of its own, so the measured
               height is the content's alone and cannot drift as it scrolls. */}
           <Box ref={contentRef} flexDirection="column" flexShrink={0}>
-            {rendered.map((b, idx) => (
-              // flexShrink:0 is load-bearing — without it Yoga compresses an
-              // overfull column and silently drops rows out of the middle.
-              <Box key={b.id} flexShrink={0} flexDirection="column">
-                <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
-              </Box>
-            ))}
+            {/* Blocks scrolled off the top, as one box of exactly their height. */}
+            {win.padTop > 0 ? <Box flexShrink={0} height={win.padTop} /> : null}
+            {rendered.slice(win.start, win.end).map((b, i) => {
+              const idx = win.start + i;
+              return (
+                // flexShrink:0 is load-bearing — without it Yoga compresses an
+                // overfull column and silently drops rows out of the middle.
+                <Box
+                  key={b.id}
+                  ref={(node: DOMElement | null) => {
+                    if (node && !blockHeights.current.has(b)) toMeasure.current.set(b, node);
+                  }}
+                  flexShrink={0}
+                  flexDirection="column"
+                >
+                  <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
+                </Box>
+              );
+            })}
+            {/* Measured blocks between the window and the unmeasured tail. */}
+            {padMiddle > 0 ? <Box flexShrink={0} height={padMiddle} /> : null}
+            {/* The unmeasured tail. Rendered in full because there is no honest
+                spacer height for a block nobody has measured yet — and rendering it
+                is what produces the measurement. */}
+            {rendered.slice(known).map((b, i) => {
+              const idx = known + i;
+              return (
+                <Box
+                  key={b.id}
+                  ref={(node: DOMElement | null) => {
+                    if (node && !blockHeights.current.has(b)) toMeasure.current.set(b, node);
+                  }}
+                  flexShrink={0}
+                  flexDirection="column"
+                >
+                  <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
+                </Box>
+              );
+            })}
           </Box>
         </Box>
       </Box>
@@ -1931,7 +2078,7 @@ export function App() {
         {/* Persistent status line: spinner + timer while working,
             "✻ Cooked for 1m 23s · N tokens" once finished. */}
         <Box flexShrink={0}>
-          <StatusLine busy={busy} startedAt={turnStart.current} lastMs={lastMs} usage={taskUsage} received={receivedTokens} />
+          <StatusLine busy={busy} startedAt={turnStart.current} lastMs={lastMs} usage={taskUsage} received={liveTokens} advance={advanceTokens} />
         </Box>
 
         {/* Messages queued while busy — sent in order when the turn ends. */}
@@ -2170,28 +2317,40 @@ function StatusLine({
   lastMs,
   usage,
   received,
+  advance,
 }: {
   busy: boolean;
   startedAt: number | null;
   lastMs: number | null;
-  /** The task's summary, known only once the turn ends. Null while working — no
-   *  number is reliable mid-stream. */
+  /** The task's measured summary. Non-null as soon as the first call reports, but only
+   *  rendered once the turn settles: while busy the line shows the live figure, which
+   *  includes the in-flight call this one cannot yet see. */
   usage: TaskUsage | null;
-  /** Tokens RECEIVED so far this turn — the running total of completion tokens.
-   *  Deliberately not the grand total: a prompt is re-sent (and mostly re-cached) on
-   *  every step, so summing prompt tokens counts the same text again per tool round
-   *  and the number climbs for reasons the user cannot see. What has come back is
-   *  additive, so it only ever means one thing. */
+  /** Output tokens received so far this turn, estimated from the streamed characters and
+   *  eased toward the real total — the same quantity, and the same easing, Claude Code's
+   *  spinner shows. Deliberately NOT the turn's billed cost: input does not arrive over
+   *  time, so putting it here makes the counter leap and then freeze. The receipt below
+   *  carries the cost. Read through a getter, fresh every frame. See dynamo/liveMeter.ts. */
   received: () => number;
+  /** Advances the eased counter one frame. Called on the render clock, and separate from
+   *  reading the value so the easing lives with the state, not in the view. */
+  advance: () => void;
 }) {
-  // A once-a-second tick, only while busy, so the elapsed timer advances. No
-  // animation — the changing seconds are the only motion, which keeps it calm.
+  // The render clock while busy: it advances the elapsed timer AND steps the eased token
+  // counter one frame. 50ms, which is what makes the number read as counting rather than
+  // as jumping — at 1Hz it moved once a second in whatever lump had arrived, which is a
+  // stutter, not an animation. Nothing else re-renders with it: the tick is this
+  // component's own state and the figure is read through a getter, so the cost is one
+  // small subtree per frame.
   const [, tick] = useState(0);
   useEffect(() => {
     if (!busy) return;
-    const id = setInterval(() => tick((t) => t + 1), 1000);
+    const id = setInterval(() => {
+      advance();
+      tick((t) => t + 1);
+    }, LIVE_TICK_MS);
     return () => clearInterval(id);
-  }, [busy]);
+  }, [busy, advance]);
 
   let label = null;
   if (busy && startedAt != null) {
@@ -2216,7 +2375,12 @@ function StatusLine({
     // a per-call total counts the same text once per step and the figure grows with
     // tool use rather than with work — a five-step turn over a 30K context read
     // ~150K. Misses plus output counts each token exactly once.
-    const meter = usage ? ` · ${formatTokens(usage.billedTokens)} tokens` : "";
+    // A `~` when the provider never reported what it served from cache, so the number
+    // is inferred rather than measured (Gemini's OpenAI-compatible endpoint is the
+    // case that forced this — see TaskUsage.estimated). Showing an inferred figure
+    // with the same authority as a measured one is what made a normal turn look like
+    // a runaway one.
+    const meter = usage ? ` · ${usage.estimated ? "~" : ""}${formatTokens(usage.billedTokens)} tokens` : "";
     label = <Text bold> Worked for {fmtElapsed(Math.round(lastMs / 1000))}{meter}</Text>;
   }
 
@@ -2233,6 +2397,9 @@ function StatusLine({
     </Box>
   );
 }
+
+/** The working line's render clock. See StatusLine's tick. */
+const LIVE_TICK_MS = 50;
 
 function fmtElapsed(s: number): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;

@@ -20,6 +20,7 @@ function fakeChassis(defs: Record<string, SymbolNode[]>, ranked: RankedSymbol[])
     outline: async () => [],
     definition: async (name) => ({ symbols: defs[name] ?? [], confidence: "name-level" }),
     references: async () => ({ refs: [], confidence: "name-level" }),
+    dependents: async () => [],
     relevant: async (_focus, limit = 25) => ranked.slice(0, limit),
     span: async () => [],
     directorySummary: async () => null,

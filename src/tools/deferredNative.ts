@@ -24,15 +24,34 @@ import { governor, createSkill } from "./governorTools.js";
 import { sessionsTool } from "./sessionTools.js";
 import { mcpResourceTool } from "./mcpResources.js";
 import { workspaceTool } from "./workspace.js";
+import { todoWrite } from "./todo.js";
+import { askUserTool } from "./askUser.js";
+import { readSymbolTool } from "./readSymbol.js";
+import { outlineTool, definitionTool, referencesTool, relevantTool } from "./codeIntel.js";
+import { web } from "./web.js";
+import { replaceSymbolBody } from "./replaceSymbol.js";
+import { spawnSubagent } from "./subagent.js";
+import { addMcpServer } from "./mcpAdd.js";
 
 /** The pool, in the order it is named to the model. */
 export const DEFERRED_TOOLS: Tool[] = [
+  todoWrite,
+  askUserTool,
+  outlineTool,
+  definitionTool,
+  referencesTool,
+  relevantTool,
+  readSymbolTool,
+  spawnSubagent,
+  web,
+  replaceSymbolBody,
   governor,
   createSkill,
   saveMemoryTool,
   sessionsTool,
   workspaceTool,
   mcpResourceTool,
+  addMcpServer,
   screenshot,
 ];
 
@@ -48,10 +67,34 @@ export const DEFERRED_TOOLS: Tool[] = [
 export function deferredToolsIndex(): string {
   if (DEFERRED_TOOLS.length === 0) return "";
   return (
-    `Some of your own tools are not listed above and are loaded on demand with find_tools: ` +
+    `Some of your own tools are not listed above. Their names: ` +
     `${DEFERRED_TOOLS.map((t) => t.name).join(", ")}. ` +
-    `When a task needs one of those, search for it rather than concluding you cannot do it.`
+    `Only the name is known until you fetch one — find_tools returns the full schema, and ` +
+    `from that moment the tool is callable exactly like the ones listed above. ` +
+    `When a task needs one, search for it rather than concluding you cannot do it.`
   );
+}
+
+/**
+ * Render one deferred tool the way the advertised list renders it: name, description and
+ * the full JSON parameter schema.
+ *
+ * This is what makes deferral cache-safe. The schema is delivered in the SEARCH RESULT,
+ * which is an ordinary message appended to the conversation, rather than by adding the
+ * tool to the advertised `tools` array. An appended message leaves every earlier byte
+ * untouched, so the provider's cached prefix survives and the schema itself is cached
+ * from the next call onward. Mutating the array instead re-writes the prefix — tools,
+ * system and messages — at full price, which cost several times what the deferral saved.
+ *
+ * The model can call the tool from this alone: dispatch resolves against the registry,
+ * not against what was advertised, so a name and a schema is everything it needs.
+ */
+export function renderToolSchema(tool: Tool): string {
+  return `<function>${JSON.stringify({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  })}</function>`;
 }
 
 /**

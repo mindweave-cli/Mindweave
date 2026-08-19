@@ -16,27 +16,30 @@
 import { activeDriver, ensureDriver, manifestForModel } from "../drivers/registry.js";
 import type { ChatMessage, ImagePart, ModelRequest, StopReason, StreamResult, Usage, WireToolCall } from "../drivers/types.js";
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
+import { addTurn, emptySpend } from "./spend.js";
 import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, narrationFault, narrationNudge, unknownToolError, replyFault, replyRewrite, VERIFY_NUDGE } from "./verify.js";
 import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, guardDetail, interpretGuardChoice } from "./guard.js";
 import { findTool, toolSchemas, TOOLS } from "../tools/registry.js";
 import { deferredToolsIndex } from "../tools/deferredNative.js";
+import { prefixPrint, diffPrefix } from "./cacheBreak.js";
 import { commandShellLabel } from "../tools/runCommand.js";
 import { isInteractiveServerCommand } from "../tools/backgroundShells.js";
 import { basePrompt } from "./prompt.js";
 import { basename, relative } from "node:path";
 import { promises as fsp } from "node:fs";
 import { relativize, resolvePath, rootLabel } from "../tools/paths.js";
-import { todoListText } from "../tools/todo.js";
 import { renderRules, renderSkillCatalog } from "../governor/index.js";
 import type { Session, Entry, ToolCallRecord } from "../memory/types.js";
 import { forkSession, reloadProjectMemory } from "../memory/session.js";
-import { buildWorkingSet, selectActiveFiles } from "../memory/workingSet.js";
+import { selectActiveFiles } from "../memory/workingSet.js";
+import { rippleCheck } from "../tools/editRipple.js";
 import { fullReadPaths } from "../memory/presence.js";
 import {
   KEEP_LAST_N,
   KEEP_LAST_N_BOUNDARY,
   SUMMARY_REQUEST,
   SUMMARY_SYSTEM_PROMPT,
+  dropOldestRounds,
   estimateEntriesTokens,
   formatTranscriptForSummary,
   isContinuation,
@@ -48,6 +51,8 @@ import { loadPlanArtifact, renderPlanBlock, planDivergenceStop } from "./planArt
 import {
   autoCompactThreshold,
   microCompactThreshold,
+  cacheLikelyCold,
+  clearIsWorthIt,
   measuredOverhead,
   sharpContextWindow,
   type CompactionReport,
@@ -176,14 +181,9 @@ ${deferred}`;
  */
 export function volatileContext(
   rules: string,
-  relevantMap: string,
-  todoList: string,
-  workingFiles: string,
   planMode: boolean,
   sessionMemory: string,
   approvedPlan = "",
-  /** Whether the ranked map was narrowed to files the model has actually worked on. */
-  mapPersonalized = true,
 ): string {
   const parts: string[] = [];
   // Standing rules FIRST in the volatile tail. They're rebuilt every turn here (not
@@ -222,65 +222,36 @@ export function volatileContext(
   // "here's where we are" before the map/task list. Survives compaction.
   const memBlock = renderSessionMemory(sessionMemory);
   if (memBlock) parts.push(memBlock);
-  if (relevantMap) {
-    // Two different things wear the same block. Once files have been read the ranking is
-    // personalized to them and "most relevant to your current focus" is true. Before
-    // that there is no focus to rank against, so it is whatever the graph ranks highest
-    // overall — on a frontend task in a Tauri project, twelve Rust file-IO functions,
-    // presented as the code most relevant to what the model was about to do. Say which
-    // one this is rather than letting the model act on a claim we cannot support.
-    parts.push(
-      (mapPersonalized
-        ? "Code most relevant to your current focus (from the code map; use the code-map tools for more):\n"
-        : "The most-connected symbols in this project (from the code map). Nothing has been read yet this " +
-          "session, so this is NOT yet narrowed to your task — treat it as a starting point, not an answer:\n") +
-        `<relevant_code>\n${relevantMap}\n</relevant_code>`,
-    );
-  }
-  if (todoList) {
-    parts.push(
-      "Your current task list (maintain it with todo_write; [x] done, [~] in progress, [ ] pending):\n" +
-        `<task_list>\n${todoList}\n</task_list>`,
-    );
-  }
-  // Working files LAST — the freshest, most task-critical content sits at the very end
-  // of the request (the boundary), where attention is strongest (lost-in-the-middle).
-  if (workingFiles) {
-    parts.push(`<working_files>\n${workingFiles}\n</working_files>`);
-  }
-  parts.push(REPLY_STYLE);
+  // NO ranked code map and NO task list. Both were rebuilt and re-sent on every step,
+  // and both already exist somewhere cached:
+  //
+  //   - the map is what the `relevant` tool returns, on demand, when the model wants it.
+  //     Pushing it unasked also meant paying a chassis ranking call per turn for an
+  //     answer the model had not asked for and often did not use.
+  //   - the task list is the literal body of `todo_write`'s own tool result, which sits
+  //     in the append-only conversation where the provider caches it.
+  //
+  // Re-sending either was buying a second copy of something already in context, at full
+  // price, once per step. A capability the model can reach for is not the same cost as a
+  // block it is handed continuously.
+  // NO working-files block. File contents live in the conversation as tool results,
+  // where the append-only shape lets the provider cache them. Re-sending them here cost
+  // up to 12K tokens on EVERY model call and could never be cached, because each step
+  // appends to the conversation ahead of this block — so no position within the tail
+  // could have saved it. See the note in the step loop.
+  // REPLY_STYLE is NOT pushed here any more. At 645 tokens it was the largest thing
+  // left in the tail and it was re-sent, uncached, on every step of every turn — ten
+  // steps meant paying for it ten times to govern ONE final message. It now lives in
+  // the system prompt, which is cached, and which is where the equivalent sits in every
+  // other agent that does this well.
+  //
+  // The comment above records that it was moved OUT of the prefix once because it was
+  // being ignored by turn three. That is a real observation and this reverses it, so if
+  // replies start sprawling again the answer is a short reassertion attached to
+  // something already in the conversation — not a 645-token block on every request.
   return parts.join("\n\n");
 }
 
-/**
- * How to write the message that ENDS a turn. Rebuilt at the boundary every request,
- * for the same reason the standing rules are: this lived in the cached system prefix
- * and was reliably ignored by turn three, which is exactly what "a long conversation
- * buries it" predicts.
- *
- * Written against the observed failure, which was NOT mainly length. Asked to read a
- * roadmap and say what to do next, it answered with a heading, a status recap nobody
- * requested, four numbered items carrying three sentences of justification each, six
- * further phases, a design digression, and two closing questions. Rewritten by the
- * user as plain paragraphs it kept nearly all the content at a third less text — the
- * bulk was scaffolding, not substance. So the rule leads on SHAPE.
- */
-const REPLY_STYLE = [
-  "How to write your final reply this turn (the message that ends it, with no tool call):",
-  "<reply_style>",
-  "Match the answer to the question. Finishing a task, confirming something, reporting a result: FOUR LINES OR FEWER, not counting code blocks. That is most turns, and there the budget is hard.",
-  "A question that genuinely asks for an account — what did we do last session, what does this code do, what are the options, why did that break — earns as many plain paragraphs as the answer actually needs. Do not cram a real explanation into one line; the budget exists to stop padding, not to stop answering.",
-  "After doing work, just stop. Do not explain what you did, summarise the changes, or recap where the project stands — the user watched every tool call and can read the diff. Do not append an adjacent topic you noticed, a second recommendation, or a consideration for later. Ask at most ONE question, and only when you genuinely cannot proceed without it.",
-  "Plain prose. No headings, no bullet lists, no bold labels on a short answer — that is a sentence dressed as a document. A list only when the items are genuinely parallel, a table only for real rows and columns.",
-  "Examples of the right length:",
-  "  user: is it built?  →  Yes, dist is current. Go ahead.",
-  "  user: why is the test failing?  →  The fixture passes mtimeMs: 0, so the freshness gate treats the file as stale. Set it from the real stat.",
-  "  user: add the subscription row  →  Added. The spending-cap branch now subtracts subs before the S&P split, which it was not doing.",
-  "And one that earns more, still as plain paragraphs with no headings or bullets:",
-  "  user: what did we build last session?  →  We closed the round-3 audit. The empty src/pages and src/js/modules directories are gone, the subscription-cost logic is deduped into a single getSubscriptionCost in salary.js, and getTaxBracket is wired into calculateSalary instead of the inline copy.\\n\\n  We also added the File → Import Data flow end to end, menu through IPC to storage and a UI refresh. The build passed and import/export was verified by hand.\\n\\n  The open thread is the Subscriptions UI, and whether to settle the ALL to EUR model before touching Settings.",
-  "Long is not thorough. Twice the length is not twice the help; it is the same answer with the reader's time spent on nothing.",
-  "</reply_style>",
-].join("\n");
 
 // The governor's three prompt blocks, pre-rendered to strings ("" when empty so
 // the block is omitted). Built fresh each turn from the session's governance.
@@ -300,43 +271,32 @@ function governancePrompt(session: Session): GovernancePrompt {
     relative(root, abs).split("\\").join("/"),
   );
   return {
+    // Rules render into the VOLATILE tail, so glob-scoping them against the working set
+    // is free — the tail is rebuilt every step regardless.
     rules: renderRules(g.rules, workingSet),
     forbidden: g.forbidden.patterns.map((p) => `- ${p}`).join("\n"),
     forbiddenCommands: (g.forbidden.commands ?? []).map((c) => `- ${c}`).join("\n"),
-    skills: renderSkillCatalog(g.skills, workingSet),
+    // The skill catalog renders into the CACHED SYSTEM PROMPT, so it is deliberately
+    // NOT filtered by the working set. Filtering it there was a silent cache killer:
+    // a glob-scoped skill appears or disappears the moment the model reads a matching
+    // file, which changes the system prompt, which invalidates the tools, the system
+    // AND the whole conversation — the most expensive invalidation the API has. A turn
+    // that read one file could re-bill the entire prefix.
+    //
+    // Anthropic's own caching guidance names this exact shape: "conditional system
+    // sections — every flag combination is a distinct prefix." The glob filter was
+    // saving a few lines of catalog and paying for it with a full rebuild.
+    //
+    // Safe because the catalog is bounded by construction: at most MAX_SKILL_ENTRIES
+    // lines, each clipped to MAX_SKILL_LINE_CHARS. Unfiltered is bigger, and stable —
+    // and stable is what a cached prefix has to be.
+    skills: renderSkillCatalog(g.skills),
   };
 }
 
 // The tiny, budgeted ranked map injected each turn (the "auto-map" half of the
 // relevance feed). Personalized to the files recently read. A pure in-memory
 // chassis query — no I/O, no model call — so the engine stays filesystem-pure.
-const AUTO_MAP_LIMIT = 12;
-/** How many recently-worked-on files personalize the ranking. */
-const AUTO_MAP_FOCUS = 5;
-
-async function relevantMapText(session: Session): Promise<{ text: string; personalized: boolean }> {
-  const chassis = session.toolContext.chassis;
-  if (!chassis || !chassis.status().ready) return { text: "", personalized: false };
-  // By RECENCY, which is not what iterating the ledger gives. `ctx.reads` is a Map, and
-  // neither `touch()` (mutates the record in place) nor `recordWrite()` (re-sets an
-  // existing key) changes insertion order — so slicing the key list returned the five
-  // files first SEEN, not the five most recently worked on. In a session that keeps
-  // returning to one file, that file dropped out of its own relevance feed as soon as
-  // five others had been opened. `selectActiveFiles` already sorts the right way.
-  const focus = selectActiveFiles(session.toolContext.reads, AUTO_MAP_FOCUS).map((f) => f.path);
-  const ranked = await chassis.relevant(focus, AUTO_MAP_LIMIT);
-  if (ranked.length === 0) return { text: "", personalized: false };
-  const text = ranked
-    .map((r) => {
-      const s = r.symbol;
-      const where = `${relativize(session.toolContext, s.file)}:${s.line}`;
-      // A short doc conveys intent so the always-on map is more than names.
-      const doc = s.doc ? ` — ${s.doc}` : "";
-      return `- ${s.name} (${s.kind}) ${where}${doc}`;
-    })
-    .join("\n");
-  return { text, personalized: focus.length > 0 };
-}
 
 /** A positive integer from the environment, or the fallback. */
 function envInt(name: string, fallback: number): number {
@@ -430,7 +390,7 @@ export type EngineEvent =
   // arrive tagged with this `id`, so the UI can render a live nested rail per worker.
   | { type: "subagent"; phase: "start"; id: string; task: string; readOnly: boolean }
   | { type: "subagent"; phase: "end"; id: string; summary: string; error: boolean }
-  | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number; cacheHitTokens: number; cacheMissTokens: number };
+  | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number; cacheHitTokens: number; cacheMissTokens: number; cacheWriteTokens?: number };
 
 export interface RespondOptions {
   /** Called once per tool run (and on compaction) with a short line for the live
@@ -480,6 +440,11 @@ function toWire(calls: ToolCallRecord[]): WireToolCall[] {
     id: c.id,
     type: "function",
     function: { name: c.name, arguments: c.arguments },
+    // Carried through untouched. Core has no idea what is in here; a driver that needs
+    // it splices it back onto the wire call, and one that does not ignores it. Gemini
+    // rejects a follow-up whose call lost its `thought_signature`, so dropping this
+    // makes tool use fail outright rather than merely degrade.
+    ...(c.meta ? { meta: c.meta } : {}),
   }));
 }
 
@@ -530,8 +495,6 @@ async function loadImagePayloads(session: Session): Promise<Map<string, string>>
 
 function buildRequest(
   session: Session,
-  relevantMap: { text: string; personalized: boolean },
-  workingFiles: string,
   bgEvents: string[],
   tools: ReturnType<typeof toolSchemas>,
   imagePayloads: Map<string, string> = new Map(),
@@ -586,9 +549,6 @@ function buildRequest(
     messages,
     context: volatileContext(
       gov.rules,
-      relevantMap.text,
-      todoListText(session.toolContext),
-      workingFiles,
       session.toolContext.planMode ?? false,
       session.sessionMemory ?? "",
       session.toolContext.activePlan
@@ -598,7 +558,6 @@ function buildRequest(
             mode: "lightning",
           })
         : "",
-      relevantMap.personalized,
     ),
     tools,
     model: session.modelConfig,
@@ -745,9 +704,6 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       ...toolSchemas({
         planMode: session.toolContext.planMode ?? false,
         readOnlyOnly: session.toolContext.readOnlyTools,
-        // Deferred native tools appear once find_tools has activated them, and then
-        // stay for the session — same sticky contract as the MCP pool above.
-        activated: session.toolContext.activatedTools,
         // Lets `relevantWhen` tools (use_skill) check the live session, so a tool with
         // nothing to act on is not advertised and a skill created mid-session brings
         // it back next turn.
@@ -799,9 +755,6 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // it fires rarely; degrade-safe.
   await sweepSessionMemory(session, options);
 
-  // Computed once per turn from the current working set (refreshes as reads change
-  // across turns); kept tiny to bound per-turn token cost.
-  const relevantMap = await relevantMapText(session);
   // Background shells that finished since last turn — surfaced to the model once.
   const bgEvents = await backgroundEventNotes(session);
 
@@ -830,6 +783,8 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // streak crosses REPEAT_FAIL_LIMIT we interrupt with the fact that it is repeating
   // itself, and only stop the turn if it does it again afterwards. `repeatFailNudged`
   // resets whenever the failure changes, so each distinct loop gets one interrupt.
+  // Overflow recovery fires at most once per turn — see the overflow branch below.
+  let overflowRecovered = false;
   let repeatFailStreak = 0;
   let repeatFailNudged = false;
   // Single edits per file across the whole turn, and whether the batching reminder has
@@ -853,6 +808,23 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // no matter how the turn ends (finish, pause, interrupt, throw). Labeled with
   // the request that drove it. No-op when nothing was edited.
   const turnLabel = lastUserText(session);
+  // Fold this turn's cost into the session total on the way out, however the turn ends.
+  // In the `finally` rather than the success path on purpose: an interrupted or failed
+  // turn still spent the tokens it spent, and a spend figure that quietly omits the
+  // expensive turn you cancelled is worse than none. Undefined when nothing was billed.
+  const recordSpend = () => {
+    const summary = summarizeTask(usages, session.modelConfig.model);
+    if (summary) session.spend = addTurn(session.spend ?? emptySpend(), summary);
+    // Keep the PER-CALL split, not just the turn's totals.
+    //
+    // Because "where did those tokens go?" is the question that keeps getting asked, and
+    // a session total cannot answer it. A turn that billed 36K is six calls or one, and
+    // a provider that cached 40% did so evenly across every call or completely on three
+    // of them — those are different problems with different fixes, and the totals look
+    // identical for all of them. Six numbers per call, capped, so a long session cannot
+    // grow the meta file without bound.
+    session.callLog = [...(session.callLog ?? []), ...usages.map((u) => toCallRecord(u, session.modelConfig.model))].slice(-CALL_LOG_LIMIT);
+  };
   try {
     const reply = await runTurn();
     // END-OF-TURN sweep. The turn-start check above works one turn behind: it can only
@@ -867,6 +839,7 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     if (!options.signal?.aborted) await sweepSessionMemory(session, options);
     return reply;
   } finally {
+    recordSpend();
     const before = session.toolContext.checkpoints?.list().length ?? 0;
     session.toolContext.checkpoints?.seal(turnLabel);
     // Say that a restore point exists. It was made silently, so `/undo` was a feature
@@ -892,12 +865,23 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     if (limitReason) return pauseTask(session, options, `hit the ${limitReason}`);
     await maybeCompact(session, options);
 
-    // The live working set: current contents of the files being worked on, rebuilt
-    // each step (so it reflects edits made mid-turn) and injected in the volatile tail.
-    // `workingSetFull` lets read_file short-circuit a re-read of a file already shown.
-    const workingSet = await buildWorkingSet(session.toolContext);
-    session.toolContext.workingSetFull = workingSet.fullPaths;
-    session.toolContext.workingSetSpans = workingSet.shownSpans;
+    // NO working-set block is built or sent. It used to be: the current contents of
+    // every active file, rebuilt each step and injected at the tail — up to 12K tokens
+    // re-sent, uncached, on EVERY model call. Nothing about where it sat in the request
+    // could fix that, because content is appended to the conversation before it on every
+    // step, so prefix caching can never reach it. An eight-step turn paid for it eight
+    // times; a forty-step task would pay forty.
+    //
+    // File contents reach the model the same way every other observation does: as a tool
+    // result in the conversation, once, where the append-only shape means the provider
+    // caches it and it is never re-billed. Freshness after an edit is a RE-READ problem
+    // (read_file returns full content whenever mtime/size moved) rather than a reason to
+    // re-send everything continuously.
+    //
+    // `workingSetFull` / `workingSetSpans` are deliberately left UNSET. Every consumer
+    // reads them with `?.`, so they all degrade to "the model has not been shown this",
+    // which is now the truth. Leaving them populated would make read_file tell the model
+    // a file is already on screen when nothing put it there.
     // The other half of "what can the model still see": full reads still sitting in the
     // transcript. Derived here, AFTER any compaction above, so it can never disagree
     // with the bytes this step is about to send. This is what makes a stored presence
@@ -917,13 +901,27 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     const sentTranscriptTokens = estimateEntriesTokens(session.transcript);
     const request = buildRequest(
       session,
-      relevantMap,
-      workingSet.text,
       bgEvents,
       stepTools(),
       await loadImagePayloads(session),
     );
+    // Did the cacheable prefix survive since the last call? A break re-bills the system
+    // prompt and every tool schema at full price, silently — nothing fails, the reply is
+    // normal, and the only evidence is the bill. Reported so an UNEXPLAINED one is
+    // visible while it is happening, instead of being reconstructed from a session file
+    // after the user has paid for it. See dynamo/cacheBreak.ts.
+    const print = prefixPrint(session.modelConfig.model, request.system, request.tools ?? [], request.messages);
+    const broke = session.prefixPrint ? diffPrefix(session.prefixPrint, print) : null;
+    session.prefixPrint = print;
+    if (broke) {
+      options.onActivity?.(`prompt cache reset — ${broke.detail}`, { context: true });
+    }
+
     try {
+      // Stamped BEFORE the call, not after: what matters for the cache is when the
+      // request was sent, and a long-running turn would otherwise make the gap look
+      // shorter than it was.
+      session.lastCallAt = Date.now();
       result = await streamModel(request, options);
     } catch (error) {
       if (isAbort(error)) return interrupted(session);
@@ -951,6 +949,31 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     // Without checking, a reply cut off at the output ceiling looks identical to a
     // complete one and the loop carries on with half an answer.
     if (result.stop && result.stop !== "end") {
+      // Overflow is RECOVERABLE, and used not to be. The provider refused the request
+      // because the conversation no longer fits; the turn then ended and the user was
+      // told to compact by hand, mid-task, having already paid for the refused call.
+      //
+      // Dropping the OLDEST whole rounds and retrying is what makes that a hiccup
+      // instead of a stop. Whole rounds, because a round is the only split the wire
+      // format guarantees is safe — every tool result is resolved before the next
+      // assistant turn, so a group starting at an assistant carries its own results.
+      // Cutting by entry count can sever a call from its result and turn a request that
+      // was merely too long into one that is malformed.
+      //
+      // ONCE per turn: if a conversation is still too long after shedding its oldest
+      // rounds, retrying again is a loop, and autocompact is the right instrument.
+      if (result.stop === "overflow" && !overflowRecovered) {
+        const shed = dropOldestRounds(session.transcript);
+        if (shed) {
+          overflowRecovered = true;
+          session.transcript = shed;
+          await options.persist?.();
+          options.onActivity?.("conversation was too long — dropped the oldest turns and retried", {
+            context: true,
+          });
+          continue;
+        }
+      }
       const note = stopReasonNote(result.stop);
       if (content.trim()) session.transcript.push({ role: "assistant", content });
       await options.persist?.();
@@ -999,6 +1022,7 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
 
     // Record the assistant's tool request so the conversation stays well-formed.
     const records: ToolCallRecord[] = toolCalls.map((call) => ({
+      ...(call.meta ? { meta: call.meta } : {}),
       id: call.id,
       name: call.name,
       arguments: call.arguments,
@@ -1218,6 +1242,34 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         synthetic: true,
         ...(canSee ? { images: shots } : {}),
       });
+      await options.persist?.();
+    }
+
+    // Automatic post-edit check. Runs itself rather than relying on the model to call
+    // `diagnostics`, because a tool description asking a model to remember is exactly
+    // the kind of rule that gets ignored under load — the mechanical version is the one
+    // that holds. It also checks the edited files' reverse DEPENDENTS, which is the
+    // failure the per-file tool structurally cannot see: a renamed symbol or changed
+    // signature breaks the CALLER, in a file nobody thought to check.
+    //
+    // Recorded as a synthetic user message, the same shape the screenshot block above
+    // uses, so it lands after the tool results rather than between a tool_calls message
+    // and its results — the ordering that broke every tool-calling turn on DeepSeek once.
+    // Silent when it finds nothing: no server, a slow server and an unreadable path all
+    // look like "no diagnostics", so an all-clear here would be a claim we cannot make.
+    const ripple = await rippleCheck(
+      session.toolContext,
+      results.map((r) => ({ name: r.call.name, args: parseArgs(r.call.arguments), isError: r.isError })),
+      (p) => {
+        try {
+          return resolvePath(session.toolContext, p);
+        } catch {
+          return undefined;
+        }
+      },
+    );
+    if (ripple) {
+      session.transcript.push({ role: "user", content: ripple, synthetic: true });
       await options.persist?.();
     }
 
@@ -1466,6 +1518,26 @@ function streamModel(request: ModelRequest, options: RespondOptions): Promise<St
   });
 }
 
+/**
+ * How many calls of per-call usage a session keeps. Enough to cover any turn anyone
+ * would investigate, bounded so the meta file cannot grow with session length.
+ */
+const CALL_LOG_LIMIT = 200;
+
+/** One call's usage, flattened for the session file. Exported so the recording is
+ *  testable on its own — persisting a hand-built record proves nothing about what the
+ *  engine actually writes. */
+export function toCallRecord(u: Usage, model: string): import("../memory/types.js").CallUsage {
+  return {
+    at: Date.now(),
+    prompt: u.promptTokens,
+    hit: u.cacheHitTokens,
+    miss: u.cacheMissTokens,
+    out: u.completionTokens,
+    model,
+  };
+}
+
 /** Report a turn's token usage to the UI, if the provider returned it. */
 function emitUsage(result: StreamResult, options: RespondOptions): void {
   if (result.usage) {
@@ -1554,25 +1626,37 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
   // than late, and the next call re-measures.
   const used = () => contextUsed(session);
 
-  if (used() >= microBar) {
+  // Two reasons to microcompact, not one. The bar is about context PRESSURE; the cold
+  // check is about the cache being gone, which removes the only argument for waiting.
+  // See `cacheLikelyCold` — on a warm cache this rewrite costs a 1.25x prefix rebuild,
+  // and once the entry has expired it costs nothing at all.
+  const cold = cacheLikelyCold(session.lastCallAt ?? 0, Date.now(), used(), microBar);
+  if (used() >= microBar || cold) {
     // Assigned unconditionally, on purpose. Gating this on a hand-picked subset of the
     // counters meant a pass that only cleared edit INPUTS or only evicted IMAGES did the
     // work and then threw the result away, and every new kind of clearing had to
     // remember to add itself here or be silently discarded. `microcompact` already
     // returns a copy when it changed nothing, so taking the result always is both
     // correct and the shape that cannot rot.
-    // `workingSetFull` is the set of files the <working_files> block is currently
-    // carrying WHOLE. Their transcript copies are the redundant half of a double
-    // representation, so this pass is allowed to clear them even inside the recent
-    // window that is otherwise protected — the model still sees them, fresher, at the
-    // boundary. Empty on the first step of a session, which is correct: nothing has
-    // been superseded yet.
-    session.transcript = microcompact(
-      session.transcript,
-      undefined,
-      session.toolContext.workingSetFull,
-    ).entries;
-    // Silent by design — trimming stale context is background machinery.
+    // NO superseded set is passed any more. It used to name the files <working_files>
+    // was carrying whole, whose transcript copies were then redundant and safe to clear
+    // even inside the protected recent window. With that block gone the transcript is
+    // the ONLY place those contents exist, so clearing them would delete the model's
+    // single copy while nothing put it back — the exact context-that-lies failure
+    // removing the block was meant to end.
+    // PROPOSED, not applied. Clearing a tool body rewrites the transcript, and the
+    // transcript is the cached half of the request — so a clear that reclaims a little
+    // is not a small win, it is a loss: the remaining prefix gets rewritten at 1.25x
+    // instead of read at 0.1x, and the break-even can run past a hundred steps. The
+    // arithmetic lives in `clearIsWorthIt`; here we simply measure what this particular
+    // clear would reclaim and let it decide.
+    const proposed = microcompact(session.transcript).entries;
+    const before = estimateEntriesTokens(session.transcript);
+    const after = estimateEntriesTokens(proposed);
+    if (clearIsWorthIt({ before, after, cold, autoBar })) {
+      session.transcript = proposed;
+      // Silent by design — trimming stale context is background machinery.
+    }
   }
   // Circuit-breaker: once autocompact has failed MAX_COMPACT_FAILURES times this
   // session, stop trying (the transcript is likely irrecoverable) rather than burning
@@ -1635,9 +1719,10 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
   }
   session.compactFailures = 0; // a clean compaction resets the breaker
 
-  // No explicit post-summary re-read needed: the live working set (buildWorkingSet)
-  // injects the current contents of the files being worked on in the volatile tail
-  // every step, so nothing the model was mid-edit on is lost across the summary.
+  // A summary replaces the transcript prefix, so file contents read before it are gone.
+  // Nothing re-injects them: the working-set block that used to do so was removed for
+  // costing up to 12K per model call. The model re-reads what it still needs, which
+  // read_file allows because the summary also clears the presence set the dedup checks.
   session.transcript = spliceSummary(session.transcript, summary, KEEP_LAST_N);
 
   // Report it. Compaction is the one context operation worth showing: it REWRITES the

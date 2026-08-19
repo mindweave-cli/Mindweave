@@ -33,7 +33,7 @@ export interface ToolResult {
    * arguments are relative and `cd` moves the working directory mid-session, so the
    * same recorded path can resolve to a different file than it did when read.
    */
-  fullContentOf?: string;
+  fullContentOf?: string[];
 
   /**
    * A short, human one-liner for the live UI (e.g. "read src/app.ts (40
@@ -179,13 +179,6 @@ export interface TodoItem {
 export interface ToolContext {
   /** Working directory; `run_command` may change it (cd persistence). */
   cwd: string;
-  /**
-   * Deferred native tools this session has searched for and activated (see
-   * `Tool.deferred`). Sticky for the session: activation costs one prompt-cache
-   * invalidation when the tool list changes, so it happens once per capability rather
-   * than once per call. Absent until the first successful search.
-   */
-  activatedTools?: Set<string>;
   /**
    * The user-approved plan currently in force, verbatim (see dynamo/planArtifact).
    * Set by exit_plan on approval, loaded from `.mindweave/plan.md` at session

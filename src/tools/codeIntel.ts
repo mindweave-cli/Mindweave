@@ -319,6 +319,16 @@ function fail(message: string): ToolResult {
 function navigational(tool: Tool): Tool {
   return {
     ...tool,
+    /**
+     * Deferred, all four of them, matching how Claude Code holds its LSPTool behind tool
+     * search. They answer structural questions — where is this defined, what calls it,
+     * what is related — which is a phase of a task rather than a step in the edit loop,
+     * and four schemas is 1,257 tokens in front of the model on every single request.
+     *
+     * Marked here rather than on each definition because it is one decision about one
+     * family; splitting it four ways is four places for it to drift.
+     */
+    deferred: true,
     async execute(args, ctx) {
       return { ...(await tool.execute(args, ctx)), quiet: true };
     },

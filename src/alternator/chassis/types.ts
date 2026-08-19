@@ -160,6 +160,18 @@ export interface Chassis {
    *  no server is available or none are reported. Syncs the file first so results
    *  reflect the current on-disk contents (e.g. right after an edit). */
   diagnostics(absPath: string): Promise<readonly CodeDiagnostic[]>;
+  /**
+   * The in-repo files that IMPORT `absPath` — its reverse dependents.
+   *
+   * Diagnostics are per-file, so the one thing they structurally cannot catch is the
+   * failure that matters most after an edit: you renamed a symbol, changed a signature
+   * or altered an exported type, and the file that is now broken is the CALLER. This
+   * is how the caller gets found, from import edges the graph already holds.
+   *
+   * Empty when the file is unknown to the graph — which is a real answer here ("nothing
+   * indexed imports it"), never an error.
+   */
+  dependents(absPath: string): Promise<readonly string[]>;
   status(): ChassisStatus;
   /** Stop background work and shut down language servers. */
   dispose?(): Promise<void>;

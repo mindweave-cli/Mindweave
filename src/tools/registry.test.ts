@@ -32,14 +32,16 @@ test("the advertised set stays at or under the project's own deferral threshold"
   );
 });
 
-test("a deferred tool is hidden until activated, then stays", () => {
+test("a deferred tool is never advertised, no matter what has been searched", () => {
+  // The advertised list is FIXED for the whole session. That is the point: it is the
+  // bytes the provider hashes for its prompt cache, and the old behaviour — searching a
+  // tool added it to the list — rewrote the entire cached prefix to save a few hundred
+  // tokens of schema. Discovery is append-only now; find_tools hands the model the
+  // schema in its result and the list never moves.
   const deferred = TOOLS.find((t) => t.deferred)!;
-  const before = toolSchemas().map((s) => s.function.name);
-  assert.ok(!before.includes(deferred.name), "deferred tools must not be advertised by default");
-
-  const after = toolSchemas({ activated: new Set([deferred.name]) }).map((s) => s.function.name);
-  assert.ok(after.includes(deferred.name), "activation must make it callable");
-  assert.equal(after.length, before.length + 1, "activation adds exactly the one tool");
+  const names = toolSchemas().map((s) => s.function.name);
+  assert.ok(!names.includes(deferred.name), "deferred tools must not be advertised");
+  assert.deepEqual(toolSchemas(), toolSchemas(), "the advertised list must be a pure function of the session");
 });
 
 test("every deferred tool is reachable by searching its own name", () => {

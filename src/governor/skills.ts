@@ -110,8 +110,17 @@ function clip(text: string, max: number): string {
   return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
-export function renderSkillCatalog(skills: SkillMeta[], workingSet: string[] = []): string {
-  const visible = activeSkills(skills, workingSet);
+export function renderSkillCatalog(skills: SkillMeta[], workingSet?: string[]): string {
+  // OMITTING the working set means "list everything", not "list nothing". It used to
+  // default to `[]`, which quietly filtered every glob-scoped skill out — so a caller
+  // that had no working set to give showed an incomplete catalog, and a skill reachable
+  // only by name became uninvokable.
+  //
+  // The engine relies on this: the catalog renders into the CACHED system prompt, so it
+  // must be byte-identical all session. Filtering it by the working set made a
+  // glob-scoped skill appear the moment a matching file was read, changing the system
+  // prompt and invalidating the tools, system and message caches at once.
+  const visible = workingSet === undefined ? skills : activeSkills(skills, workingSet);
   if (visible.length === 0) return "";
   const shown = visible.slice(0, MAX_SKILL_ENTRIES);
   const lines = shown.map((s) => {

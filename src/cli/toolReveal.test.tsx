@@ -47,7 +47,7 @@ function frameOf(blocks: Block[]): string {
         <BlockView key={b.id} block={b} columns={stdout.columns} />
       ))}
     </Box>,
-    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, exitOnCtrlC: false },
+    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, exitOnCtrlC: false, debug: true },
   );
   const text = stdout.frames.join("").replace(ANSI, "");
   app.unmount();
@@ -274,6 +274,7 @@ function renderFrame(node: React.ReactElement): string {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin,
     patchConsole: false,
+    debug: true,
     exitOnCtrlC: false,
   });
   const text = stdout.frames.join("").replace(ANSI, "");

@@ -18,6 +18,20 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: string;
+  /**
+   * Opaque provider data attached to THIS call, to be echoed back verbatim on the next
+   * request. Core never reads it, never merges it, and never reasons about it — it only
+   * carries it, which is what keeps this provider-neutral despite the contents not being.
+   *
+   * It exists because some providers make round-tripping mandatory rather than optional.
+   * Gemini 3 attaches a `thought_signature` to every function call and REJECTS the next
+   * request that omits it ("Function call is missing a thought_signature", 400), so a
+   * client that drops unknown fields cannot call a tool twice. This was previously
+   * declined on the grounds that it would change a core type for one provider's benefit;
+   * that reasoning held while it was an optimization and stopped holding when it became
+   * the difference between a provider working and not working at all.
+   */
+  meta?: Record<string, unknown>;
 }
 
 /** A tool call echoed back to the provider, in the wire shape it expects. */
@@ -25,6 +39,9 @@ export interface WireToolCall {
   id: string;
   type: "function";
   function: { name: string; arguments: string };
+  /** Opaque provider data to splice back onto this call — see ToolCall.meta. A driver
+   *  that does not need it ignores it; nothing in core inspects it. */
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -133,7 +150,12 @@ export interface ModelRequest {
   system: string;
   /** The conversation so far — append-only, no system message inside. */
   messages: ChatMessage[];
-  /** Volatile per-turn context, rendered at the tail and kept OUT of the cache prefix. */
+  /**
+   * Genuinely volatile per-turn context — the ranked code map, the todo list, standing
+   * rules, reply-style guidance. Rendered LAST, outside the cache prefix, because these
+   * really do change from step to step and are small enough that re-sending them is
+   * cheaper than the cache writes they would cause.
+   */
   context?: string;
   /** Tools the model may call; empty/omitted forces a plain-text answer. */
   tools?: ToolSchema[];
@@ -152,7 +174,21 @@ export interface Usage {
   completionTokens: number;
   totalTokens: number;
   cacheHitTokens: number;
+  /**
+   * Fresh input, INCLUDING anything written to the cache. Kept inclusive so every
+   * existing consumer stays correct without knowing about the split below.
+   */
   cacheMissTokens: number;
+  /**
+   * The part of `cacheMissTokens` that was also written into the cache, when the
+   * provider says so. A SUBSET, not a fourth bucket — pricing multiplies this slice by
+   * the write rate and the remainder by the plain input rate, so double-counting it
+   * would silently inflate every figure we show.
+   *
+   * Absent on providers that do not report it, which is not the same as zero and is
+   * why it is optional rather than defaulted.
+   */
+  cacheWriteTokens?: number;
 }
 
 /**
@@ -234,6 +270,20 @@ export interface ModelPrice {
   cacheMiss: number;
   /** Generated tokens. */
   output: number;
+  /**
+   * Fresh input that is ALSO written into the cache, per million.
+   *
+   * A third rate, because on some providers it genuinely is one: Anthropic bills a
+   * cache write at 1.25x base input (2x for the 1h TTL), since the tokens are both
+   * processed and stored. Folding writes into `cacheMiss` under-reports every turn of
+   * an agentic loop, which writes a new prefix segment constantly — the bill a user
+   * actually receives is the one this field exists to match.
+   *
+   * Optional: on a provider whose cache writes cost the same as ordinary input, or
+   * which never distinguishes the two, leaving it unset means "same as `cacheMiss`",
+   * which is both correct there and the safe default everywhere else.
+   */
+  cacheWrite?: number;
 }
 
 // ── The contract ──────────────────────────────────────────────────────────────

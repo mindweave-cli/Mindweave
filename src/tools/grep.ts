@@ -52,8 +52,11 @@ export const grepDef: Tool = {
     "directly instead of concluding it is not there. " +
     "Avoid lookahead, lookbehind and backreferences; the search engine rejects them. " +
     "Character classes, groups, alternation and anchors are all fine. " +
-    `Output stops after ${MAX_OUTPUT_LINES} matching lines and says so when it does, so ` +
-    "narrow with `glob` or `path` rather than assuming you have seen everything. " +
+    `Output stops after ${MAX_OUTPUT_LINES} matching lines. When it does it tells you the ` +
+    "`offset` to pass for the next page, so a capped search is something to continue, not " +
+    "a reason to start reading whole files. " +
+    "`multiline` lets a pattern cross line breaks, which is how you find a construct that " +
+    "is not on one line. " +
     "To find the uses of a symbol you can NAME, try references first: it reads parsed " +
     "code rather than raw text, so a mention in a comment or a string is not a match. " +
     "Come back here when it reports a name-level answer and exact identity matters.",
@@ -82,6 +85,36 @@ export const grepDef: Tool = {
         minimum: 0,
         description: "Lines of context to show before and after each match (content mode).",
       },
+      before: {
+        type: "integer",
+        minimum: 0,
+        description: "Lines to show BEFORE each match (content mode). Overrides `context` on that side.",
+      },
+      after: {
+        type: "integer",
+        minimum: 0,
+        description: "Lines to show AFTER each match (content mode). Overrides `context` on that side.",
+      },
+      multiline: {
+        type: "boolean",
+        description:
+          "Let the pattern span line breaks, with `.` matching newlines too. Off by default. " +
+          "Use it for constructs that are not on one line — a function signature and its body, " +
+          "an object literal, a JSX block.",
+      },
+      head_limit: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Return at most this many results. 0 means no limit. Defaults to the cap below.",
+      },
+      offset: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Skip this many results first — page through a capped search instead of narrowing it. " +
+          "The result tells you the offset to pass next.",
+      },
     },
   },
 
@@ -93,7 +126,18 @@ export const grepDef: Tool = {
       args.output_mode === "content" || args.output_mode === "count"
         ? args.output_mode
         : "files_with_matches";
-    const context = typeof args.context === "number" && args.context > 0 ? Math.floor(args.context) : 0;
+    // Context is asymmetric. A symmetric window is the wrong shape for the commonest
+    // question a search asks — "what IS this thing" — where the answer is the lines
+    // AFTER the declaration and the lines before are the end of something unrelated.
+    const context = nonNegative(args.context);
+    const before = nonNegative(args.before) || context;
+    const after = nonNegative(args.after) || context;
+    const multiline = args.multiline === true;
+    // Paging. Without it, a search that hits the cap could only be narrowed — and when
+    // the model could not narrow it, its remaining move was to read whole files, which
+    // is the expensive habit this tool exists to prevent.
+    const headLimit = typeof args.head_limit === "number" && args.head_limit >= 0 ? Math.floor(args.head_limit) : undefined;
+    const offset = nonNegative(args.offset);
     const caseInsensitive = args.ignore_case === true;
     const glob = typeof args.glob === "string" && args.glob.trim() ? args.glob.trim() : undefined;
 
@@ -112,7 +156,7 @@ export const grepDef: Tool = {
         if (rawPath) return fail(`path not found: ${rawPath}`);
         continue; // a missing root in a multi-root sweep is skipped, not fatal
       }
-      const o: GrepOpts = { pattern, mode, context, caseInsensitive, glob, ctx, unit, isFile: stat.isFile() };
+      const o: GrepOpts = { pattern, mode, before, after, multiline, caseInsensitive, glob, ctx, unit, isFile: stat.isFile() };
       const got = haveRg ? await grepViaRipgrep(o) : await grepViaWalk(o);
       if (got.invalid) return fail(got.invalid);
       lines.push(...got.lines);
@@ -126,7 +170,7 @@ export const grepDef: Tool = {
     // read, narrowly and repeatedly, where one search would have answered it.
     if (mode === "content" && lines.length > 0) await recordSearchHits(ctx, lines);
 
-    return formatGrep(mode, pattern, lines);
+    return formatGrep(mode, pattern, lines, headLimit, offset);
   },
 };
 
@@ -199,7 +243,12 @@ async function recordSearchHits(ctx: ToolContext, lines: readonly string[]): Pro
 interface GrepOpts {
   pattern: string;
   mode: Mode;
-  context: number;
+  /** Lines kept BEFORE each match. */
+  before: number;
+  /** Lines kept AFTER each match. */
+  after: number;
+  /** Match across line boundaries (`.` spans newlines). */
+  multiline: boolean;
   caseInsensitive: boolean;
   glob: string | undefined;
   ctx: ToolContext;
@@ -214,14 +263,24 @@ interface UnitResult {
 }
 
 /** Combine all roots' labeled lines into the final tool result, capped per mode. */
-function formatGrep(mode: Mode, pattern: string, lines: string[]): ToolResult {
+/**
+ * Render the gathered lines, honouring the caller's window.
+ *
+ * The window is the point. Before it existed, a search that hit the cap could only say
+ * "narrow the search" — and when the model could not narrow it (a common identifier, a
+ * broad question), its remaining move was to read whole files. Being able to ask for the
+ * NEXT page turns a capped result from a dead end into a continuation, which is the
+ * difference between locating something and giving up and reading everything.
+ */
+function formatGrep(
+  mode: Mode,
+  pattern: string,
+  lines: string[],
+  headLimit: number | undefined,
+  offset: number,
+): ToolResult {
   if (lines.length === 0) {
     return { output: "No matches found.", summary: `grep ${pattern} — no matches` };
-  }
-  if (mode === "content") {
-    const capped = lines.slice(0, MAX_OUTPUT_LINES);
-    if (lines.length > MAX_OUTPUT_LINES) capped.push("… (more matches — narrow the search)");
-    return { output: capped.join("\n"), summary: `grep ${pattern} (${lines.length} line${lines.length === 1 ? "" : "es"})` };
   }
   if (mode === "count") {
     let total = 0;
@@ -231,9 +290,33 @@ function formatGrep(mode: Mode, pattern: string, lines: string[]): ToolResult {
     }
     return { output: lines.join("\n"), summary: `grep ${pattern} (${total} in ${lines.length} files)` };
   }
-  const capped = lines.slice(0, 100);
-  if (lines.length > 100) capped.push(`… (${lines.length - 100} more — narrow the pattern)`);
-  return { output: capped.join("\n"), summary: `grep ${pattern} (${lines.length} file${lines.length === 1 ? "" : "s"})` };
+
+  // `head_limit: 0` means "no limit" and must not collapse into the default, so unset
+  // and zero stay distinguishable rather than being defaulted away.
+  const ceiling = mode === "content" ? MAX_OUTPUT_LINES : 100;
+  const limit = headLimit === undefined ? ceiling : headLimit === 0 ? lines.length : Math.min(headLimit, ceiling);
+  const page = lines.slice(offset, offset + limit);
+  const shown = offset + page.length;
+  const noun = mode === "content" ? "line" : "file";
+
+  if (page.length === 0) {
+    return {
+      output: `No further matches: offset ${offset} is past the ${lines.length} ${noun}s found.`,
+      summary: `grep ${pattern} — offset past the end`,
+    };
+  }
+  const out = [...page];
+  // Say what is left AND how to reach it. "Narrow the search" on its own was advice the
+  // model frequently could not take.
+  if (shown < lines.length) {
+    out.push(
+      `… (${lines.length - shown} more ${noun}s — pass offset: ${shown} for the next page, or narrow the search)`,
+    );
+  }
+  return {
+    output: out.join("\n"),
+    summary: `grep ${pattern} (${lines.length} ${noun}${lines.length === 1 ? "" : "s"})`,
+  };
 }
 
 // ── ripgrep path (primary) ────────────────────────────────────────────────────
@@ -255,8 +338,12 @@ async function grepViaRipgrep(o: GrepOpts): Promise<UnitResult> {
   else if (o.mode === "count") args.push("-c");
   else {
     args.push("-n", "--max-columns", "500");
-    if (o.context > 0) args.push("-C", String(o.context));
+    if (o.before > 0) args.push("-B", String(o.before));
+    if (o.after > 0) args.push("-A", String(o.after));
   }
+  // `--multiline-dotall` is what makes the flag useful: without it `.` still stops at a
+  // newline, so a pattern spanning lines only matches if it spells out every break.
+  if (o.multiline) args.push("-U", "--multiline-dotall");
   args.push("-e", o.pattern);
   // Run FROM the unit's root so emitted paths are root-relative; we label them below.
   args.push("--", o.unit.sub || ".");
@@ -284,7 +371,11 @@ async function grepViaRipgrep(o: GrepOpts): Promise<UnitResult> {
 async function grepViaWalk(o: GrepOpts): Promise<UnitResult> {
   let regexp: RegExp;
   try {
-    regexp = new RegExp(o.pattern, o.caseInsensitive ? "i" : undefined);
+    // `s` (dotAll) alongside `g` is what makes multiline useful: without dotAll `.` still
+    // refuses to cross a newline, so the flag would be accepted and quietly do nothing —
+    // a capability the tool claims and does not have.
+    const flags = `${o.caseInsensitive ? "i" : ""}${o.multiline ? "gs" : ""}`;
+    regexp = new RegExp(o.pattern, flags || undefined);
   } catch (error) {
     return { lines: [], invalid: `invalid regular expression: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -318,12 +409,42 @@ async function grepViaWalk(o: GrepOpts): Promise<UnitResult> {
 
     const lines = text.split("\n");
     let fileCount = 0;
+
+    // MULTILINE: match against the WHOLE file, then map each match's character offset
+    // back to a line number. Matching line by line cannot see a construct that spans a
+    // break at all, which is the entire reason the flag exists.
+    if (o.multiline) {
+      regexp.lastIndex = 0;
+      for (let m = regexp.exec(text); m !== null; m = regexp.exec(text)) {
+        fileCount++;
+        if (o.mode === "content") {
+          const startLine = text.slice(0, m.index).split("\n").length - 1;
+          const endLine = startLine + (m[0].split("\n").length - 1);
+          const lo = Math.max(0, startLine - o.before);
+          const hi = Math.min(lines.length - 1, endLine + o.after);
+          for (let j = lo; j <= hi; j++) {
+            out.push(`${relativize(o.ctx, file.abs)}:${j + 1}:${lines[j]}`);
+            if (out.length >= MAX_OUTPUT_LINES) {
+              truncated = true;
+              break;
+            }
+          }
+          if (truncated) break;
+        }
+        // A zero-width match never advances lastIndex, so this would spin forever.
+        if (m[0].length === 0) regexp.lastIndex++;
+      }
+      if (fileCount > 0 && o.mode === "files_with_matches") out.push(relativize(o.ctx, file.abs));
+      if (fileCount > 0 && o.mode === "count") out.push(`${relativize(o.ctx, file.abs)}:${fileCount}`);
+      continue;
+    }
+
     for (let i = 0; i < lines.length; i++) {
       if (!regexp.test(lines[i])) continue;
       fileCount++;
       if (o.mode === "content") {
-        const lo = Math.max(0, i - o.context);
-        const hi = Math.min(lines.length - 1, i + o.context);
+        const lo = Math.max(0, i - o.before);
+        const hi = Math.min(lines.length - 1, i + o.after);
         for (let j = lo; j <= hi; j++) {
           out.push(`${relativize(o.ctx, file.abs)}:${j + 1}:${lines[j]}`);
           if (out.length >= MAX_OUTPUT_LINES) {
@@ -345,6 +466,11 @@ function isBinary(buf: Buffer): boolean {
   const n = Math.min(buf.length, 8192);
   for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
   return false;
+}
+
+/** A non-negative whole number from a tool argument, or 0. */
+function nonNegative(v: unknown): number {
+  return typeof v === "number" && v > 0 ? Math.floor(v) : 0;
 }
 
 function fail(message: string): ToolResult {

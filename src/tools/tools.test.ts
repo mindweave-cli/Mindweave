@@ -556,23 +556,24 @@ test("grep and glob exclude secrets in BOTH engines, not just the one this machi
 });
 
 // ── ranged reads of a large file ──────────────────────────────────────────────
-// The gap the other two dedups cannot reach. A large file is localized in the working
-// set rather than rendered whole, so it is not in `workingSetFull`; a ranged read is
-// not `full`, so the whole-file dedup cannot fire either. Measured on a real session:
-// app.js read four separate times while its regions sat in <working_files>.
+// The <working_files> block used to localize a large file into regions, and a ranged
+// read inside one of those regions was suppressed. Both are gone: nothing renders the
+// regions any more, so suppressing a read against them would refuse content on the
+// strength of something the model was never shown. A ranged read now always returns
+// its lines unless the whole file is unchanged and still in the transcript.
 
-test("a ranged read inside a region already on screen is not re-sent", async () => {
+test("a ranged read is never suppressed by a working-set region", async () => {
   const ctx = freshCtx();
   const p = join(ctx.cwd, "big.ts");
   await fs.writeFile(p, Array.from({ length: 400 }, (_, i) => `line ${i + 1}`).join("\n"));
   const st = await fs.stat(p);
   ctx.reads.set(p, { mtimeMs: st.mtimeMs, size: st.size, full: false, touchedAt: 1 });
-  // What the working set actually rendered this turn.
+  // A stale span map from an older session must not suppress anything.
   ctx.workingSetSpans = new Map([[p, [{ start: 100, end: 200 }]]]);
 
   const inside = await readFile.execute({ path: "big.ts", offset: 120, limit: 20 }, ctx);
-  assert.doesNotMatch(inside.output, /line 125/, "the lines were sent again");
-  assert.match(inside.output, /already in your <working_files>/);
+  assert.match(inside.output, /line 125/, "the lines must come back");
+  assert.doesNotMatch(inside.output, /working_files/, "nothing may cite a block that is not sent");
 });
 
 test("a ranged read OUTSIDE the rendered region still returns the lines", async () => {

@@ -158,12 +158,18 @@ export function thinkLevels(model: ModelId): ThinkLevel[] {
  * below this through 2026-08-31; the durable list price is used here so the
  * estimate doesn't start under-reporting the moment that ends.
  */
+/** Anthropic bills a 5-minute cache WRITE at 1.25x base input — the tokens are both
+ *  processed and stored. (The 1h TTL is 2x; Mindweave does not buy it.) Folding writes
+ *  into the plain input rate under-reported every turn of an agentic loop, which writes
+ *  a new prefix segment constantly. */
+const CACHE_WRITE_MULTIPLIER = 1.25;
+
 const PRICES: Record<string, ModelPrice> = {
-  [FABLE]: { cacheHit: 1, cacheMiss: 10, output: 50 },
-  [OPUS]: { cacheHit: 0.5, cacheMiss: 5, output: 25 },
-  [OPUS_48]: { cacheHit: 0.5, cacheMiss: 5, output: 25 },
-  [SONNET]: { cacheHit: 0.3, cacheMiss: 3, output: 15 },
-  [HAIKU]: { cacheHit: 0.1, cacheMiss: 1, output: 5 },
+  [FABLE]: { cacheHit: 1, cacheMiss: 10, output: 50, cacheWrite: 10 * CACHE_WRITE_MULTIPLIER },
+  [OPUS]: { cacheHit: 0.5, cacheMiss: 5, output: 25, cacheWrite: 5 * CACHE_WRITE_MULTIPLIER },
+  [OPUS_48]: { cacheHit: 0.5, cacheMiss: 5, output: 25, cacheWrite: 5 * CACHE_WRITE_MULTIPLIER },
+  [SONNET]: { cacheHit: 0.3, cacheMiss: 3, output: 15, cacheWrite: 3 * CACHE_WRITE_MULTIPLIER },
+  [HAIKU]: { cacheHit: 0.1, cacheMiss: 1, output: 5, cacheWrite: 1 * CACHE_WRITE_MULTIPLIER },
 };
 
 /** Cache-aware list price for a model, falling back to the default model's. */

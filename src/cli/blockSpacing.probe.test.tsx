@@ -44,9 +44,14 @@ function rowsOf(block: Block): string[] {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin,
     patchConsole: false,
+    debug: true,
   });
+  // Read BEFORE unmount, not after — Ink 7 writes a final blank frame on unmount
+  // (part of its "flush pending renders and await stdout drain" fix), which would
+  // otherwise be mistaken for the real last frame.
+  const last = stdout.frames[stdout.frames.length - 1] ?? "";
   instance.unmount();
-  return (stdout.frames[stdout.frames.length - 1] ?? "")
+  return last
     .replace(ANSI, "")
     .split("\n")
     .map((r) => r.replace(/\s+$/, ""));

@@ -25,6 +25,7 @@
  */
 import { basename } from "node:path";
 import type { Entry } from "./types.js";
+import { fullPathsOf } from "./types.js";
 import { estimateImagesTokens } from "./images.js";
 
 // ~3.5 chars/token, deliberately tokenizer-free: triggers need a cheap, stable,
@@ -97,7 +98,16 @@ function clearMutationArgs(raw: string): string | null {
 
 /** Cheap token estimate for a string. */
 export function estimateTokens(text: string): number {
-  return text ? Math.ceil(text.length / CHARS_PER_TOKEN) + 1 : 0;
+  return estimateTokensForChars(text.length);
+}
+
+/**
+ * The same estimate, from a character COUNT rather than the characters themselves —
+ * for callers that are counting a stream as it arrives and never hold the whole string
+ * (the live token meter). Same arithmetic, so the two agree by construction.
+ */
+export function estimateTokensForChars(chars: number): number {
+  return chars > 0 ? Math.ceil(chars / CHARS_PER_TOKEN) + 1 : 0;
 }
 
 /**
@@ -188,7 +198,11 @@ export function microcompact(
   if (supersededPaths.size > 0) {
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
-      if (e?.role === "tool" && e.fullContentOf && supersededPaths.has(e.fullContentOf)) {
+      // EVERY file the entry carries must be superseded before its body can go. One
+      // read of four files is one entry; clearing it because one of the four was
+      // re-read would drop the other three out from under the model.
+      const carried = e ? fullPathsOf(e) : [];
+      if (carried.length > 0 && carried.every((path) => supersededPaths.has(path))) {
         clearable.add(i);
       }
     }
@@ -432,4 +446,81 @@ export function spliceSummary(
   while (tail.length > 0 && tail[0].role === "tool") tail = tail.slice(1);
   const summaryEntry: Entry = { role: "summary", content: RESUME_PREFIX + stripAnalysis(summary) };
   return [summaryEntry, ...tail];
+}
+
+/**
+ * Split the transcript at API-ROUND boundaries: one group per model round-trip.
+ *
+ * A boundary fires when a NEW assistant entry begins, because that is the one split
+ * point the wire format guarantees is safe. Every tool result must be resolved before
+ * the next assistant turn, so a group that starts at an assistant carries that
+ * assistant's tool calls AND their results together — pairing validity falls out of the
+ * boundary rather than needing to be checked.
+ *
+ * The first group is the preamble (whatever precedes the first assistant entry: the
+ * opening user message, a restored summary). Every later group starts with an assistant.
+ *
+ * Rounds, not entries, is the unit that matters when something has to be DROPPED: a
+ * single round with six parallel tool calls is seven entries, so counting entries can
+ * cut a round in half or keep one round while claiming to keep eight things.
+ */
+export function groupByRound(entries: readonly Entry[]): Entry[][] {
+  const groups: Entry[][] = [];
+  let current: Entry[] = [];
+  for (const e of entries) {
+    if (e.role === "assistant" && current.length > 0) {
+      groups.push(current);
+      current = [];
+    }
+    current.push(e);
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+/** Fallback share of the conversation to drop when the provider gave no token gap. */
+const OVERFLOW_DROP_SHARE = 0.2;
+
+/**
+ * Drop the OLDEST whole rounds so an over-long conversation fits, keeping the newest.
+ *
+ * The failure this exists for: the provider refuses the request because the prompt no
+ * longer fits, and the turn simply ends. The user is told to compact by hand, mid-task,
+ * having already paid for the refused call. Dropping the oldest rounds and retrying is
+ * what turns that into a recoverable hiccup.
+ *
+ * `tokenGap` is how much the request overshot, when the provider says so; rounds are
+ * dropped until that much is reclaimed. Without it, drop a fixed share — enough to make
+ * progress, small enough not to throw away a conversation to fix a slight overrun.
+ *
+ * ALWAYS keeps at least one group. It cannot return a sequence starting with an orphaned
+ * tool result, and that is a property of the SPLIT rather than a check performed here:
+ * every group after the first begins with an assistant entry, so whatever survives
+ * begins with one too. A defensive strip was written here first and deleted — it could
+ * never fire, and an unreachable guard reads as protection while providing none.
+ */
+export function dropOldestRounds(
+  entries: readonly Entry[],
+  tokenGap?: number,
+  estimate: (e: Entry[]) => number = estimateEntriesTokens,
+): Entry[] | null {
+  const groups = groupByRound(entries);
+  if (groups.length < 2) return null;
+
+  let dropCount = 0;
+  if (tokenGap !== undefined && tokenGap > 0) {
+    let freed = 0;
+    for (const g of groups) {
+      freed += estimate(g);
+      dropCount++;
+      if (freed >= tokenGap) break;
+    }
+  } else {
+    dropCount = Math.max(1, Math.floor(groups.length * OVERFLOW_DROP_SHARE));
+  }
+  dropCount = Math.min(dropCount, groups.length - 1);
+  if (dropCount < 1) return null;
+
+  const kept = groups.slice(dropCount).flat();
+  return kept.length > 0 ? kept : null;
 }

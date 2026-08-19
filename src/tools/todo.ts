@@ -9,9 +9,11 @@
  * The list still does its whole job unseen, because its reader is the model. The model
  * rewrites the WHOLE list
  * each call (simplest correct model: no partial-update bugs); we store it on the
- * ToolContext and the engine injects it into the system prompt every turn, so the
- * plan is always in front of the model. Because it lives outside the transcript,
- * the plan also survives compaction.
+ * ToolContext, and the tool's own REPLY carries the whole list back into the
+ * conversation — which is where the model reads it from. The engine no longer re-injects
+ * it per turn: that re-sent the list, uncached, on every step to duplicate something the
+ * tool result already held. It therefore no longer survives compaction independently;
+ * once the reply is cleared the model rewrites the list, which it does routinely anyway.
  *
  * Thin-prompt boundary: this description teaches only the mechanical CONTRACT
  * (the three states, one in_progress at a time, the two text forms, complete-
@@ -25,14 +27,18 @@ const STATUSES: TodoStatus[] = ["pending", "in_progress", "completed"];
 
 export const todoWrite: Tool = {
   name: "todo_write",
+  /** Deferred, on Claude Code's pattern (its TodoWrite is deferred too): a task list is
+   *  a planning instrument reached for once on a substantial task, not a step in the edit
+   *  loop, so its schema does not belong in front of the model on every request. */
+  deferred: true,
   readOnly: false,
   description:
     "Create and update your task list for the current job. Pass the COMPLETE list " +
     "every time (it replaces the previous one). Use it for any task of roughly 3+ " +
     "steps to track progress and show the user where things stand; skip it for " +
-    "trivial one-step work. The current list is put back in front of you every turn, " +
-    "so you never need to call this just to see it, and you never need to restate it " +
-    "in your reply. Keep exactly one task 'in_progress' at a time, mark a " +
+    "trivial one-step work. This call returns the full updated list, and that reply stays " +
+    "in your context — so you never need to call it again just to see the list, and you " +
+    "never need to restate it in your reply. Keep exactly one task 'in_progress' at a time, mark a " +
     "task 'completed' the moment it's truly done (not before — not if tests fail or " +
     "work is partial), and drop tasks that no longer apply. When all tasks are " +
     "completed the list clears itself.",
@@ -88,8 +94,8 @@ export const todoWrite: Tool = {
     const output = [body, ...notes, "", "Keep the list updated as you work."].join("\n");
 
     // QUIET: the list never renders a row. It is the model's own scratch memory for
-    // staying on track across a long job, and the engine puts it back in front of the
-    // model every turn — so it works exactly as well unseen. On screen it was noise:
+    // staying on track across a long job, and this reply carries the whole list into the
+    // conversation — so it works exactly as well unseen. On screen it was noise:
     // a row that says a checklist was rewritten, printed again every time one item
     // moved, in between the rows that show actual work.
     //
@@ -142,11 +148,3 @@ function fail(message: string): ToolResult {
   return { output: `Error: ${message}`, isError: true, summary: message };
 }
 
-/**
- * The block injected into the system prompt each turn. Empty string when there's
- * no list, so it costs nothing until the model starts one.
- */
-export function todoListText(ctx: ToolContext): string {
-  if (!ctx.todos || ctx.todos.length === 0) return "";
-  return render(ctx.todos);
-}

@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
-import { todoWrite, todoListText } from "./todo.js";
+import { todoWrite } from "./todo.js";
 import { webFetch, normalizeUrl, ssrfReason } from "./webFetch.js";
 
 function ctx(): ToolContext {
@@ -26,10 +26,12 @@ test("todo_write stores the list and reflects it in the prompt block", async () 
   const r = await todoWrite.execute({ todos: TODOS }, c);
   assert.equal(r.isError, undefined);
   assert.equal(c.todos.length, 3);
-  const block = todoListText(c);
-  assert.match(block, /\[x\] Read the config/);
-  assert.match(block, /\[~\] Fixing the bug/); // in-progress shows active form
-  assert.match(block, /\[ \] Run the tests/);
+  // Asserted on the TOOL RESULT, because that is now the only place the model sees the
+  // list. It used to be re-rendered into the per-turn context on every step; it is not
+  // any more, so a helper that renders it separately would prove nothing.
+  assert.match(r.output, /\[x\] Read the config/);
+  assert.match(r.output, /\[~\] Fixing the bug/); // in-progress shows active form
+  assert.match(r.output, /\[ \] Run the tests/);
 });
 
 test("todo_write clears the list when everything is completed", async () => {
@@ -39,7 +41,6 @@ test("todo_write clears the list when everything is completed", async () => {
   const r = await todoWrite.execute({ todos: allDone }, c);
   assert.equal(c.todos.length, 0);
   assert.match(r.output, /All tasks completed/);
-  assert.equal(todoListText(c), "");
 });
 
 test("todo_write validates status and required fields", async () => {
@@ -118,22 +119,30 @@ test("web_fetch's stated distill threshold is the real constant", () => {
   assert.match(webFetch.description, /longer than 12,000 characters/i);
 });
 
-// ── todo_write: the list really is echoed back every turn ────────────────────
-// Without knowing this, the model calls todo_write just to see the list, or restates
-// it in prose. Both are pure waste, and both are avoidable by saying so once.
+// ── todo_write: the list lives in its own tool result ────────────────────────
+// It is NOT re-injected into the per-turn context any more. That injection re-sent the
+// whole list on every step, uncached, for a list the tool result already carries — and
+// a tool result sits in the append-only conversation, where the provider caches it.
+// So the description must not promise a per-turn echo that no longer happens.
 
-test("the live list is rendered into the per-turn context, as the description claims", () => {
-  const ctx = { cwd: process.cwd(), reads: new Map(), todos: [] } as unknown as ToolContext;
-  assert.equal(todoListText(ctx), "", "an empty list contributes nothing");
-
-  ctx.todos = [
-    { content: "Run the tests", activeForm: "Running the tests", status: "in_progress" },
-    { content: "Fix the bug", activeForm: "Fixing the bug", status: "pending" },
-  ];
-  const rendered = todoListText(ctx);
-  assert.match(rendered, /Running the tests/, "the active task shows its present-continuous form");
-  assert.match(rendered, /Fix the bug/);
-  assert.match(todoWrite.description, /put back in front of you every turn/i);
+test("the list is returned by the tool, and not promised as a per-turn echo", async () => {
+  const c = ctx();
+  const r = await todoWrite.execute(
+    {
+      todos: [
+        { content: "Run the tests", activeForm: "Running the tests", status: "in_progress" },
+        { content: "Fix the bug", activeForm: "Fixing the bug", status: "pending" },
+      ],
+    },
+    c,
+  );
+  assert.match(r.output, /Running the tests/, "the active task shows its present-continuous form");
+  assert.match(r.output, /Fix the bug/);
+  assert.doesNotMatch(
+    todoWrite.description,
+    /put back in front of you every turn/i,
+    "the description cannot claim an echo the engine no longer performs",
+  );
 });
 
 test("todo_write clears the list once everything is completed", async () => {

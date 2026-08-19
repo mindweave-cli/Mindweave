@@ -38,14 +38,20 @@ function rowsOf(block: Block): string[] {
   const stdin = new EventEmitter() as unknown as NodeJS.ReadStream;
   (stdin as unknown as { isTTY: boolean }).isTTY = false;
   (stdin as unknown as { setRawMode: () => void }).setRawMode = () => {};
+  (stdin as unknown as { ref: () => void }).ref = () => {};
+  (stdin as unknown as { unref: () => void }).unref = () => {};
 
   const instance = render(<BlockView block={block} columns={76} tightTop={false} />, {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin,
     patchConsole: false,
+    debug: true,
   });
+  // Read BEFORE unmount, not after — Ink 7 writes a final blank frame on unmount,
+  // which would otherwise be mistaken for the real last frame.
+  const last = stdout.frames[stdout.frames.length - 1] ?? "";
   instance.unmount();
-  return (stdout.frames[stdout.frames.length - 1] ?? "").replace(ANSI, "").split("\n");
+  return last.replace(ANSI, "").split("\n");
 }
 
 /** The notice a real DeepSeek 402 produces, end to end. */

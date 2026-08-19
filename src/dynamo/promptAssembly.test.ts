@@ -19,14 +19,14 @@ const gov = (over: Partial<{ rules: string; forbidden: string; forbiddenCommands
 });
 
 test("standing rules render at the volatile boundary, with binding framing", () => {
-  const ctx = volatileContext("- Use pnpm, never npm", "", "", "", false, "");
+  const ctx = volatileContext("- Use pnpm, never npm", false, "");
   assert.match(ctx, /<rules>/);
   assert.match(ctx, /Use pnpm, never npm/);
   assert.match(ctx, /BINDING/);
 });
 
 test("no rules → no rules block in the boundary", () => {
-  const ctx = volatileContext("", "", "", "", false, "");
+  const ctx = volatileContext("", false, "");
   assert.equal(ctx.includes("<rules>"), false);
 });
 
@@ -181,25 +181,25 @@ test("restating the picture so far is forbidden, not just restating a plan", () 
   assert.match(p, /give the assessment ONCE/);
 });
 
-test("the final reply rules are rendered at the BOUNDARY, not the cached prefix", () => {
+test("the final reply rules are complete, and live in the cached prompt", () => {
   // Observed: "read the roadmap and tell me what to do" answered with a bold section
   // label, a status recap nobody asked for, bullets, a numbered list with several
   // sentences of justification each, six further phases, a digression and two closing
-  // questions. Stating the rule in the system prefix did not survive to turn three.
-  const tail = volatileContext("", "", "", "", false, "");
-  assert.match(tail, /FOUR LINES OR FEWER/);
-  assert.match(tail, /After doing work, just stop/);
-  assert.match(tail, /Ask at most ONE question/);
-  assert.match(tail, /Long is not thorough/);
-  assert.match(tail, /Examples of the right length/, 'a number without examples is the version that lost');
-  assert.doesNotMatch(basePrompt("PowerShell"), /FOUR LINES OR FEWER/);
+  // questions. The RULES are what fixed that, and every clause below earned its place —
+  // a number without examples is the version that lost. Their POSITION has since moved
+  // into the cached prefix, because at the boundary they cost 645 tokens per step.
+  const prompt = basePrompt("PowerShell");
+  assert.match(prompt, /FOUR LINES OR FEWER/);
+  assert.match(prompt, /After doing work, just stop/);
+  assert.match(prompt, /Ask at most ONE question/);
+  assert.match(prompt, /Long is not thorough/);
+  assert.match(prompt, /Examples of the right length/, "a number without examples is the version that lost");
+  // And nothing re-sends them per request — that is the whole point of the move.
+  assert.doesNotMatch(volatileContext("", false, ""), /FOUR LINES OR FEWER/);
 });
 
 test("the reply rule forbids appending what was not asked for", () => {
   // The specific habit: answering the question, then volunteering a correction to an
   // earlier reply that changes nothing the user would do.
-  assert.match(
-    volatileContext("", "", "", "", false, ""),
-    /Do not append an adjacent topic you noticed/,
-  );
+  assert.match(basePrompt("PowerShell"), /Do not append an adjacent topic you noticed/);
 });

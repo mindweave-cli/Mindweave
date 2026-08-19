@@ -109,6 +109,13 @@ export async function saveSession(session: Session): Promise<boolean> {
       lastPrompt: clip(lastUserText(session.transcript)),
       entryCount: session.transcript.length,
       ...(extraRoots.length > 0 ? { extraRoots } : {}),
+      // Only once something has actually been spent, so a session that never ran a turn
+      // does not carry a row of zeroes claiming to be a measurement.
+      ...(session.spend && session.spend.turns > 0 ? { spend: session.spend } : {}),
+      // The per-call breakdown, which is what makes a surprising bill diagnosable: the
+      // totals above are identical whether a turn made one expensive call or six cheap
+      // ones, and that difference is the whole answer.
+      ...(session.callLog && session.callLog.length > 0 ? { callLog: session.callLog } : {}),
     };
     await fs.writeFile(metaPath(session.cwd, session.id), JSON.stringify(meta, null, 2), "utf8");
 

@@ -18,6 +18,9 @@ import { loadConfig } from "./cli/bootstrap.js";
 import { sweepTempInBackground } from "./tools/tempSweep.js";
 import { parseStartupArgs } from "./cli/startupArgs.js";
 import { enterAltScreen } from "./cli/altScreen.js";
+import { instrumentStdout, flush as flushPerf, perf, perfEnabled } from "./cli/perfLog.js";
+import { MAX_FPS } from "./cli/frameRate.js";
+import { framebufferStdout } from "./cli/framebuffer/writer.js";
 
 // --help / --version answer and exit, BEFORE anything reads config, sweeps a
 // directory, or starts the UI. They used to fall through to the interactive app,
@@ -40,5 +43,28 @@ loadConfig();
 // left behind, and detached so a slow or unreadable temp directory cannot delay the UI.
 sweepTempInBackground();
 
+// Times every frame the renderer writes to the real terminal. No-op unless
+// MINDWEAVE_PERF names a file — see cli/perfLog.ts for why this cannot be measured
+// from a test probe.
+instrumentStdout(process.stdout);
+process.on("exit", flushPerf);
+
 enterAltScreen();
-render(createElement(App));
+
+// Ink renders into a FRAMEBUFFER rather than straight to the terminal: each frame is
+// parsed into a cell grid, diffed against what is already on screen, and only the
+// cells that actually differ are written. Measured on a transcript-shaped screen,
+// that is ~13x fewer bytes per frame (2,345 -> 178). See `cli/framebuffer/`.
+//
+// `incrementalRendering` is deliberately NOT enabled alongside it, and this is load
+// bearing rather than a preference: that mode makes Ink emit only the LINES it thinks
+// changed, interleaved with its own cursor movements, instead of a complete frame.
+// The framebuffer's parser expects a whole frame — a partial one would be read as a
+// full screen and everything it omitted would be blanked. One diff or the other, and
+// ours is per-cell where Ink's is per-line.
+// The frame-rate cap is what sets typing latency — see `cli/frameRate.ts` for the
+// measurements and for why it is a timer rather than a cost.
+render(createElement(App), {
+  maxFps: MAX_FPS,
+  stdout: framebufferStdout(process.stdout, perfEnabled() ? (s) => perf(`frame in=${s.inBytes} out=${s.outBytes}`) : undefined) as unknown as NodeJS.WriteStream,
+});

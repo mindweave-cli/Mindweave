@@ -93,19 +93,25 @@ export function findTool(name: string): Tool | undefined {
  * reaching for one.
  */
 export function toolSchemas(
-  opts: { planMode?: boolean; readOnlyOnly?: boolean; activated?: ReadonlySet<string>; ctx?: ToolContext } = {},
+  opts: { planMode?: boolean; readOnlyOnly?: boolean; ctx?: ToolContext } = {},
 ): ToolSchema[] {
   const readOnly = opts.planMode || opts.readOnlyOnly;
   // `planOnly` runs the filter the other way: those tools exist BECAUSE planning is
   // happening, so they appear only in plan mode and are hidden the rest of the time.
   // A read-only sub-agent is not planning, so it does not get them either.
   //
-  // `deferred` is the third filter: occasional tools are held back until the model
-  // searches for one, then stay advertised for the rest of the session. See
-  // deferredNative.ts for what is held back and why.
+  // `deferred` is the third filter, and it has no escape hatch on purpose. Searching for
+  // a deferred tool used to add it to the advertised list for the rest of the session,
+  // which changed the `tools` bytes mid-session and invalidated the provider's whole
+  // cached prefix — tools, system AND messages — to save a few hundred tokens of schema.
+  // One search cost several times what the deferral saved. Discovery is append-only now:
+  // find_tools returns the full schema in its RESULT, which lands in the conversation and
+  // is cached from the next call onward, while this list never moves. Which is why this
+  // function takes no argument that could put a deferred tool back: the advertised bytes
+  // are a pure function of the session, not of what has happened in it.
   const tools = (readOnly ? TOOLS.filter((tool) => tool.readOnly) : TOOLS)
     .filter((tool) => (tool.planOnly ? opts.planMode === true : true))
-    .filter((tool) => !tool.deferred || opts.activated?.has(tool.name))
+    .filter((tool) => !tool.deferred)
     // `relevantWhen` needs the live session; with no ctx (a schema-shape test, a
     // count) the tool is shown, because hiding it would be a false negative about
     // what the registry contains.

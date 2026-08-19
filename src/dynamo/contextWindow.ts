@@ -142,3 +142,117 @@ export function autoCompactThreshold(model: string): number {
 export function microCompactThreshold(model: string): number {
   return microBarFor(sharpContextWindow(model), summaryReserveFor(model));
 }
+
+/**
+ * How long a provider's prompt cache is assumed to survive between requests.
+ *
+ * 60 minutes, and the size matters more than it looks. This was 5 minutes — Anthropic's
+ * default ephemeral TTL — on the reasoning that anything past it is certainly gone. That
+ * is wrong in the DANGEROUS direction: the number decides when we clear tool bodies, and
+ * clearing rewrites the cached prefix. Guess too SHORT and we destroy an entry that was
+ * still alive, forcing a full-price rewrite that would never have happened. Guess too
+ * long and we merely miss a saving.
+ *
+ * Five minutes is only Anthropic's default tier. Its 1h tier exists, DeepSeek's context
+ * cache persists for hours, and several providers publish nothing at all — so a 5-minute
+ * assumption would have been actively wrong on most of the lineup.
+ *
+ * 60 minutes is the smallest value that is safe everywhere: past an hour no provider in
+ * the lineup is documented to still be holding the prefix, so clearing can only be
+ * reclaiming something already lost. Being wrong is then free rather than expensive.
+ */
+export const CACHE_TTL_MS = (() => {
+  const raw = Number(process.env.MINDWEAVE_CACHE_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60 * 60 * 1000;
+})();
+
+/**
+ * Below this share of the micro bar, a cold cache is not worth compacting for. A
+ * session holding almost nothing has almost nothing to save, and clearing tool bodies
+ * early costs real detail.
+ */
+const COLD_COMPACT_FLOOR = 0.5;
+
+/**
+ * Whether to microcompact because the provider's cache has gone cold, rather than
+ * because context is filling up.
+ *
+ * The normal gate exists for a specific reason: clearing an old tool body REWRITES the
+ * transcript, and the transcript is the cached half of the request, so on a warm cache
+ * it trades a cheap cached read for a full prefix rewrite at 1.25x. That is a loss, and
+ * it is why microcompaction waits for real pressure.
+ *
+ * None of that argument survives the cache expiring. Once the gap since the last call
+ * exceeds the TTL there is no entry left to invalidate — the next request pays to write
+ * the whole prefix no matter what it contains. Clearing stale tool bodies first is then
+ * strictly free, and the tokens never have to be paid for again.
+ *
+ * `lastCallAt` of 0 means no call has been made yet (a fresh session), which is not a
+ * cold cache — it is no cache, with nothing yet worth clearing.
+ */
+export function cacheLikelyCold(
+  lastCallAt: number,
+  now: number,
+  used: number,
+  microBar: number,
+  ttlMs: number = CACHE_TTL_MS,
+): boolean {
+  if (lastCallAt <= 0) return false;
+  if (now - lastCallAt <= ttlMs) return false;
+  return used >= microBar * COLD_COMPACT_FLOOR;
+}
+
+/**
+ * Fraction of the prefix a clear must reclaim to pay for the cache rewrite it causes.
+ *
+ * Clearing an old tool body is not free on a warm cache: it changes the cached prefix,
+ * so the next request rewrites what remains at 1.25x instead of reading it at 0.1x.
+ * Writing out the break-even, with P the prefix and R what the clear reclaims:
+ *
+ *     keep for N steps   = N * 0.1P
+ *     clear, then N-1    = 1.25(P-R) + (N-1) * 0.1(P-R)
+ *     break-even at       N = 11.5 * (P - R) / R
+ *
+ * which is brutal at small R: reclaiming 10% of a 40K prefix needs ~103 further steps
+ * to pay off, 50% needs ~12, and 75% needs ~4. A turn does not have 103 steps. So a
+ * clear that frees a little is not a small win, it is a real loss, and the only clears
+ * worth making on a warm cache are the big ones.
+ *
+ * 0.35 sits where the break-even (~21 steps) is still optimistic but no longer absurd,
+ * and it is deliberately a FRACTION rather than a token count: the thing being paid for
+ * is proportional to the prefix, so the threshold has to be too.
+ */
+const CLEAR_WORTH_FRACTION = 0.35;
+
+/**
+ * Whether a proposed microcompaction should actually be committed.
+ *
+ * Three ways to say yes, and they are different kinds of reason:
+ *
+ *  - `cold`: the provider's cache has expired, so there is no entry to invalidate and
+ *    the rewrite is free. Any reclaim at all is profit.
+ *  - `urgent`: context is close enough to the autocompact bar that FITTING matters more
+ *    than cost. A request that does not fit cannot be sent at any price.
+ *  - otherwise: only when the clear reclaims enough of the prefix to out-earn the cache
+ *    write it forces, per the arithmetic above.
+ *
+ * Pure, because the alternative is discovering the economics were wrong from a bill.
+ */
+export function clearIsWorthIt(opts: {
+  /** Tokens the request carries now. */
+  before: number;
+  /** Tokens it would carry after the proposed clear. */
+  after: number;
+  /** Whether the provider's cache has already expired. */
+  cold: boolean;
+  /** The autocompact bar — past it, a summarization pass happens anyway. */
+  autoBar: number;
+}): boolean {
+  const reclaimed = opts.before - opts.after;
+  if (reclaimed <= 0) return false;
+  if (opts.cold) return true;
+  // Close to the bar, fitting beats saving: clearing here is what defers a far more
+  // expensive summarization, and a prompt that overflows is not a cost question.
+  if (opts.before >= opts.autoBar * 0.9) return true;
+  return reclaimed >= opts.before * CLEAR_WORTH_FRACTION;
+}

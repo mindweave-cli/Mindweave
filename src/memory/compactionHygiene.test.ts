@@ -175,6 +175,33 @@ test("a file the working set carries WHOLE is cleared even inside the protected 
   assert.match(tool.content, /cleared|superseded|removed/i, "and leave a navigable stub");
 });
 
+test("a batched read is cleared only when EVERY file it carries is superseded", () => {
+  // One read_file call can carry several files, so one tool entry can be the transcript's
+  // only copy of four of them. Clearing it because one was superseded would drop the
+  // other three out from under the model — and it would not even know, because the entry
+  // it can still see says "cleared", not "three files you were relying on are gone".
+  const entries: Entry[] = [
+    { role: "user", content: "look at them" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "read_file", arguments: '{"paths":["a.ts","b.ts","c.ts"]}' }],
+    },
+    {
+      role: "tool",
+      toolCallId: "c1",
+      content: "contents of a, b and c",
+      fullContentOf: ["/p/a.ts", "/p/b.ts", "/p/c.ts"],
+    },
+  ];
+
+  const partial = microcompact(structuredClone(entries), 5, new Set(["/p/a.ts"]));
+  assert.equal(partial.cleared, 0, "clearing on one of three would lose the other two");
+
+  const all = microcompact(structuredClone(entries), 5, new Set(["/p/a.ts", "/p/b.ts", "/p/c.ts"]));
+  assert.equal(all.cleared, 1, "once every file is superseded the copy is genuinely redundant");
+});
+
 test("a file the working set does NOT carry whole is left alone", () => {
   // Localized files (shown as outline + focus, not whole) are NOT superseded: clearing
   // the transcript copy would lose the parts the boundary is not showing.

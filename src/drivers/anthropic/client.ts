@@ -26,6 +26,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { basename } from "node:path";
 import { clientId } from "../clientId.js";
 import { extractSearch, SEARCH_MAX_USES, SEARCH_SYSTEM } from "../searchBlocks.js";
+import { cacheBreakpoints, needsLadder } from "./cachePoints.js";
 import type {
   ModelRequest,
   SearchOptions,
@@ -158,16 +159,36 @@ export function renderMessages(req: ModelRequest): {
   return { messages, extraSystem };
 }
 
-/** Attach a cache breakpoint to the last content block of the last message, so the
- *  conversation so far is served from cache on the next turn. No-op when the last
- *  message has no block array to mark. */
-function markStablePrefix(messages: Anthropic.MessageParam[]): void {
-  const last = messages[messages.length - 1];
-  if (!last || typeof last.content === "string") return;
-  const block = last.content[last.content.length - 1];
+/** Mark one message's last content block as a cache breakpoint. */
+function markAt(messages: Anthropic.MessageParam[], idx: number): void {
+  const msg = messages[idx];
+  if (!msg || typeof msg.content === "string") return;
+  const block = msg.content[msg.content.length - 1];
   if (block && typeof block === "object") {
     (block as { cache_control?: unknown }).cache_control = { type: "ephemeral" };
   }
+}
+
+/**
+ * Attach cache breakpoints so the conversation so far is served from cache next turn.
+ *
+ * A LADDER, not a single mark, and that is a bug fix rather than a refinement. A
+ * breakpoint searches backward only 20 content blocks for a prior entry; an agentic
+ * round with a few parallel tool calls adds `tool_use` + `tool_result` blocks fast
+ * enough to push the previous entry out of that window, after which every request
+ * silently re-pays for the whole conversation. See `cachePoints.ts`.
+ *
+ * Short conversations still get exactly one mark: below the spacing there is nowhere
+ * else useful to put one, and the budget is better left unspent than spent inside a
+ * window a single breakpoint already covers.
+ */
+function markStablePrefix(messages: Anthropic.MessageParam[]): void {
+  const blockCounts = messages.map((m) => (typeof m.content === "string" ? 1 : m.content.length));
+  if (!needsLadder(blockCounts)) {
+    markAt(messages, messages.length - 1);
+    return;
+  }
+  for (const idx of cacheBreakpoints(blockCounts)) markAt(messages, idx);
 }
 
 /** Translate the tool schemas from their stored OpenAI shape. */
@@ -303,8 +324,14 @@ export function toUsage(usage: Anthropic.Usage | undefined): Usage | undefined {
     completionTokens,
     totalTokens: promptTokens + completionTokens,
     cacheHitTokens: cacheHit,
-    // Cache WRITES are billed as fresh input, so they belong on the miss side.
+    // Cache writes are fresh input, so they belong on the miss side — but they are not
+    // priced like it. Anthropic bills a write at 1.25x base input (the tokens are
+    // processed AND stored), and reporting the total alone under-stated every turn of
+    // an agentic loop, which writes a new prefix segment constantly. The slice is
+    // carried alongside so pricing can charge it at the right rate; the total stays
+    // inclusive so nothing that only reads `cacheMissTokens` becomes wrong.
     cacheMissTokens: fresh + cacheWrite,
+    cacheWriteTokens: cacheWrite,
   };
 }
 

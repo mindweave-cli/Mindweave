@@ -22,6 +22,12 @@ export interface ToolCallRecord {
   id: string;
   name: string;
   arguments: string; // raw JSON string, as the model emitted it
+  /**
+   * Opaque provider data for this call, stored so it survives a resume and can be
+   * echoed back verbatim. Core never reads it. See `drivers/types.ts` ToolCall.meta —
+   * Gemini 3 rejects a follow-up request whose tool call lost its `thought_signature`.
+   */
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -63,13 +69,30 @@ export type Entry =
       summary?: string;
       detail?: string;
       isError?: boolean;
-      /** Absolute path whose WHOLE content this result carries (see ToolResult). While
-       *  this entry is unstubbed the model can see that file; `memory/presence.ts` reads
-       *  it. Absent on results that aren't whole-file reads, and on sessions written
-       *  before it existed — presence falls back to the call's arguments there. */
-      fullContentOf?: string;
+      /** Absolute paths whose WHOLE content this result carries (see ToolResult). While
+       *  this entry is unstubbed the model can see those files; `memory/presence.ts`
+       *  reads it. Absent on results that aren't whole-file reads, and on sessions
+       *  written before it existed — presence falls back to the call's arguments there.
+       *
+       *  A LIST because one read_file call can carry several files. Sessions written
+       *  before that hold a bare string, so anything reading this must go through
+       *  `fullPathsOf` rather than assuming an array. */
+      fullContentOf?: string[] | string;
     }
   | { role: "summary"; content: string };
+
+/**
+ * The whole-file paths a tool entry carries, as a list.
+ *
+ * Exists because the field was a single path before read_file could read several files
+ * at once, and sessions on disk still hold that shape. Resuming one and silently getting
+ * no presence for its reads would make the model re-read files it already has — the
+ * exact waste the recording was added to prevent.
+ */
+export function fullPathsOf(entry: Entry): string[] {
+  if (entry.role !== "tool" || !entry.fullContentOf) return [];
+  return typeof entry.fullContentOf === "string" ? [entry.fullContentOf] : entry.fullContentOf;
+}
 
 /** Lightweight session descriptor for the resume picker (no transcript body). */
 export interface SessionMeta {
@@ -83,6 +106,74 @@ export interface SessionMeta {
   /** Extra roots added via `/include` (absolute paths, excluding the primary cwd).
    *  Restored on resume so a multi-root workspace survives across sessions. */
   extraRoots?: string[];
+  /**
+   * What this session has cost so far, accumulated across every turn.
+   *
+   * Persisted because it was previously computed per turn, rendered once, and thrown
+   * away — so "how much did that session spend?" had no answer anywhere on the machine,
+   * and no before/after comparison was possible after changing anything about caching.
+   *
+   * Cache-aware by construction: `billed` counts each token once (misses + output),
+   * never the inflated per-call totals that re-count a cached prefix on every tool
+   * round. `estimated` is true when NO call in the session reported a cache split, in
+   * which case these are inferred and must be shown as approximate.
+   */
+  spend?: SessionSpend;
+  /** Per-call token usage for this session, most recent last. See `CallUsage`. */
+  callLog?: CallUsage[];
+}
+
+/**
+ * One model call's token usage, as the provider reported it.
+ *
+ * Kept per CALL, not just per turn, because the totals cannot answer the question people
+ * actually ask about a bill. A turn that billed 36K is six calls carrying an 11K prompt
+ * or one call carrying 36K; a session that cached 40% of its input did so evenly on every
+ * call or entirely on three of seven. Those have different causes and different fixes,
+ * and every one of them produces the same turn total.
+ */
+export interface CallUsage {
+  /** When the call's usage was recorded, epoch ms. */
+  at: number;
+  /** The whole prompt the provider counted, cached part included. */
+  prompt: number;
+  /** How much of it was served from the provider's cache. */
+  hit: number;
+  /** How much was fresh, and therefore paid for at full rate. */
+  miss: number;
+  /** Generated tokens. */
+  out: number;
+  /**
+   * Which model answered.
+   *
+   * Recorded because a question that should have been trivial — "did batching stop
+   * because we changed something, or because the model changed?" — could not be
+   * answered at all. Sessions store the transcript and the cost but never said what
+   * produced them, and the project's saved model is only ever the CURRENT one, so the
+   * history rewrites itself every time someone runs `/model`.
+   */
+  model: string;
+}
+
+/** Accumulated, cache-aware usage for one session. All token counts are sums; `costUsd`
+ *  is priced from the model's own rate table at the time each turn ran. */
+export interface SessionSpend {
+  /** Tokens counted exactly once: fresh input plus output. Never the per-call totals. */
+  billed: number;
+  /** Input served from the provider's prompt cache. */
+  cacheHit: number;
+  /** Fresh input, inclusive of anything written to the cache. */
+  cacheMiss: number;
+  /** The written slice of `cacheMiss`, billed at the higher write rate where one exists. */
+  cacheWrite: number;
+  /** Generated tokens. */
+  output: number;
+  /** Estimated USD, cache-aware. An estimate by nature — list prices, not an invoice. */
+  costUsd: number;
+  /** Model turns counted into the figures above. */
+  turns: number;
+  /** True when no call ever reported a cache split, so the split is inferred. */
+  estimated: boolean;
 }
 
 /**
@@ -186,4 +277,28 @@ export interface Session {
   sessionMemoryTokens?: number;
   /** Whether session memory has been initialized (past the warm-up bar) yet. */
   sessionMemoryInit?: boolean;
+  /**
+   * When the last model call went out, as epoch ms. In-memory only — deliberately not
+   * persisted, because a resumed session's cache is cold regardless of what the file
+   * says, and a stale timestamp read back from disk would claim otherwise.
+   *
+   * Used to tell a warm provider cache from an expired one: past the TTL there is no
+   * entry left to invalidate, so microcompaction becomes free. See `cacheLikelyCold`.
+   * 0 / undefined means no call has been made yet.
+   */
+  lastCallAt?: number;
+  /** Running cost for this session, accumulated per turn and persisted with the meta.
+   *  See `dynamo/spend.ts`; undefined until the first turn completes. */
+  spend?: SessionSpend;
+  /**
+   * Fingerprint of the cacheable prefix as it was last SENT, so the next call can tell
+   * whether it still matches. See `dynamo/cacheBreak.ts`.
+   *
+   * In-memory only, and deliberately not persisted: a resumed session's provider-side
+   * cache is gone regardless of what a file says, so restoring a print from disk would
+   * claim a match that cannot exist and suppress the one report worth making.
+   */
+  prefixPrint?: import("../dynamo/cacheBreak.js").PrefixPrint;
+  /** Per-call token usage, most recent last. See `CallUsage`. */
+  callLog?: CallUsage[];
 }

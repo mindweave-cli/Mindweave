@@ -335,6 +335,13 @@ export class CodeChassis implements Chassis {
     return this.lsp.diagnostics(absPath);
   }
 
+  async dependents(absPath: string): Promise<readonly string[]> {
+    // A FileId IS the absolute path, so this is a lookup rather than a conversion —
+    // but it goes through asFileId anyway so the branded type is honored in one place
+    // and a future change to that encoding cannot silently break the ripple check.
+    return this.graph.dependents(asFileId(absPath)) as readonly string[];
+  }
+
   status(): ChassisStatus {
     const c = this.graph.counts();
     return {
@@ -473,6 +480,9 @@ export const NULL_CHASSIS: Chassis = {
     return null;
   },
   async diagnostics() {
+    return [];
+  },
+  async dependents() {
     return [];
   },
   status() {

@@ -70,13 +70,19 @@ test("when nothing is deferred it tells the model not to bother", async () => {
   }
 });
 
-test("a match is loaded and reported by its callable name", async () => {
+test("a match is handed over callable, without touching the advertised list", async () => {
   const mgr = await poolOf(40);
   try {
+    const before = JSON.stringify(mgr.snapshot().exposedSchemas());
     const r = await findTools.execute({ query: "create issue" }, ctxWith(mgr));
     assert.equal(r.isError, undefined);
     assert.match(r.output, /mcp__big__create_issue/, "the name the model must call");
-    assert.ok(mgr.snapshot().exposedSchemas().some((s) => s.function.name === "mcp__big__create_issue"));
+    assert.match(r.output, /<function>/, "the schema has to come with it, or the name is unusable");
+
+    // And the expensive half must NOT have happened. Advertising the match changes the
+    // bytes the provider hashes, so the next request re-bills the entire cached prefix.
+    assert.equal(JSON.stringify(mgr.snapshot().exposedSchemas()), before, "the search moved the tool list");
+    assert.ok(mgr.snapshot().asTool("mcp__big__create_issue"), "and it must still be callable");
   } finally {
     await mgr.dispose();
   }

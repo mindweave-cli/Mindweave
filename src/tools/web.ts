@@ -22,6 +22,10 @@ import { DISTILL_OVER_CHARS } from "./webFetch.js";
 
 export const web: Tool = {
   name: "web",
+  /** Deferred: many coding sessions never touch the network at all. Cache-safe now that
+   *  discovery is append-only — find_tools returns the schema in its result and the
+   *  advertised list never moves. */
+  deferred: true,
   readOnly: true,
   description:
     "Reach the internet. Pass `query` to SEARCH, or `url` to READ a specific page.\n" +

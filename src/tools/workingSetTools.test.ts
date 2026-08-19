@@ -30,29 +30,30 @@ test("recordWrite marks the file full:false with recency + focus", async () => {
   assert.deepEqual(rec.focus, [{ start: 2, end: 2 }]);
 });
 
-test("read_file short-circuits when the file is already in the working set", async () => {
+test("a working-set flag can no longer suppress a read", async () => {
+  // The <working_files> block is gone, so `workingSetFull` has no producer. If a stale
+  // one is ever set — by an old session, a test, a future caller — it must NOT stop the
+  // content coming back: refusing a read on the strength of a block nothing renders is
+  // the exact "context that lies" failure removing the block exists to end.
   const ctx = freshCtx();
   const p = join(ctx.cwd, "a.ts");
   await fs.writeFile(p, "const value = 42;\n");
   await readFile.execute({ path: "a.ts" }, ctx); // populate the ledger
 
-  // Engine marks this file as held full in <working_files> for the turn.
   ctx.workingSetFull = new Set([resolvePath(ctx, "a.ts")]);
   const r = await readFile.execute({ path: "a.ts" }, ctx);
-  assert.match(r.output, /<working_files>/);
-  assert.doesNotMatch(r.output, /const value = 42/); // content NOT re-sent
+  assert.doesNotMatch(r.output, /<working_files>/, "nothing may point at a block that is not sent");
 });
 
-test("read_file still returns content for a file NOT in the working set", async () => {
+test("an unchanged file already in the transcript is not re-sent", async () => {
+  // The ONLY dedup left, and the honest one: the content really is still in the
+  // conversation, where the provider has cached it.
   const ctx = freshCtx();
   const p = join(ctx.cwd, "b.ts");
   await fs.writeFile(p, "const other = 7;\n");
   await readFile.execute({ path: "b.ts" }, ctx);
-  ctx.workingSetFull = new Set(); // nothing held
-  ctx.transcriptFull = new Set([p]); // but the original read is still in the transcript
+  ctx.transcriptFull = new Set([p]);
   const r = await readFile.execute({ path: "b.ts" }, ctx);
-  // Unchanged + full prior read + still in context → normal dedup note (not the
-  // working-set note). Drop the line above and the content comes back instead.
   assert.match(r.output, /unchanged/);
 });
 
@@ -70,21 +71,16 @@ test("read_file's description matches the replies the tool actually sends", asyn
   await fs.writeFile(p, "const value = 42;\n");
   await readFile.execute({ path: "a.ts" }, ctx);
 
-  // Claim 1: one reply points at the <working_files> block.
-  ctx.workingSetFull = new Set([resolvePath(ctx, "a.ts")]);
-  const held = await readFile.execute({ path: "a.ts" }, ctx);
-  assert.match(desc, /<working_files>/, "the description promises this reply");
-  assert.match(held.output, /<working_files>/, "…and the tool must actually send it");
+  // The description must NOT promise a <working_files> block any more — it is not sent,
+  // and a model told to "read it from there" would be looking for something absent.
+  assert.doesNotMatch(desc, /<working_files>/, "the block is gone; the description cannot promise it");
 
-  // Claim 2: the other says the earlier read is still current.
-  ctx.workingSetFull = new Set();
+  // The one claim that remains: an unchanged file is not re-sent.
   ctx.transcriptFull = new Set([p]);
   const unchanged = await readFile.execute({ path: "a.ts" }, ctx);
   assert.match(desc, /unchanged since your earlier read/i);
   assert.match(unchanged.output, /unchanged since you last read it/i);
-
-  // Neither may be an error: the description calls them successful reads.
-  assert.ok(!held.isError && !unchanged.isError, "a short-circuit is a success, not a failure");
+  assert.ok(!unchanged.isError, "a short-circuit is a success, not a failure");
 });
 
 test("read_file's description states the caps the code actually enforces", () => {

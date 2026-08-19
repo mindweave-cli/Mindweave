@@ -86,10 +86,20 @@ test("scoring prefers a whole-word name hit over a substring or description hit"
   assert.equal(scoreTool(def("x", "unrelated", ""), terms), 0);
 });
 
-test("rendered results give the model a callable name and a reason", () => {
+test("rendered results hand over the whole callable definition", () => {
+  // The WHOLE thing — full description and parameter schema — not a summary line. A
+  // summary only announces that a tool exists; the tool then had to be added to the
+  // advertised list before it could be called, and that rewrote the provider's cached
+  // prefix (tools, system AND messages) at full price. Delivered here it rides in an
+  // appended message the cache does not care about, and dispatch resolves against the
+  // catalog, so a name plus a schema is all the model needs.
   const text = renderResults([def("github", "create_issue", "Open a new issue\nTakes a title and body")]);
-  assert.match(text, /mcp__github__create_issue/, "the name it must call");
-  assert.match(text, /Open a new issue/);
-  // The rest of the description arrives with the schema once the tool is loaded.
-  assert.doesNotMatch(text, /Takes a title/);
+  const parsed = JSON.parse(text.replace(/^<function>/, "").replace(/<\/function>$/, "")) as {
+    name: string;
+    description: string;
+    parameters: unknown;
+  };
+  assert.equal(parsed.name, "mcp__github__create_issue", "the name it must call");
+  assert.match(parsed.description, /Takes a title/, "a truncated description cannot be called from");
+  assert.ok(parsed.parameters, "without parameters the model cannot construct the call");
 });

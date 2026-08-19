@@ -24,6 +24,10 @@ const MAX_SYMBOL_LINES = 400;
 
 export const readSymbolTool: Tool = {
   name: "read_symbol",
+  /** Deferred with the rest of the code-map family — Claude Code keeps the equivalent
+   *  (LSPTool) behind its tool search for the same reason. `read_file` with a line range
+   *  covers the common case without a search. */
+  deferred: true,
   readOnly: true,
   // The description told the model to pass `path` for an ambiguous name without saying
   // what happens if it does not: the tool LISTS the candidates rather than guessing, so

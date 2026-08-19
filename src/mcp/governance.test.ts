@@ -79,7 +79,7 @@ test("a forbidden tool disappears from EVERY path", async () => {
     assert.ok(!turn.exposedSchemas().some((s) => s.function.name === "mcp__srv__wipe"), "not in the turn's list");
     assert.equal(turn.asTool("mcp__srv__wipe"), undefined, "not dispatchable via the snapshot");
     assert.equal(mgr.asTool("mcp__srv__wipe"), undefined, "not dispatchable live");
-    assert.deepEqual(mgr.searchAndActivate("wipe"), [], "not findable by search");
+    assert.deepEqual(mgr.searchCatalogTools("wipe"), [], "not findable by search");
     // The rest of the server keeps working — the point of banning a tool, not a server.
     assert.ok(mgr.asTool("mcp__srv__read"));
   } finally {

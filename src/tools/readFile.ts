@@ -11,7 +11,7 @@
  * judgment, not the tool's job.
  */
 import { promises as fs } from "node:fs";
-import type { Tool, ToolResult } from "./types.js";
+import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { requestAgentDataAccess } from "./approval.js";
 import { relativize, resolvePath, nextTouch, touch } from "./paths.js";
@@ -29,17 +29,20 @@ const MAX_BYTES = 256 * 1024;
 const MAX_LINES = envInt("MINDWEAVE_READ_MAX_LINES", 2000);
 const MAX_OUTPUT_CHARS = 120_000;
 
+/**
+ * Most files one call may read.
+ *
+ * The point of the list is to collapse round trips, not to let a single call pull an
+ * unbounded amount of the repository into context. Ten covers every batch a real task
+ * asks for; past that the model should be searching, not reading.
+ */
+const MAX_FILES = 10;
+
 // Returned instead of re-sending identical content when a file is unchanged
 // since the model last read it — pure token savings on a re-read.
 const FILE_UNCHANGED =
   "This file is unchanged since you last read it in this conversation — the " +
   "earlier read is still current, use that instead of re-reading.";
-
-// Returned when a file is already in the live working set (its current content is in
-// the <working_files> block) — the model should read it from there, not re-fetch it.
-const WORKING_SET_HELD =
-  "This file's current content is already shown in the <working_files> block above, " +
-  "kept up to date automatically — use that instead of re-reading.";
 
 export const readFile: Tool = {
   name: "read_file",
@@ -49,192 +52,247 @@ export const readFile: Tool = {
   // from here. Every claim below is checked against the behaviour in `execute`; if that
   // changes, this changes with it.
   description:
-    `Read a text file and return its contents with line numbers. Reads up to ` +
-    `${MAX_LINES} lines from the start by default; pass \`offset\` (and optionally ` +
-    `\`limit\`) to read a specific range of a longer file. A file larger than ` +
+    `Read text files and return their contents with line numbers. ` +
+    `\`paths\` TAKES A LIST: pass every file you want in ONE call rather than calling ` +
+    `this once per file. Each extra call is a full model round-trip that re-sends the ` +
+    `whole conversation, so four separate reads cost several times what one read of ` +
+    `four files costs, and take four times as long. Up to ${MAX_FILES} at a time. ` +
+    `Reads up to ${MAX_LINES} lines per file from the start by default; pass \`offset\` ` +
+    `(and optionally \`limit\`) to read a specific range — a range applies to a SINGLE ` +
+    `file, so ask for one path when you use them. A file larger than ` +
     `${Math.round(MAX_BYTES / 1024)} KB must be read with \`limit\` set rather than whole. ` +
     `Very long output is truncated at the end, and says so. ` +
+    `One unreadable path does not fail the others: it is reported in place and the rest ` +
+    `still come back. ` +
     `Reading is also what unlocks editing: edit, replace_symbol_body ` +
     `and overwriting an existing file with write_file all require that file to have ` +
     `been read this session (read_symbol counts too). ` +
-    `TWO REPLIES MEAN YOU ALREADY HAVE THE FILE and should not read it again: one says ` +
-    `its content is in the <working_files> block, which is kept up to date for you; the ` +
-    `other says it is unchanged since your earlier read in this conversation. Both are ` +
-    `successful reads, and both satisfy the edit requirement above. ` +
+    `ONE REPLY MEANS YOU ALREADY HAVE THE FILE and should not read it again: it says the ` +
+    `file is unchanged since your earlier read in this conversation, so that earlier read ` +
+    `is still current. It is a successful read, and it satisfies the edit requirement above. ` +
     `When you only want one function, class or type, prefer read_symbol, which returns ` +
     `just that symbol instead of pulling in a large file to look at a small part of it.`,
   parameters: {
     type: "object",
     additionalProperties: false,
-    required: ["path"],
+    required: ["paths"],
     properties: {
-      path: {
-        type: "string",
+      paths: {
+        type: "array",
+        minItems: 1,
+        maxItems: MAX_FILES,
+        items: { type: "string" },
         description:
-          "Path to the file, absolute or relative to the working directory.",
+          "The files to read, absolute or relative to the working directory. Pass every " +
+          "file you need at once — one call with four paths costs a quarter of what four " +
+          "calls cost.",
       },
       offset: {
         type: "integer",
         minimum: 1,
-        description: "1-based line number to start at. Only for large files.",
+        description: "1-based line number to start at. Single file only.",
       },
       limit: {
         type: "integer",
         minimum: 1,
-        description:
-          "Number of lines to read from `offset`. Only for large files.",
+        description: "Number of lines to read from `offset`. Single file only.",
       },
     },
   },
 
   async execute(args, ctx): Promise<ToolResult> {
-    const rawPath = typeof args.path === "string" ? args.path.trim() : "";
-    if (!rawPath) return fail("`path` is required.");
-
-    const filePath = resolvePath(ctx, rawPath);
-    const blocked = protectedPathReason(filePath);
-    if (blocked) {
-      return fail(`Refusing to read ${rawPath}: it is ${blocked}.`);
-    }
-    // Another tool's data: ask the user rather than helping ourselves to it.
-    const otherTool = foreignAgentReason(filePath);
-    if (otherTool) {
-      const denied = await requestAgentDataAccess(ctx, otherTool, `Reading ${rawPath}`);
-      if (denied) return denied;
+    const paths = toPathList(args);
+    if (paths.length === 0) return fail("`paths` is required — pass at least one file.");
+    if (paths.length > MAX_FILES) {
+      return fail(`Too many files (${paths.length}). Read at most ${MAX_FILES} in one call.`);
     }
     const offset = toPositiveInt(args.offset);
     const limit = toPositiveInt(args.limit);
-
-    let stat;
-    try {
-      stat = await fs.stat(filePath);
-    } catch {
-      return fail(`File not found: ${rawPath}`);
-    }
-    if (stat.isDirectory()) {
-      return fail(`${rawPath} is a directory, not a file.`);
+    // A range names lines in ONE file. Applying it across a list would silently return a
+    // different slice of each, which reads as an answer and is not one.
+    if ((offset !== undefined || limit !== undefined) && paths.length > 1) {
+      return fail("`offset`/`limit` read a range of ONE file. Pass a single path with them.");
     }
 
-    const full = offset === undefined && limit === undefined;
-    const prior = ctx.reads.get(filePath);
-    const unchanged = prior !== undefined && prior.mtimeMs === stat.mtimeMs && prior.size === stat.size;
-
-    // Working-set short-circuit: this file's CURRENT full content is already in the
-    // <working_files> block, kept fresh — don't re-send it. Covers ranged reads too
-    // (the whole file is there). Bumps recency so it stays in the working set.
-    if (unchanged && ctx.workingSetFull?.has(filePath)) {
-      touch(ctx, filePath);
-      return { output: WORKING_SET_HELD, summary: `read ${relativize(ctx, filePath)} (in working set)` };
+    const parts: string[] = [];
+    const summaries: string[] = [];
+    const fullPaths: string[] = [];
+    let failures = 0;
+    for (const rawPath of paths) {
+      const one = await readOne(rawPath, ctx, offset, limit);
+      // A bad path is reported IN PLACE rather than failing the call. Losing three good
+      // reads because the fourth was misspelled would cost another whole round trip to
+      // recover, which is the exact cost this tool exists to avoid.
+      if (one.error) failures++;
+      parts.push(paths.length > 1 ? `===== ${one.label} =====\n${one.body}` : one.body);
+      summaries.push(one.summary);
+      if (one.fullPath) fullPaths.push(one.fullPath);
     }
 
-    // Read-dedup: if the model already read this whole file, it hasn't changed since
-    // (same mtime + size), and that earlier read is STILL IN the transcript, don't
-    // re-send the content. The presence half is derived per turn rather than read off
-    // the ledger: microcompaction can clear the earlier result's body at any time, and
-    // a stored "you have it" bit would then be a lie the model obeys. No presence set
-    // (a subagent, a test) means no dedup — a wasted read, never a phantom one.
-    if (full && prior?.full && unchanged && ctx.transcriptFull?.has(filePath)) {
-      touch(ctx, filePath);
-      return { output: FILE_UNCHANGED, summary: `read ${relativize(ctx, filePath)} (unchanged)` };
-    }
-
-    if (limit === undefined && stat.size > MAX_BYTES) {
-      return fail(
-        `File is large (${formatBytes(stat.size)}). Read a range with ` +
-          `\`offset\` and \`limit\` instead of the whole file.`,
-      );
-    }
-
-    const buf = await fs.readFile(filePath);
-    if (looksBinary(buf)) {
-      return fail(`${rawPath} looks like a binary file; cannot read as text.`);
-    }
-
-    // Split on CRLF or LF so a Windows file doesn't show a trailing \r on every
-    // line — the model can't see it, would omit it from an edit's old_string, and
-    // the edit would then fail to match. The edit tool normalizes line endings too.
-    const allLines = buf.toString("utf8").split(/\r?\n/);
-    const totalLines = allLines.length;
-    const start = offset ?? 1;
-    if (start > totalLines) {
-      return fail(
-        `offset ${start} is past the end of the file (${totalLines} lines).`,
-      );
-    }
-    // A read with no explicit limit still stops after MAX_LINES — the default
-    // read is bounded, and the model pages with offset for the rest.
-    const effectiveLimit = limit ?? MAX_LINES;
-    const end = Math.min(totalLines, start - 1 + effectiveLimit);
-
-    // Ranged-read dedup, for the case the two checks above cannot reach: a LARGE file
-    // is not in `workingSetFull` (it is localized to its focus regions rather than
-    // rendered whole), and a ranged read is not `full`, so neither gate fires and the
-    // same lines come back every time they are asked for. Measured on a real session:
-    // `app.js` read four separate times while its regions sat in <working_files>.
-    //
-    // Compared against what the working set actually PUT ON SCREEN this turn, never
-    // against the read ledger — the ledger says what was read once, not what is still
-    // visible, and a sub-agent has no working set at all. Same reasoning as read_symbol.
-    if (!full && unchanged && coversSpan(ctx.workingSetSpans?.get(filePath), start, end)) {
-      touch(ctx, filePath, { start, end });
+    if (paths.length === 1) {
       return {
-        output:
-          `${relativize(ctx, filePath)} lines ${start}-${end} are already in your <working_files> ` +
-          `block, unchanged. Read them there rather than requesting them again.`,
-        summary: `read ${relativize(ctx, filePath)} (in working set)`,
+        output: parts.join("\n"),
+        summary: summaries[0] ?? "",
+        ...(failures > 0 ? { isError: true as const } : {}),
+        ...(fullPaths.length > 0 ? { fullContentOf: fullPaths } : {}),
       };
     }
+    return {
+      output: parts.join("\n\n"),
+      summary: `read ${paths.length} files${failures > 0 ? ` (${failures} failed)` : ""}`,
+      ...(fullPaths.length > 0 ? { fullContentOf: fullPaths } : {}),
+    };
+  },
+};
 
-    const slice = allLines.slice(start - 1, end);
+/** What one file's read produced: its rendered body plus what the caller must record. */
+interface OneRead {
+  /** How this file is named in a multi-file listing. */
+  label: string;
+  /** Line-numbered content, or the error text. */
+  body: string;
+  /** The row shown to the user for this file. */
+  summary: string;
+  /** Set only when the file's WHOLE content went out (see wholeFileSent). */
+  fullPath?: string;
+  error?: true;
+}
 
-    // Line numbers, right-aligned to the widest number in the slice.
-    const width = String(end).length;
-    let body = slice
-      .map((line, i) => `${String(start + i).padStart(width)}\t${line}`)
-      .join("\n");
+/**
+ * Read one file. Every rule here — the caps, the dedup, the presence flag — is per file
+ * and unchanged by batching; only the number of files a single call handles is new.
+ */
+async function readOne(
+  rawPath: string,
+  ctx: ToolContext,
+  offset: number | undefined,
+  limit: number | undefined,
+): Promise<OneRead> {
+  const bad = (message: string): OneRead => ({
+    label: rawPath,
+    body: `Error: ${message}`,
+    summary: message,
+    error: true,
+  });
+  const trimmed = rawPath.trim();
+  if (!trimmed) return bad("empty path.");
 
-    // Tell the model when the default cap hid the rest of the file.
-    if (limit === undefined && end < totalLines) {
-      body += `\n… (showing lines ${start}-${end} of ${totalLines}; pass offset to read further)`;
-    }
-    const charTruncated = body.length > MAX_OUTPUT_CHARS;
-    if (charTruncated) {
-      body =
-        body.slice(0, MAX_OUTPUT_CHARS) +
-        "\n… (truncated — read a smaller range with offset/limit)";
-    }
+  const filePath = resolvePath(ctx, trimmed);
+  const blocked = protectedPathReason(filePath);
+  if (blocked) return bad(`Refusing to read ${trimmed}: it is ${blocked}.`);
+  const otherTool = foreignAgentReason(filePath);
+  if (otherTool) {
+    const denied = await requestAgentDataAccess(ctx, otherTool, `Reading ${trimmed}`);
+    if (denied) return bad(denied.summary ?? "access refused");
+  }
 
-    // "Whole file" means the whole file ACTUALLY WENT OUT, not merely that the caller
-    // asked for no range. A 2500-line file read with no offset stops at the MAX_LINES
-    // cap, and recording that as full let a later re-read be answered "unchanged since
-    // you last read" for 500 lines the model was never shown. Same for the character
-    // cap. The flag is the dedup's whole basis, so it has to mean what it says.
-    const wholeFileSent = full && end >= totalLines && !charTruncated;
+  let stat;
+  try {
+    stat = await fs.stat(filePath);
+  } catch {
+    return bad(`File not found: ${trimmed}`);
+  }
+  if (stat.isDirectory()) return bad(`${trimmed} is a directory, not a file.`);
 
-    // Record the read so edit / write_file know this file has been seen, so a
-    // later identical read can be deduped, and so it enters the working set (recency +
-    // the focused range for a partial read, used to localize a large file).
-    ctx.reads.set(filePath, {
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-      full: wholeFileSent,
-      touchedAt: nextTouch(),
-      focus: !wholeFileSent ? addFocus(prior?.focus, { start, end }) : prior?.focus,
-    });
+  const full = offset === undefined && limit === undefined;
+  const prior = ctx.reads.get(filePath);
+  const unchanged = prior !== undefined && prior.mtimeMs === stat.mtimeMs && prior.size === stat.size;
 
+  // Read-dedup: if the model already read this whole file, it hasn't changed since
+  // (same mtime + size), and that earlier read is STILL IN the transcript, don't
+  // re-send the content. The presence half is derived per turn rather than read off
+  // the ledger: microcompaction can clear the earlier result's body at any time, and
+  // a stored "you have it" bit would then be a lie the model obeys. No presence set
+  // (a subagent, a test) means no dedup — a wasted read, never a phantom one.
+  if (full && prior?.full && unchanged && ctx.transcriptFull?.has(filePath)) {
+    touch(ctx, filePath);
     const shown = relativize(ctx, filePath);
-    const ranged = offset !== undefined || limit !== undefined;
-    const summary = ranged
-      ? `read ${shown} lines ${start}-${end}`
-      : `read ${shown} (${slice.length} lines)`;
+    return { label: shown, body: FILE_UNCHANGED, summary: `read ${shown} (unchanged)` };
+  }
 
+  if (limit === undefined && stat.size > MAX_BYTES) {
+    return bad(
+      `File is large (${formatBytes(stat.size)}). Read a range with \`offset\` and \`limit\` instead of the whole file.`,
+    );
+  }
+
+  const buf = await fs.readFile(filePath);
+  if (looksBinary(buf)) return bad(`${trimmed} looks like a binary file; cannot read as text.`);
+
+  // Split on CRLF or LF so a Windows file doesn't show a trailing \r on every
+  // line — the model can't see it, would omit it from an edit's old_string, and
+  // the edit would then fail to match. The edit tool normalizes line endings too.
+  const allLines = buf.toString("utf8").split(/\r?\n/);
+  const totalLines = allLines.length;
+  const start = offset ?? 1;
+  if (start > totalLines) {
+    return bad(`offset ${start} is past the end of the file (${totalLines} lines).`);
+  }
+
+  // A read with no explicit limit still stops after MAX_LINES — the default
+  // read is bounded, and the model pages with offset for the rest.
+  const effectiveLimit = limit ?? MAX_LINES;
+  const end = Math.min(totalLines, start - 1 + effectiveLimit);
+  const slice = allLines.slice(start - 1, end);
+
+  // Line numbers, right-aligned to the widest number in the slice.
+  const width = String(end).length;
+  let body = slice.map((line, i) => `${String(start + i).padStart(width)}\t${line}`).join("\n");
+
+  // Tell the model when the default cap hid the rest of the file.
+  if (limit === undefined && end < totalLines) {
+    body += `\n… (showing lines ${start}-${end} of ${totalLines}; pass offset to read further)`;
+  }
+  const charTruncated = body.length > MAX_OUTPUT_CHARS;
+  if (charTruncated) {
+    body = body.slice(0, MAX_OUTPUT_CHARS) + "\n… (truncated — read a smaller range with offset/limit)";
+  }
+
+  // "Whole file" means the whole file ACTUALLY WENT OUT, not merely that the caller
+  // asked for no range. A 2500-line file read with no offset stops at the MAX_LINES
+  // cap, and recording that as full let a later re-read be answered "unchanged since
+  // you last read" for 500 lines the model was never shown. Same for the character
+  // cap. The flag is the dedup's whole basis, so it has to mean what it says.
+  const wholeFileSent = full && end >= totalLines && !charTruncated;
+
+  // Record the read so edit / write_file know this file has been seen, so a
+  // later identical read can be deduped, and so it enters the working set (recency +
+  // the focused range for a partial read, used to localize a large file).
+  ctx.reads.set(filePath, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    full: wholeFileSent,
+    touchedAt: nextTouch(),
+    focus: !wholeFileSent ? addFocus(prior?.focus, { start, end }) : prior?.focus,
+  });
+
+  const shown = relativize(ctx, filePath);
+  const ranged = offset !== undefined || limit !== undefined;
+  return {
+    label: shown,
+    body,
+    summary: ranged ? `read ${shown} lines ${start}-${end}` : `read ${shown} (${slice.length} lines)`,
     // Presence, recorded as a FACT at the moment it is true, keyed by the absolute path
     // this call actually resolved to. Re-deriving it later by re-resolving these
     // arguments would be a guess: `cd` moves the working directory mid-session, so the
     // same recorded "a.ts" can resolve to a different file than it did when read.
-    return { output: body, summary, ...(wholeFileSent ? { fullContentOf: filePath } : {}) };
-  },
-};
+    ...(wholeFileSent ? { fullPath: filePath } : {}),
+  };
+}
+
+/**
+ * The paths one call asked for.
+ *
+ * Accepts a bare string as well as a list, and still reads the old singular `path`,
+ * because a resumed session replays tool calls the model made under the previous schema
+ * — refusing those would turn every `/continue` into a wall of errors.
+ */
+function toPathList(args: Record<string, unknown>): string[] {
+  const raw = args.paths ?? args.path;
+  if (typeof raw === "string") return raw.trim() ? [raw] : [];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+}
 
 function fail(message: string): ToolResult {
   return { output: `Error: ${message}`, isError: true, summary: message };

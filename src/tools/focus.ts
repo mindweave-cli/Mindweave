@@ -39,10 +39,12 @@ export function addFocus(
 /**
  * Is [start..end] wholly inside a span the model is already being shown?
  *
- * The working set renders a large file's focus regions every turn, so a symbol inside
- * one of them is already in context and re-sending it pays twice. Checked against the
- * focus recorded BEFORE this read, and only ever used together with an unchanged-file
- * check — a stale region is worse than a duplicated one.
+ * NOTE: the working set that used to render a large file's focus regions every turn is
+ * gone, so nothing populates the span map any more and this answers "no" in the engine's
+ * own path. Kept because the reasoning is still correct wherever a caller genuinely knows
+ * what is on screen: checked against the focus recorded BEFORE this read, and only ever
+ * used together with an unchanged-file check — a stale region is worse than a duplicated
+ * one. A span map with no producer must never be allowed to suppress content.
  */
 export function coversSpan(focus: FocusSpan[] | undefined, start: number, end: number): boolean {
   return (focus ?? []).some((f) => f.start <= start && f.end >= end);

@@ -12,7 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildBody } from "../openaiCompat/wire.js";
 import { cacheSplit, geminiProvider, reasoningFields } from "./client.js";
-import { DEFAULT_MODEL, FLASH_37, FLASH_LITE_35, MODELS, PRO_31, contextWindow, normalize, price, thinkLevels } from "./manifest.js";
+import { DEFAULT_MODEL, FLASH_37, FLASH_LITE_35, FLASH_36, FLASH_35, FLASH_LITE_31, MODELS, hasListedPrice, PRO_31, contextWindow, normalize, price, thinkLevels } from "./manifest.js";
 import type { Effort, ModelRequest } from "../types.js";
 
 const base: ModelRequest = { system: "S", messages: [] };
@@ -89,4 +89,32 @@ test("Gemini's buffered ceiling is actually sent", () => {
 test("the base URL points at Google's OpenAI-compatible endpoint by default", () => {
   assert.equal(geminiProvider.baseUrl, "https://generativelanguage.googleapis.com/v1beta/openai");
   assert.equal(geminiProvider.apiKeyEnv, "GEMINI_API_KEY");
+});
+
+test("every added model is priced from the published table, never the fallback", () => {
+  // `price()` falls back to the default model's rate for an unknown id, so a model
+  // added to MODELS but forgotten in PRICES is silently costed as something else —
+  // wrong, and invisible, in the figure the status line now shows as money.
+  // Asked of the TABLE, not of the returned values: two models can legitimately share
+  // a rate (3.7 and 3.6 Flash both carry the same promotional price), so equal values
+  // prove nothing either way. Only presence does.
+  for (const choice of MODELS) {
+    assert.ok(hasListedPrice(choice.id), `${choice.id} has no entry in PRICES and is costed as the default`);
+  }
+  assert.equal(hasListedPrice("definitely-not-a-real-model"), false);
+});
+
+test("3.5 Flash really is dearer than the newer Flash models", () => {
+  // Counter-intuitive and deliberate: 3.7 and 3.6 carry a promotional rate that 3.5
+  // does not. Pinned so a future tidy-up does not "correct" it into looking ordered.
+  assert.ok(price(FLASH_35).cacheMiss > price(FLASH_37).cacheMiss);
+  assert.ok(price(FLASH_35).cacheMiss > price(FLASH_36).cacheMiss);
+});
+
+test("the cheapest model is the Lite one, on every rate", () => {
+  const lite = price(FLASH_LITE_31);
+  for (const choice of MODELS) {
+    if (choice.id === FLASH_LITE_31) continue;
+    assert.ok(lite.cacheMiss <= price(choice.id).cacheMiss, `${choice.id} undercuts 3.1 Flash-Lite on input`);
+  }
 });

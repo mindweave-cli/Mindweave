@@ -47,9 +47,12 @@ export const search: Tool = {
     "CONTENTS (`pattern`): `output_mode` is 'files_with_matches' (default, just paths), " +
     "'content' (matching lines), or 'count'. Avoid lookahead, lookbehind and " +
     "backreferences; the search engine rejects them. Character classes, groups, " +
-    `alternation and anchors are all fine. Output stops after ${GREP_MAX_OUTPUT_LINES} ` +
-    "matching lines and says so when it does, so narrow with `files` or `path` rather " +
-    "than assuming you have seen everything.\n" +
+    "alternation and anchors are all fine. `multiline` lets a pattern cross line breaks, " +
+    "which is how you find a construct that is not on one line (a signature and its body, " +
+    `an object literal, a JSX block). Output stops after ${GREP_MAX_OUTPUT_LINES} matching ` +
+    "lines and tells you the `offset` to pass for the next page — a capped search is " +
+    "something to CONTINUE, not a reason to start reading whole files. Use `after` when " +
+    "you want what follows a match (a declaration's body) rather than a symmetric window.\n" +
     `PATHS (\`files\`): a glob like \`**/*.ts\` or \`src/**/*.{ts,tsx}\`, matched against ` +
     "each file's path RELATIVE to the root being searched, so a leading slash does not " +
     `work. Results stop after ${GLOB_MAX_RESULTS} paths and say so when they do.\n` +
@@ -104,6 +107,36 @@ export const search: Tool = {
         type: "integer",
         minimum: 0,
         description: "Contents search only. Lines of context around each match (content mode).",
+      },
+      before: {
+        type: "integer",
+        minimum: 0,
+        description: "Lines to show BEFORE each match (content mode). Overrides `context` on that side.",
+      },
+      after: {
+        type: "integer",
+        minimum: 0,
+        description: "Lines to show AFTER each match (content mode). Overrides `context` on that side.",
+      },
+      multiline: {
+        type: "boolean",
+        description:
+          "Let the pattern span line breaks, with `.` matching newlines too. Off by default. " +
+          "Use it for constructs that are not on one line — a function signature and its body, " +
+          "an object literal, a JSX block.",
+      },
+      head_limit: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Return at most this many results. 0 means no limit. Defaults to the cap below.",
+      },
+      offset: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Skip this many results first — page through a capped search instead of narrowing it. " +
+          "The result tells you the offset to pass next.",
       },
     },
   },

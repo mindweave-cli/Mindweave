@@ -20,7 +20,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { MAX_SEARCH_RESULTS, renderResults } from "../mcp/deferred.js";
-import { DEFERRED_TOOLS, matchDeferred } from "./deferredNative.js";
+import { DEFERRED_TOOLS, matchDeferred, renderToolSchema } from "./deferredNative.js";
 
 
 export const findTools: Tool = {
@@ -67,15 +67,18 @@ export const findTools: Tool = {
     // an MCP issue tracker and report success while never touching the catalog. A weak
     // keyword hit in one pool must never hide a strong hit in the other, so results are
     // gathered from both and reported together.
-    const native = matchDeferred(query).filter((t) => !ctx.activatedTools?.has(t.name));
-    if (native.length > 0) {
-      ctx.activatedTools ??= new Set<string>();
-      for (const tool of native) ctx.activatedTools.add(tool.name);
-    }
+    // The FULL schema goes in the result, and nothing is "activated". A result is an
+    // appended message, so the cached prefix is untouched and the schema itself is cached
+    // from the next call onward. Adding the tool to the advertised list instead rewrites
+    // the whole prefix — tools, system AND messages — at full price, which cost several
+    // times what the deferral saved. Dispatch resolves against the registry, so a name
+    // and a schema is everything the model needs. See deferredNative.renderToolSchema.
+    const native = matchDeferred(query);
     const nativeBlock =
       native.length > 0
-        ? `Loaded ${native.length} of your own tool${native.length === 1 ? "" : "s"}, available for the rest of this session:\n\n` +
-          native.map((t) => `- ${t.name} — ${t.description.split("\n")[0]?.trim() ?? ""}`).join("\n")
+        ? `${native.length} of your own tool${native.length === 1 ? "" : "s"}, callable from now on:\n\n<functions>\n` +
+          native.map(renderToolSchema).join("\n") +
+          `\n</functions>`
         : "";
 
     const mcp = ctx.mcp;
@@ -83,7 +86,16 @@ export const findTools: Tool = {
 
     // No MCP at all: the native pool is the whole answer, for better or worse.
     if (!mcp || !snapshot || snapshot.toolCount === 0) {
-      if (nativeBlock) return { output: nativeBlock, summary: `loaded ${native.map((t) => t.name).join(", ")}` };
+      if (nativeBlock) {
+        // The native hits are reported, AND the absence of MCP is still stated. A query
+        // aimed at an integration ("github") can keyword-match a native tool, and
+        // answering with only that match lets the model conclude it got what it asked
+        // for — when in fact no server is connected and the thing it wanted is not here.
+        return {
+          output: `${nativeBlock}\n\nNo MCP servers are connected in this project, so there is nothing else to search.`,
+          summary: `loaded ${native.map((t) => t.name).join(", ")}`,
+        };
+      }
       return {
         output:
           `Nothing matches "${query}". No MCP servers are connected in this project, and none of your own ` +
@@ -106,7 +118,7 @@ export const findTools: Tool = {
       };
     }
 
-    const found = mcp.searchAndActivate(query);
+    const found = mcp.searchCatalogTools(query);
     if (found.length === 0) {
       const note =
         `No MCP tool matches "${query}". There ${snapshot.toolCount === 1 ? "is" : "are"} ${snapshot.toolCount} ` +

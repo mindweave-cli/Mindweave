@@ -65,14 +65,31 @@ export interface TaskUsage {
   ctxTokens: number;
   /** Input served from cache, summed across the task's calls. */
   cacheHitTokens: number;
-  /** Fresh input, summed. */
+  /** Fresh input, summed (inclusive of cache writes). */
   cacheMissTokens: number;
+  /** The part of `cacheMissTokens` that was also written to the cache, summed. Priced
+   *  at the write rate, which is higher than plain input on providers that charge for
+   *  storing as well as processing. */
+  cacheWriteTokens: number;
   /** Generated tokens, summed. */
   outputTokens: number;
   /** Share of input (0–100) that came from cache. */
   cachePct: number;
   /** Estimated, cache-aware cost in USD (computed but not shown for now). */
   costUsd: number;
+  /**
+   * True when NO call reported a cache split, so the figures above are inferred
+   * rather than measured.
+   *
+   * This is not a nicety. Some providers cache and simply do not say so — Gemini's
+   * OpenAI-compatible endpoint returns only `prompt_tokens`/`completion_tokens`/
+   * `total_tokens`, with no `prompt_tokens_details.cached_tokens`, while Gemini 2.5
+   * caches implicitly all the same. Treating "reported nothing" as "cached nothing"
+   * charged the full prompt again on every tool round, so a five-step turn over a 25K
+   * context read ~150K and looked like the model had run wild. It had not; the meter
+   * had. When this flag is set the UI must present the number as approximate.
+   */
+  estimated: boolean;
 }
 
 /**
@@ -90,19 +107,46 @@ export function summarizeTask(samples: Usage[], modelId?: string): TaskUsage | n
   let miss = 0;
   let out = 0;
   let total = 0;
+  // Did ANY call tell us what it served from cache? One that did is enough: it proves
+  // the provider reports the split, so a later zero is a real zero rather than silence.
+  let reported = false;
+  // The largest prompt any single call sent. Within a turn the prompt only grows —
+  // the system prompt is fixed, messages append, and the volatile tail is replaced
+  // rather than accumulated — so the biggest one is a close read on how much distinct
+  // text existed, where SUMMING them counts the stable prefix once per step.
+  let maxPrompt = 0;
+  let writes = 0;
   for (const s of samples) {
-    let h = s.cacheHitTokens;
-    let m = s.cacheMissTokens;
-    if (h + m === 0 && s.promptTokens > 0) m = s.promptTokens; // no split reported → count as fresh
-    hit += h;
-    miss += m;
+    writes += s.cacheWriteTokens ?? 0;
+    if (s.cacheHitTokens > 0 || s.cacheMissTokens > 0) reported = true;
+    hit += s.cacheHitTokens;
+    miss += s.cacheMissTokens;
     out += s.completionTokens;
     total += s.totalTokens;
+    if (s.promptTokens > maxPrompt) maxPrompt = s.promptTokens;
+  }
+  // Writes are a SLICE of misses, so a fallback that rewrites `miss` must drop them
+  // too — otherwise the estimate charges tokens the estimate itself invented.
+  if (!reported && maxPrompt > 0) {
+    writes = 0;
+    // Nothing was reported, so nothing is known. Charge the distinct prompt ONCE and
+    // say the figure is estimated, rather than charging it once per step and saying
+    // nothing. This is a floor: the volatile tail (the working-set block especially)
+    // genuinely is re-sent uncached each step, and that is not counted here. A floor
+    // labelled as an estimate is honest; an inflated number presented as exact is not.
+    miss = maxPrompt;
+    hit = 0;
   }
   const ctxTokens = samples[samples.length - 1]!.promptTokens;
   const totalIn = hit + miss;
   const cachePct = totalIn > 0 ? Math.round((hit / totalIn) * 100) : 0;
-  const costUsd = (hit * price.cacheHit + miss * price.cacheMiss + out * price.output) / 1_000_000;
+  // Three input rates, not two. `writes` is a subset of `miss`, so the plain-input
+  // rate applies only to what is left after the written slice is charged separately —
+  // adding them would double-count the same tokens.
+  const writeRate = price.cacheWrite ?? price.cacheMiss;
+  const plainMiss = Math.max(0, miss - writes);
+  const costUsd =
+    (hit * price.cacheHit + plainMiss * price.cacheMiss + writes * writeRate + out * price.output) / 1_000_000;
   return {
     // Misses + output: every token counted exactly once. See the field's own note
     // for why this is not `total`.
@@ -111,9 +155,11 @@ export function summarizeTask(samples: Usage[], modelId?: string): TaskUsage | n
     ctxTokens,
     cacheHitTokens: hit,
     cacheMissTokens: miss,
+    cacheWriteTokens: writes,
     outputTokens: out,
     cachePct,
     costUsd,
+    estimated: !reported,
   };
 }
 

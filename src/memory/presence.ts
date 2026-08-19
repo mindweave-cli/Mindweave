@@ -21,6 +21,7 @@
  * See BOUNDARY.md, "Records, derivations, and standing knowledge".
  */
 import type { Entry } from "./types.js";
+import { fullPathsOf } from "./types.js";
 import { CLEARED_STUB } from "./compaction.js";
 
 /**
@@ -48,8 +49,9 @@ export function fullReadPaths(entries: Entry[], resolve: (path: string) => strin
 
     // The tool recorded which file this result IS, at the moment it was true. Exact:
     // no re-resolution, so a `cd` since then cannot make it point somewhere else.
-    if (e.fullContentOf) {
-      present.add(e.fullContentOf);
+    const recorded = fullPathsOf(e);
+    if (recorded.length > 0) {
+      for (const path of recorded) present.add(path);
       continue;
     }
 

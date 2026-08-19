@@ -11,6 +11,7 @@
  * ourselves and rendering one <Text> per finished line leaves nothing for
  * Ink's wrapper to be inconsistent about.
  */
+import { memo } from "react";
 import { Box, Text } from "ink";
 import { renderMarkdown } from "../markdown.js";
 import { wrapAnsi } from "../wrap.js";
@@ -46,7 +47,7 @@ function WrappedText({ text, width, color }: { text: string; width: number; colo
  *  missing the start of the next line. */
 const READING_WIDTH = 88;
 
-export function BlockView({ block, columns, tightTop }: { block: Block; columns: number; tightTop?: boolean }) {
+function BlockViewInner({ block, columns, tightTop }: { block: Block; columns: number; tightTop?: boolean }) {
   const textWidth = Math.max(8, columns - 4);
 
   switch (block.kind) {
@@ -182,4 +183,42 @@ export function BlockView({ block, columns, tightTop }: { block: Block; columns:
       );
   }
 }
+
+/**
+ * MEMOIZED, and this is the single most load-bearing line in the UI's performance.
+ *
+ * Ink re-renders the WHOLE component tree on every React state change — there is no
+ * partial update, and after the commit it erases the drawn lines and rewrites them.
+ * Every keystroke is a state change (the prompt's reducer), and so is every wheel
+ * tick (`scrollUp`). Without this wrapper each of those re-ran `renderMarkdown` and
+ * `wrapAnsi` from scratch for EVERY block on screen, then handed Yoga a fresh tree to
+ * lay out.
+ *
+ * Measured, on a realistic assistant reply, before this landed:
+ *
+ *   | blocks | text work per keystroke |
+ *   |--------|-------------------------|
+ *   |     30 |                 17.9 ms |
+ *   |     80 |                 47.7 ms |
+ *   |    150 |                 89.4 ms |
+ *
+ * — and that is BEFORE layout and redraw, against Ink's 32ms frame throttle. It is
+ * why typing got slower the longer the conversation ran, why scrolling stuttered, and
+ * why a tool block "popped" instead of appearing cleanly: it was landing inside a
+ * frame that took ~90ms to draw.
+ *
+ * The reason a plain shallow compare is CORRECT here, rather than a lucky shortcut:
+ * the transcript reducer never rebuilds a block that did not change. `commit` concats,
+ * `patch` maps and returns `b` untouched unless the id matches, and `endTurn`'s `clear`
+ * returns `b` itself for everything except a live tool row. So block identity is stable
+ * across renders by construction, and the one moment a committed row is allowed to
+ * change (`live` flipping at turn end) DOES produce a new object and so DOES re-render.
+ * `columns` and `tightTop` are primitives. Nothing here is a fresh object or closure
+ * per render, which is the usual reason `memo` silently does nothing.
+ *
+ * If a future block type is given a prop that is built inline at the call site (an
+ * array, an object, a callback), this optimization is dead and the lag returns with no
+ * test failing. Keep the props primitive-or-stable.
+ */
+export const BlockView = memo(BlockViewInner);
 
