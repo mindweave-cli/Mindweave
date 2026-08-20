@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { toolSchemas, TOOLS } from "./registry.js";
 import { DEFERRED_TOOLS, deferredToolsIndex, matchDeferred, renderToolSchema } from "./deferredNative.js";
 import { basePrompt } from "../dynamo/prompt.js";
+import { staticSystemPrompt } from "../dynamo/engine.js";
 import type { ToolContext } from "./types.js";
 
 /** A session that has done nothing yet: no shells, no skills. The common case. */
@@ -144,4 +145,50 @@ test("the advertised list cannot be moved by anything a turn does", () => {
   // buying a prefix rewrite it could not see.
   const source = readFileSync(new URL("./registry.ts", import.meta.url), "utf8");
   assert.ok(!/activated/.test(source), "toolSchemas can still be asked to advertise a deferred tool");
+});
+
+test("a search for one tool does not hand over five others", () => {
+  // Measured from a real session: searching "session" returned SIX tools, because the
+  // word appears in four other descriptions in passing ("for the rest of this session")
+  // and a description mention scored enough to qualify. Every match is answered with a
+  // full schema now, so a loose match is not a spare line, it is a few hundred tokens
+  // the model did not ask for.
+  const hits = matchDeferred("session").map((t) => t.name);
+  assert.deepEqual(hits, ["sessions"], `a name match must beat passing mentions, got ${hits.join(", ")}`);
+});
+
+test("a description-only match still comes back", () => {
+  // The floor is relative on purpose. When nothing matched by name, the best description
+  // hit IS the answer, and a fixed threshold tuned to kill passing mentions would throw
+  // it away — leaving a reachable tool unreachable by the word that describes it.
+  const hits = matchDeferred("remember");
+  assert.ok(hits.length > 0, "a query that only matches a description must still find it");
+});
+
+test("no search can hand over the whole pool", () => {
+  // A broad query used to be uncapped: every tool that scored at all came back with its
+  // schema attached. The MCP side has always had a cap; the native side had none.
+  for (const q of ["a e i o u", "tool", "file", "the"]) {
+    assert.ok(matchDeferred(q).length <= 5, `"${q}" returned ${matchDeferred(q).length} tools`);
+  }
+});
+
+test("the prompt never names a tool that does not exist", () => {
+  // The failure this catches, seen live: the prompt told the model to call
+  // `list_sessions` and `read_session`, which were merged into one `sessions` tool long
+  // ago. The model obeyed, got "unknown tool", and burned two round trips recovering —
+  // one on the dead name and one searching for the real one.
+  // The WHOLE system prompt, not just the static base. The line that caused this lives
+  // in the session-composed half, so a check that read only basePrompt would have missed
+  // the exact bug it was written for — and did, until a red-check showed it passing with
+  // the dead name put back.
+  const prompt =
+    basePrompt("bash") +
+    staticSystemPrompt("", "", "/memory", "", { forbidden: "", skills: "", rules: "" } as never, "", 3);
+  const known = new Set(TOOLS.map((t) => t.name));
+  // Only backticked snake_case words: that shape in a prompt is always a tool name.
+  for (const m of prompt.matchAll(/`([a-z][a-z0-9]*_[a-z0-9_]+)`/g)) {
+    const name = m[1]!;
+    assert.ok(known.has(name), `the prompt tells the model to call "${name}", which is not a registered tool`);
+  }
 });

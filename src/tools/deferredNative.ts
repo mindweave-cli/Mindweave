@@ -72,6 +72,12 @@ export function deferredToolsIndex(): string {
   );
 }
 
+/** Keep a hit only if it scores at least this share of the best hit. */
+const RELEVANCE_FLOOR = 0.5;
+
+/** Most tools one search hands over. Each one costs its full schema. */
+const MAX_NATIVE_RESULTS = 5;
+
 /**
  * Render one deferred tool the way the advertised list renders it: name, description and
  * the full JSON parameter schema.
@@ -104,7 +110,7 @@ export function renderToolSchema(tool: Tool): string {
 export function matchDeferred(query: string): Tool[] {
   const terms = query.toLowerCase().trim().split(/[^a-z0-9]+/).filter(Boolean);
   if (terms.length === 0) return [];
-  return DEFERRED_TOOLS.map((tool) => {
+  const scored = DEFERRED_TOOLS.map((tool) => {
     const name = tool.name.toLowerCase();
     const description = tool.description.toLowerCase();
     let score = 0;
@@ -118,6 +124,21 @@ export function matchDeferred(query: string): Tool[] {
   })
     .filter((s) => s.score > 0)
     // Ties break on name so identical searches return identical results.
-    .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name))
-    .map((s) => s.tool);
+    .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
+
+  // Cut the weak tail, RELATIVE to the best hit rather than at a fixed score.
+  //
+  // Every match is answered with the tool's full schema now, so a loose match is not a
+  // harmless extra line — it is a few hundred tokens the model did not ask for. Searching
+  // "session" used to return six tools, because the word appears in four other tools'
+  // descriptions in passing ("for the rest of this session") and a description mention
+  // scored enough to qualify.
+  //
+  // Relative, because the right floor depends on what was found. When something matched
+  // by NAME, a passing mention elsewhere is noise and should go. When the best anyone
+  // managed was a description hit, that same score is the real answer and must be kept —
+  // a fixed threshold would have to choose one of those cases and be wrong in the other.
+  const best = scored[0]?.score ?? 0;
+  const floor = Math.max(1, best * RELEVANCE_FLOOR);
+  return scored.filter((s) => s.score >= floor).slice(0, MAX_NATIVE_RESULTS).map((s) => s.tool);
 }

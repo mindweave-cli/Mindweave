@@ -7,6 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { TOOLS } from "../tools/registry.js";
 import { volatileContext, staticSystemPrompt } from "./engine.js";
 import { basePrompt } from "./prompt.js";
 
@@ -76,8 +77,16 @@ test("a single prior session reads as singular, not '1 sessions'", () => {
 
 test("it is pointed at the tools that read those sessions, not told it is blind", () => {
   const sys = staticSystemPrompt("", "", "", "", gov({}), "", 3);
-  assert.match(sys, /list_sessions/);
-  assert.match(sys, /read_session/);
+  // The tool NAME, checked against the registry rather than written out here. This test
+  // used to hard-code `list_sessions` and `read_session`, and when those two were merged
+  // into one `sessions` tool the assertion kept the dead names alive in the prompt — so
+  // the model obeyed, called a tool that did not exist, and burned two round trips
+  // recovering. A test that pins a name is a test that can pin a broken one.
+  assert.ok(
+    TOOLS.some((t) => t.name === "sessions"),
+    "the tool this prompt points at must exist",
+  );
+  assert.match(sys, /`sessions`/);
   // The exact deflection the user hit: claiming no visibility, then paraphrasing
   // project files instead of looking. Both are now explicitly ruled out.
   assert.doesNotMatch(sys, /cannot see what was said/);

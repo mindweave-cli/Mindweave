@@ -140,14 +140,14 @@ ${projectMemory}
   }
   // Its own past work in this project. The COUNT goes in the prompt (so the model
   // knows the history exists without being told every turn what is in it); the
-  // CONTENT is pulled on demand with list_sessions / read_session. Injecting the
+  // CONTENT is pulled on demand with the `sessions` tool. Injecting the
   // sessions themselves would be ruinous — this way an ordinary turn pays nothing
   // and a question about past work gets a real answer instead of a deflection.
   if (priorSessions > 0) {
     const s = priorSessions === 1 ? "" : "s";
     prompt += `
 
-You have worked in this project before: ${priorSessions} earlier session${s} of yours are saved, and you can read them. When the user refers to earlier work — "last session", "what did we do", "the bug we fixed" — call \`list_sessions\`, then \`read_session\` for the one they mean, and answer from what you find. Do not say you cannot see your past sessions, and do not guess from the project files instead. \`/continue\` is for the user to RESUME a session; it is not a substitute for you looking. Never present another tool's saved conversations as your own.`;
+You have worked in this project before: ${priorSessions} earlier session${s} of yours are saved, and you can read them. When the user refers to earlier work — "last session", "what did we do", "the bug we fixed" — call \`sessions\` to list them, then \`sessions\` again with an id to read the one they mean, and answer from what you find. It is not in your tool list until you load it with find_tools. Do not say you cannot see your past sessions, and do not guess from the project files instead. \`/continue\` is for the user to RESUME a session; it is not a substitute for you looking. Never present another tool's saved conversations as your own.`;
   }
 
   if (memoryDir) {
