@@ -554,6 +554,48 @@ function SuggestionMenu({
  * the tip vanished and the box looked cut in half. The wrapping and the cursor maths
  * live in inputView.ts, where they are unit-tested.
  */
+/**
+ * How long each half of the blink lasts.
+ *
+ * 530ms is the rate terminals and editors have converged on. It is slow enough to read
+ * as a pulse rather than a flicker, and fast enough that the caret is never missing long
+ * enough to look lost.
+ */
+const BLINK_MS = 530;
+
+/**
+ * The text caret: a thin bar that blinks, rather than a solid block that sits still.
+ *
+ * The block was drawn by inverting the cell, which is the cheapest possible caret and
+ * reads as a frozen artefact — a filled square parked in the box whether the tool is
+ * waiting for you, thinking, or doing nothing at all. A bar that blinks is the one piece
+ * of motion that says an input is LIVE, and it is what makes a terminal prompt feel like
+ * talking to something rather than typing into a field.
+ *
+ * The blink state lives HERE, not in Field or PromptInput. It ticks twice a second
+ * forever, and anywhere higher up that would re-render the input's whole subtree — the
+ * wrapped rows, the suggestion menu — twice a second for one cell.
+ *
+ * `under` is the character the caret sits on. A terminal grid has no room between cells,
+ * so the caret has to occupy one: it shows the bar on the on-beat and gives the cell back
+ * on the off-beat, which keeps a character under mid-line editing readable. At the end of
+ * the text, where the caret spends nearly all its time, there is nothing under it and it
+ * is simply a blinking bar.
+ *
+ * `resetKey` restarts the cycle on the on-beat whenever it changes. Without it, typing
+ * during an off-beat leaves the caret invisible at the exact moment the user is looking
+ * for it, which reads as dropped input.
+ */
+function Caret({ under, resetKey }: { under: string; resetKey: string | number }) {
+  const [on, setOn] = useState(true);
+  useEffect(() => {
+    setOn(true);
+    const id = setInterval(() => setOn((v) => !v), BLINK_MS);
+    return () => clearInterval(id);
+  }, [resetKey]);
+  return on ? <Text color="cyan">{"│"}</Text> : <Text>{under || " "}</Text>;
+}
+
 function Field({
   value,
   cursor,
@@ -575,7 +617,7 @@ function Field({
         <Text bold color="cyan">{"> "}</Text>
         <Box width={width} overflow="hidden">
           <Text wrap="truncate-end">
-            {active ? <Text inverse> </Text> : null}
+            {active ? <Caret under="" resetKey="placeholder" /> : null}
             {placeholder ? <Text dimColor>{placeholder}</Text> : null}
           </Text>
         </Box>
@@ -599,7 +641,7 @@ function Field({
               {active && i === view.cursorRow ? (
                 <>
                   {row.text.slice(0, view.cursorCol)}
-                  <Text inverse>{row.text.slice(view.cursorCol, view.cursorCol + 1) || " "}</Text>
+                  <Caret under={row.text.slice(view.cursorCol, view.cursorCol + 1)} resetKey={`${cursor}:${value.length}`} />
                   {row.text.slice(view.cursorCol + 1)}
                 </>
               ) : (
