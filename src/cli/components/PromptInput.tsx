@@ -430,16 +430,14 @@ export function PromptInput({
 
   return (
     <Box flexDirection="column" width={width} flexShrink={0}>
-      {/* A rule instead of a box.
-          The bordered version drew a frame around the prompt, which made the input a
-          separate panel sitting under the conversation rather than the next line of it.
-          A single rule does the one thing the border was actually for — saying where
-          the conversation stops and typing begins — and lets the prompt read as part of
-          the same stream. It also gives the chat back a row, since a box costs two. */}
-      <Box flexShrink={0}>
-        <Text dimColor>{"─".repeat(Math.max(1, width))}</Text>
-      </Box>
-      <Box flexDirection="column" width={width} flexShrink={0}>
+      <Box
+        flexDirection="column"
+        width={width}
+        flexShrink={0}
+        borderStyle="single"
+        borderColor="gray"
+        paddingX={1}
+      >
         <Field
           value={value}
           cursor={cursor}
