@@ -44,9 +44,20 @@ test("the bundled binary is found without ripgrep being on PATH", () => {
 test("and it actually runs", async () => {
   // A resolvable path is not a working binary. This is the check that would catch a
   // platform package installed for the wrong architecture.
-  assert.equal(await ripgrepAvailable(), true, "the bundled ripgrep did not answer --version");
   const version = execFileSync(ripgrepPath(), ["--version"]).toString();
   assert.match(version, /^ripgrep \d+\./, `unrecognised output: ${version.split("\n")[0]}`);
+
+  // `ripgrepAvailable` answers a different question: whether search WILL use it. The CI
+  // matrix runs the whole suite a second time under MINDWEAVE_NO_RIPGREP=1 so the
+  // pure-Node walk gets exercised on a machine that has ripgrep, and under that switch
+  // the honest answer is no. Asserting `true` unconditionally made this file fail the
+  // one run that exists to prove the fallback works.
+  const forcedOff = process.env.MINDWEAVE_NO_RIPGREP === "1";
+  assert.equal(
+    await ripgrepAvailable(),
+    !forcedOff,
+    forcedOff ? "the kill switch did not turn ripgrep off" : "the bundled ripgrep did not answer --version",
+  );
 });
 
 test("an explicit override still wins", () => {
