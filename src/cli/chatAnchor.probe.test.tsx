@@ -12,6 +12,7 @@
  * pure functions say nothing about what a user sees.
  */
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { render, Box, Text } from "ink";
@@ -63,6 +64,9 @@ function rowsOf(lines: number, frameHeight: number, chatRows: number): string[] 
       </Box>
       <Box flexDirection="column" flexShrink={0}>
         <Box flexShrink={0}>
+          <Text> </Text>
+        </Box>
+        <Box flexShrink={0}>
           <Text>STATUS</Text>
         </Box>
         <Box flexShrink={0}>
@@ -87,7 +91,7 @@ function rowOf(rows: string[], needle: string): number {
   return rows.findIndex((r) => r.includes(needle));
 }
 
-test("a SHORT conversation sits directly above the input, not at the top", () => {
+test("a SHORT conversation sits just above the input, not at the top", () => {
   // The reported defect, as a frame. Three lines of chat in a 20-row frame.
   const rows = rowsOf(3, 20, 16);
   const lastMsg = rowOf(rows, "msg2");
@@ -95,7 +99,22 @@ test("a SHORT conversation sits directly above the input, not at the top", () =>
 
   assert.ok(lastMsg > 0, "the conversation must be on screen at all");
   assert.ok(status > lastMsg, "the footer is below the chat");
-  assert.equal(status - lastMsg, 1, `expected the reply to rest on the footer, found ${status - lastMsg} rows between`);
+  // Exactly one blank row between. This asserted zero until a second report: with the
+  // reply's last line touching the input box the two read as one thing, and the answer
+  // looked like it had run into the prompt. One row separates them; two would be a hole.
+  assert.equal(status - lastMsg, 2, `expected one blank row before the footer, found ${status - lastMsg - 1}`);
+});
+
+test("the gap survives the status line rendering nothing", () => {
+  // Why the spacer is the footer's own child rather than a margin on the status line:
+  // a session that has not run a turn has no status to show, the component returns
+  // null, and a margin belonging to it disappears with it. That is exactly the frame
+  // the gap was missing from.
+  const rows = rowsOfNoStatus(3, 20, 16);
+  const lastMsg = rowOf(rows, "msg2");
+  const input = rowOf(rows, "INPUTBOX");
+  assert.ok(lastMsg > 0 && input > lastMsg);
+  assert.equal(input - lastMsg, 2, `expected one blank row with no status line, found ${input - lastMsg - 1}`);
 });
 
 test("the tip line is the last thing on screen", () => {
@@ -120,10 +139,17 @@ test("an EMPTY conversation still leaves the footer pinned and whole", () => {
   assert.ok(rowOf(rows, "TIPLINE") > rowOf(rows, "INPUTBOX"));
 });
 
+/** Rows the chat viewport really gets in the skeleton below: the frame, less the banner,
+ *  less the footer (blank spacer, status, input, tip). Derived rather than written down,
+ *  because it changed once already — adding the spacer row cost the viewport one, and a
+ *  hard-coded number quietly told `chatLayout` there was more room than existed, which
+ *  pushed the newest line past the clip edge. */
+const viewportRows = (frameHeight: number) => frameHeight - 1 - 4;
+
 test("a LONG conversation still fills the viewport and shows its newest lines", () => {
   // The scrolled regime, which the change must not have touched: with 40 lines in a
-  // 12-row viewport, the newest must be visible and the oldest clipped away.
-  const rows = rowsOf(40, 20, 16);
+  // short viewport, the newest must be visible and the oldest clipped away.
+  const rows = rowsOf(40, 20, viewportRows(20));
   assert.ok(rowOf(rows, "msg39") >= 0, "the newest line must be on screen when pinned to the bottom");
   assert.equal(rowOf(rows, "msg0"), -1, "the oldest line must have scrolled off");
   assert.ok(rowOf(rows, "TIPLINE") > rowOf(rows, "msg39"), "the footer stays below the chat");
@@ -188,3 +214,48 @@ function renderProse(columns: number): number {
       .map((l) => l.replace(ANSI, "").replace(/\s+$/, "").length),
   );
 }
+
+/** The same frame with the status line rendering nothing, as it does before any turn. */
+function rowsOfNoStatus(lines: number, frameHeight: number, chatRows: number): string[] {
+  const stdout = new FakeStdout();
+  const stdin = new EventEmitter() as unknown as NodeJS.ReadStream;
+  (stdin as unknown as { isTTY: boolean }).isTTY = false;
+  (stdin as unknown as { setRawMode: () => void }).setRawMode = () => {};
+
+  const { marginTop, restsOnFooter } = chatLayout(lines, chatRows, 0);
+  const instance = render(
+    <Box flexDirection="column" height={frameHeight} overflow="hidden">
+      <Box flexShrink={0}><Text>BANNER</Text></Box>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={1} overflow="hidden">
+        {restsOnFooter ? <Box flexGrow={1} flexShrink={1} /> : null}
+        <Box flexDirection="column" flexShrink={0} marginTop={marginTop}>
+          {Array.from({ length: lines }, (_, i) => (
+            <Box key={i} flexShrink={0}><Text>{`msg${i}`}</Text></Box>
+          ))}
+        </Box>
+      </Box>
+      <Box flexDirection="column" flexShrink={0}>
+        <Box flexShrink={0}><Text> </Text></Box>
+        {null}
+        <Box flexShrink={0}><Text>INPUTBOX</Text></Box>
+        <Box flexShrink={0}><Text>TIPLINE</Text></Box>
+      </Box>
+    </Box>,
+    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, debug: true },
+  );
+  const last = stdout.frames[stdout.frames.length - 1] ?? "";
+  instance.unmount();
+  return last.replace(ANSI, "").split(/\r?\n/);
+}
+
+test("App's own footer really starts with that spacer", () => {
+  // The probes above mirror App's layout rather than importing it, which is what makes
+  // them cheap to render — and also means they cannot notice App drifting away from the
+  // shape they assert. This is the one check that ties the two together: the frames
+  // prove the rule produces a gap, and this proves App is still built that way.
+  const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+  const footer = app.slice(app.indexOf('<Box ref={footerRef}'));
+  assert.ok(footer.length > 0, "the footer container moved or was renamed");
+  const firstChild = footer.slice(0, footer.indexOf("<StatusLine"));
+  assert.match(firstChild, /<Text> <\/Text>/, "the blank row above the footer is gone");
+});

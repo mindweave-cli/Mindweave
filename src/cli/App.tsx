@@ -2089,6 +2089,14 @@ export function App() {
           single measurement covers the status line, the input box, and whatever
           the command palette currently costs, whether that's open or closed. */}
       <Box ref={footerRef} flexDirection="column" flexShrink={0}>
+        {/* One blank row between the conversation and the footer, ALWAYS.
+            It lives here rather than as a margin on the status line, because the
+            status line is not always rendered — a session that has not run a turn
+            has nothing to report — and the gap was disappearing with it, leaving the
+            last line of a reply touching the input box. A single spacer inside the
+            measured footer keeps it unconditional and keeps `footerHeight` honest,
+            which a margin (laid outside the box) would not. */}
+        <Box flexShrink={0}><Text> </Text></Box>
         {/* Every direct child here gets its own flexShrink:0 too — same reason
             as the banner/chat wrapper above: a footer that's itself allowed to
             compress can eat its own border lines and merge rows together
@@ -2152,9 +2160,9 @@ export function App() {
 const BANNER_ROWS = 3;
 /** Always keep at least this much chat visible, even with the command palette open. */
 const MIN_CHAT_ROWS = 3;
-/** Conservative fixed footer cost besides the palette: status line + the
- *  bordered input box + the tip line. */
-const FOOTER_BASE_ROWS = 6;
+/** Conservative fixed footer cost besides the palette: the blank spacer row, the
+ *  status line, the bordered input box, and the tip line. */
+const FOOTER_BASE_ROWS = 7;
 /** The palette's own chrome: title, the "Tab completes" hint, top+bottom border. */
 const MENU_CHROME_ROWS = 4;
 
@@ -2408,8 +2416,10 @@ function StatusLine({
 
   const dot = busy ? <Text color="cyan">●</Text> : <Text dimColor>●</Text>;
 
+  // No marginTop: the footer owns the gap above itself now, so that it survives this
+  // component rendering nothing at all. Two would read as a hole.
   return (
-    <Box marginTop={1} marginBottom={0}>
+    <Box marginBottom={0}>
       {dot}
       {label}
     </Box>
