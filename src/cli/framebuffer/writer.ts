@@ -72,18 +72,32 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
   let onScreen = new Screen(real.columns ?? 80, real.rows ?? 24);
   let pending = new Screen(onScreen.width, onScreen.height);
 
-  /** Match the grids to the terminal, forcing a full repaint when the size changed.
-   *  A resize re-wraps every line, so nothing about the previous frame is reusable. */
-  function syncSize(): void {
+  /**
+   * Match the grids to the terminal. Returns true when the size changed, which the
+   * caller must answer by erasing the real screen before it paints.
+   *
+   * The erase is the whole point and it used to be missing. Resizing reset `onScreen`
+   * to blanks, on the reasoning that a blank model would make every cell differ and
+   * force a full repaint. It does the opposite: the new frame's blank regions are also
+   * blanks, so the diff finds them identical and writes nothing for them, while the real
+   * terminal still holds whatever was in those cells before. That is what fused an old
+   * line onto a new one, leaving rows like `Tools(session)s, ask_user, create_skill,`.
+   *
+   * Erasing for real is also the cheap fix rather than the expensive one. Filling the
+   * model with a sentinel no cell can equal would work too, and would then write every
+   * space on screen as an explicit character. One escape sequence costs four bytes and
+   * leaves the diff free to stay minimal for the frame itself.
+   */
+  function syncSize(): boolean {
     const w = real.columns ?? onScreen.width;
     const h = real.rows ?? onScreen.height;
-    if (w === onScreen.width && h === onScreen.height) return;
+    if (w === onScreen.width && h === onScreen.height) return false;
     onScreen.resize(w, h);
     pending.resize(w, h);
-    // The terminal's own contents after a resize are undefined as far as we are
-    // concerned, so the next paint must assume nothing is right. `clear()` on
-    // `onScreen` makes every cell differ, producing a full repaint.
+    // Now TRUE rather than assumed: the model says blank, and the caller is about to
+    // make the terminal blank to match.
     onScreen.clear();
+    return true;
   }
 
   /**
@@ -110,7 +124,7 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
         return real.write(data, callback);
       }
 
-      syncSize();
+      const resized = syncSize();
 
       // Build the new frame. Cleared first because a frame is a complete statement
       // about the rows it covers: a line that got shorter must leave blanks behind,
@@ -118,7 +132,9 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
       pending.clear();
       parseFrame(pending, body);
 
-      const escape = paint(onScreen, pending, 1);
+      // `[2J` erases the display, `[H` homes the cursor. Sent only on a resize,
+      // to bring the real screen into line with the freshly blanked model above.
+      const escape = (resized ? "[2J[H" : "") + paint(onScreen, pending, 1);
 
       // Swap rather than copy. Both grids are the same shape and `pending` is fully
       // rewritten at the start of every frame, so the old on-screen grid is free to

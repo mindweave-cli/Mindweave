@@ -147,6 +147,16 @@ function applySgr(pen: Pen, params: number[]): void {
   }
 }
 
+/** Reset a run of cells to default-styled blanks, the way an erase sequence does. */
+function blank(screen: Screen, from: number, to: number): void {
+  const lo = Math.max(0, Math.min(from, screen.chars.length));
+  const hi = Math.max(lo, Math.min(to, screen.chars.length));
+  screen.chars.fill(32, lo, hi);
+  screen.fg.fill(DEFAULT_COLOR, lo, hi);
+  screen.bg.fill(DEFAULT_COLOR, lo, hi);
+  screen.attrs.fill(0, lo, hi);
+}
+
 /**
  * Draw `frame` into `screen`, starting at row `top`.
  *
@@ -188,6 +198,22 @@ export function parseFrame(screen: Screen, frame: string, top = 0): void {
           x += Math.max(1, params[0] ?? 1);
         } else if (final === "D") {
           x = Math.max(0, x - Math.max(1, params[0] ?? 1));
+        } else if (final === "J") {
+          // Erase display. A real terminal blanks the cells; skipping it left this
+          // parser believing text was still there that the terminal had already wiped,
+          // which is a difference that only shows up on a resize (the one time the
+          // writer sends one). 2 = whole screen, 1 = up to the cursor, 0 = from it on.
+          const mode = params[0] ?? 0;
+          const from = mode === 2 ? 0 : mode === 1 ? 0 : y * screen.width + x;
+          const to = mode === 2 ? screen.chars.length : mode === 1 ? y * screen.width + x : screen.chars.length;
+          blank(screen, from, to);
+        } else if (final === "K") {
+          // Erase in line, same three modes but bounded to the current row.
+          const mode = params[0] ?? 0;
+          const rowStart = y * screen.width;
+          const from = mode === 0 ? rowStart + x : rowStart;
+          const to = mode === 1 ? rowStart + x + 1 : rowStart + screen.width;
+          blank(screen, from, to);
         }
         // Every other CSI is skipped whole — see the file header.
         i = j + 1;
