@@ -105,13 +105,16 @@ function BranchLines({
   return (
     <Box flexDirection="column">
       {lines.map((line, i) => {
-        const color = errored ? "red" : diff ? diffColor(line) : undefined;
-        const dim = !errored && color === undefined;
+        const style = errored ? { color: "red" } : diff ? diffStyle(line) : undefined;
+        const dim = !errored && style === undefined;
+        // Padded to the full content width so the tint is a continuous band rather than
+        // stopping wherever the code happens to end, which reads as a ragged smear.
+        const painted = style?.backgroundColor ? line.padEnd(content) : line;
         return (
           <Box key={i} flexDirection="row" width={columns}>
             <Text dimColor>{i === 0 ? `  ${BRANCH} ` : "    "}</Text>
             <Box width={content}>
-              <Text color={color} dimColor={dim} wrap="truncate-end">{line}</Text>
+              <Text {...style} dimColor={dim} wrap="truncate-end">{painted}</Text>
             </Box>
           </Box>
         );
@@ -149,14 +152,25 @@ function ShellLines({ lines, columns, errored }: { lines: string[]; columns: num
           <Box key={i} flexDirection="row" width={columns}>
             <Text dimColor>{railed ? `    ${RAIL} ` : "    "}</Text>
             <Box width={content}>
-              <Text
-                color={outcome ? (line.startsWith("✓") ? "green" : ERROR_COLOR) : errored && railed ? "red" : undefined}
-                dimColor={railed && !errored}
-                bold={command}
-                wrap="truncate-end"
-              >
-                {line}
-              </Text>
+              {command ? (
+                // The `$` gets its own colour so the command is findable at a glance in
+                // a block of output. It is the one line here the user WROTE, in effect,
+                // and it was previously distinguished only by being bold, which loses
+                // against a screenful of equally plain machine text.
+                <Text wrap="truncate-end">
+                  <Text color={KIND_COLOR.run}>{"$ "}</Text>
+                  <Text bold>{line.slice(2)}</Text>
+                </Text>
+              ) : (
+                <Text
+                  color={outcome ? (line.startsWith("✓") ? "green" : ERROR_COLOR) : errored ? "red" : undefined}
+                  dimColor={railed && !errored}
+                  bold={outcome}
+                  wrap="truncate-end"
+                >
+                  {line}
+                </Text>
+              )}
             </Box>
           </Box>
         );
@@ -165,9 +179,28 @@ function ShellLines({ lines, columns, errored }: { lines: string[]; columns: num
   );
 }
 
-/** Diff line color by prefix; undefined means "not a diff line" (caller dims it). */
-function diffColor(line: string): string | undefined {
-  if (line.startsWith("+")) return "green";
-  if (line.startsWith("-")) return "red";
+/**
+ * How one diff row is painted.
+ *
+ * A tinted BACKGROUND across the row, not just coloured text. Foreground colour alone
+ * was technically correct and read as flat: a `+` and a `-` in slightly different inks,
+ * on a dark terminal, among a dozen other rows. The change a diff is reporting is the
+ * whole reason the row exists, and it should be findable without reading it.
+ *
+ * The tints are dark on purpose. They sit behind ordinary code text that still has to
+ * be legible, so they are a wash rather than a highlight, and the foreground stays the
+ * brighter of the two signals.
+ */
+const ADDED_BG = "#0d2818";
+const REMOVED_BG = "#2d1113";
+
+interface DiffStyle {
+  color?: string;
+  backgroundColor?: string;
+}
+
+function diffStyle(line: string): DiffStyle | undefined {
+  if (line.startsWith("+")) return { color: "green", backgroundColor: ADDED_BG };
+  if (line.startsWith("-")) return { color: "red", backgroundColor: REMOVED_BG };
   return undefined;
 }

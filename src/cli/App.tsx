@@ -2161,8 +2161,8 @@ const BANNER_ROWS = 3;
 /** Always keep at least this much chat visible, even with the command palette open. */
 const MIN_CHAT_ROWS = 3;
 /** Conservative fixed footer cost besides the palette: the blank spacer row, the
- *  status line, the bordered input box, and the tip line. */
-const FOOTER_BASE_ROWS = 7;
+ *  status line, the input's rule and field, and the tip line. */
+const FOOTER_BASE_ROWS = 6;
 /** The palette's own chrome: title, the "Tab completes" hint, top+bottom border. */
 const MENU_CHROME_ROWS = 4;
 
