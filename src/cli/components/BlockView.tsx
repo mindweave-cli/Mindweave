@@ -42,11 +42,6 @@ function WrappedText({ text, width, color }: { text: string; width: number; colo
   );
 }
 
-/** The widest a line of prose is allowed to get, in columns. Around the top of the
- *  range typography settles on for continuous reading; past it the eye starts
- *  missing the start of the next line. */
-const READING_WIDTH = 88;
-
 function BlockViewInner({ block, columns, tightTop }: { block: Block; columns: number; tightTop?: boolean }) {
   const textWidth = Math.max(8, columns - 4);
 
@@ -61,13 +56,15 @@ function BlockViewInner({ block, columns, tightTop }: { block: Block; columns: n
 
     case "assistant": {
       if (!block.text) return null;
-      // Prose is capped at a reading width rather than run to the terminal's edge.
-      // Line length is the oldest measured variable in typography and a wide
-      // terminal is well past the point where the eye starts losing its place on
-      // the return sweep — the answer gets harder to read the bigger the window
-      // gets, which is the wrong way round. Tools and diffs still use the full
-      // width; only prose is bounded, because only prose is read line after line.
-      const proseWidth = Math.min(textWidth, READING_WIDTH);
+      // Prose runs to the same width as everything else on screen.
+      //
+      // It used to be capped at 88 columns on a typographic argument: past roughly
+      // that, the eye starts losing its place on the return sweep. The argument is
+      // real for a page of body text and wrong for this. A terminal is a pane the
+      // reader sized deliberately, and the answer sat in a narrow column with a third
+      // of the window empty beside it, which reads as broken rather than considered.
+      // Widening the window should give you more room, not more margin.
+      const proseWidth = textWidth;
       return (
         <Box marginTop={1} flexDirection="row">
           <Box minWidth={2}><Text>{"●"}</Text></Box>

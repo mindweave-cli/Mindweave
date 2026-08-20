@@ -174,6 +174,13 @@ test("an EDITED file is re-sent even though it is in the working set", async () 
   ctx.workingSetSpans = new Map([[join(dir, "b.ts"), [{ start: 1, end: 99 }]]]);
 
   await fs.writeFile(join(dir, "b.ts"), "export function beta() {\n  return 2;\n}\n");
+  // Push the timestamp forward explicitly. Freshness is mtime PLUS size, and this edit
+  // deliberately keeps the same byte length, so on a filesystem whose mtime granularity
+  // is coarser than the gap between these two lines the file looks untouched and the
+  // read is deduped. That is why this failed only under a full parallel run, where the
+  // machine is loaded enough for both operations to land in the same tick.
+  const soon = new Date(Date.now() + 2_000);
+  await fs.utimes(join(dir, "b.ts"), soon, soon);
   const after = await readSymbolTool.execute({ name: "beta" }, ctx);
   assert.match(after.output, /return 2/, "an edited symbol must come back fresh");
 });

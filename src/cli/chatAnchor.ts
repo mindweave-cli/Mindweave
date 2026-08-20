@@ -79,3 +79,33 @@ export function chatLayout(contentHeight: number, chatRows: number, scrollUp: nu
     scrolled,
   };
 }
+
+/**
+ * Where the reader should sit after the transcript re-wraps at a new width.
+ *
+ * `scrollUp` counts LINES back from the newest, and a line is not a stable unit
+ * across a resize: narrow the terminal and every wrapped paragraph grows more rows,
+ * so the same count lands somewhere else entirely. Being at the bottom survives that
+ * by luck, because zero is zero at any width, but any scrolled-back reader is moved
+ * without touching anything.
+ *
+ * The position is therefore carried as a PROPORTION of the scrollable range, which is
+ * the one thing about "where I was reading" that a re-wrap preserves. It is not exact
+ * — the same fraction of a taller transcript is a slightly different paragraph — but
+ * it keeps the reader within a line or two of where they were, where a raw line count
+ * can move them by pages.
+ *
+ * Pinned to the newest stays pinned, though that falls out of the arithmetic on its
+ * own — a red-check showed the guard below is not what produces it. What the guard is
+ * really for is a NEGATIVE position, which the proportion would carry through into a
+ * negative offset and slide the transcript off the top of the viewport.
+ */
+export function reflowScroll(scrolled: number, oldMaxScroll: number, newMaxScroll: number): number {
+  if (scrolled <= 0) return 0;
+  if (newMaxScroll <= 0) return 0;
+  // Nothing scrollable before means there is no proportion to carry; the reader was
+  // looking at the whole transcript, and the bottom is where they still belong.
+  if (oldMaxScroll <= 0) return 0;
+  const fraction = Math.min(1, scrolled / oldMaxScroll);
+  return Math.min(newMaxScroll, Math.round(fraction * newMaxScroll));
+}

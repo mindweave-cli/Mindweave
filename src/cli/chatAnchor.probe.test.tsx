@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { render, Box, Text } from "ink";
 import { chatLayout } from "./chatAnchor.js";
+import { BlockView } from "./components/BlockView.js";
 
 /** A stdout Ink will happily write frames into. */
 class FakeStdout extends EventEmitter {
@@ -149,3 +150,41 @@ test("a STALE viewport measurement cannot hide the conversation", () => {
     assert.ok(rowOf(rows, "TIPLINE") >= 0, `the tip vanished when chatRows claimed ${claimed}`);
   }
 });
+
+test("PROBE: prose fills the window instead of sitting in a narrow column", () => {
+  // Reported by comparing two windows side by side: the answer wrapped at the same
+  // width whether the terminal was 90 columns or 190, leaving a third of a wide
+  // window empty beside it. Prose was capped at 88 columns on a typographic argument
+  // that is right for a printed page and wrong for a pane the reader sized on purpose.
+  const wide = renderProse(160);
+  const narrow = renderProse(70);
+  assert.ok(
+    wide > narrow + 40,
+    `widening the terminal did not widen the text: ${narrow} columns at 70, ${wide} at 160`,
+  );
+  assert.ok(wide > 120, `a 160 column terminal wrapped prose at ${wide}`);
+});
+
+/** Longest rendered line of an assistant block at a given terminal width. */
+function renderProse(columns: number): number {
+  const stdout = new FakeStdout();
+  stdout.columns = columns;
+  stdout.rows = 24;
+  const stdin = new EventEmitter() as unknown as NodeJS.ReadStream;
+  (stdin as unknown as { isTTY: boolean }).isTTY = false;
+  (stdin as unknown as { setRawMode: () => void }).setRawMode = () => {};
+
+  const text = Array.from({ length: 40 }, (_, i) => `word${i}`).join(" ");
+  const instance = render(
+    <BlockView block={{ kind: "assistant", id: 1, done: true, text }} columns={columns} />,
+    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false },
+  );
+  instance.unmount();
+  const frame = stdout.frames.at(-1) ?? "";
+  return Math.max(
+    0,
+    ...frame
+      .split(/\r?\n/)
+      .map((l) => l.replace(ANSI, "").replace(/\s+$/, "").length),
+  );
+}

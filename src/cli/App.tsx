@@ -49,7 +49,7 @@ import { ApprovalBox } from "./components/ApprovalBox.js";
 import { BlockView } from "./components/BlockView.js";
 import { initialState, reduce, trimNarration, type Action, type Block, type TranscriptState } from "./transcript.js";
 import { enableMouse, readWheel, stripMouse } from "./mouse.js";
-import { chatLayout } from "./chatAnchor.js";
+import { chatLayout, reflowScroll } from "./chatAnchor.js";
 import { virtualWindow } from "./virtualWindow.js";
 import { perf, perfEnabled } from "./perfLog.js";
 import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./groupReveal.js";
@@ -163,6 +163,9 @@ export function App() {
   // The transcript's real rendered height, from measureElement — never estimated.
   const contentRef = useRef<DOMElement | null>(null);
   const [contentHeight, setContentHeight] = useState(0);
+  /** Reading position captured at a width change, pending the first measurement at the
+   *  new width. Null except across that one frame. See the width-change block below. */
+  const reflowFrom = useRef<{ scrolled: number; maxScroll: number } | null>(null);
   // Each block's real rendered height, so blocks off screen can be replaced by a
   // spacer of the exact same size instead of being laid out in full — see
   // `virtualWindow.ts` for why that is the whole performance story, and why exact
@@ -615,6 +618,16 @@ export function App() {
     if (!contentRef.current) return;
     const { height } = measureElement(contentRef.current);
     setContentHeight((h) => (h === height ? h : height));
+    // A resize re-wrapped the transcript and this is the first real height for the new
+    // width, so the reading position recorded above can now be converted into a line
+    // count that means the same thing. Cleared immediately: this must happen once per
+    // resize, not on every measurement afterwards.
+    const from = reflowFrom.current;
+    if (from) {
+      reflowFrom.current = null;
+      const next = reflowScroll(from.scrolled, from.maxScroll, Math.max(0, height - chatRows));
+      setScrollUp((s) => (s === next ? s : next));
+    }
   });
 
   // Measure each block that was rendered without a known height yet, so the next
@@ -1958,6 +1971,12 @@ export function App() {
     // the table away; the frame below renders in full and re-measures.
     blockHeights.current = new WeakMap();
     heightsWidth.current = width;
+    // Remember WHERE the reader was, as a proportion of the scrollable range, before
+    // the re-wrap changes what a line means. `scrollUp` is a line count, and a line is
+    // not the same distance at a different width, so a scrolled reader is otherwise
+    // carried off by a resize they did not intend as navigation. Applied once the new
+    // height has actually been measured — see the effect that consumes this.
+    reflowFrom.current = { scrolled: scrollUp, maxScroll: Math.max(0, contentHeight - chatRows) };
   }
   // Only a MEASURED prefix can be virtualized: a block whose height is unknown cannot
   // be replaced by a spacer, because there is no honest number to give the spacer.
