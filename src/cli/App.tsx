@@ -2020,7 +2020,7 @@ export function App() {
           the command palette), which is the harmless direction to lose content
           in, and only for the one frame until the real footerHeight lands. */}
       <Box flexShrink={0}>
-        <Banner width={width} mode={mode} modelConfig={session.current?.modelConfig} />
+        <Banner width={width} mode={mode} modelConfig={session.current?.modelConfig} busy={busy} />
       </Box>
 
       {/* flexGrow:1 + minHeight:1, NOT a computed height: the footer takes what it
@@ -2184,7 +2184,57 @@ const WHEEL_LINES = 3;
  *  on every render, so this bounds what typing costs in a long conversation. */
 const SCROLLBACK_BLOCKS = 150;
 
-function Banner({ width, mode, modelConfig }: { width: number; mode: ModeId; modelConfig?: ModelConfig }) {
+/**
+ * The loom shuttle that runs beside the name while a turn is working.
+ *
+ * SMOOTHNESS COMES FROM HALF CELLS, not from a faster timer. Box drawing gives four
+ * states for a horizontal run — light `─`, heavy on the left half `╾`, heavy on the
+ * right half `╼`, heavy across `━` — so a shuttle can be positioned to half a column.
+ * On a six-column track that is twelve stops instead of six, and the difference between
+ * gliding and hopping is exactly that. Cycling four glyphs in one cell, which is where
+ * this started, reads as a flicker rather than as travel.
+ *
+ * It ping-pongs rather than looping, because a shuttle on a real loom returns. A wrap
+ * back to the left edge would read as a jump every cycle.
+ *
+ * THE STATE IS LOCAL, and that is the part that matters for cost. Held in App it would
+ * re-render the entire transcript fourteen times a second for six cells; here nothing
+ * above it re-renders at all, and the framebuffer's per-cell diff means the terminal
+ * only ever receives the columns that actually changed.
+ *
+ * Idle runs no timer at all. The track sits still, which is also the honest signal:
+ * motion here means work is happening, so it must not move when none is.
+ */
+const SHUTTLE_CELLS = 6;
+/** How wide the shuttle itself is, in half cells. Two is one full column. */
+const SHUTTLE_SPAN = 2;
+/** One step per frame. ~14fps of travel, far below the render cap, and slow enough to
+ *  read as a deliberate pass rather than a twitch. */
+const SHUTTLE_MS = 70;
+
+function Shuttle({ busy }: { busy: boolean }) {
+  const stops = SHUTTLE_CELLS * 2 - SHUTTLE_SPAN + 1;
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    const id = setInterval(() => setStep((n) => (n + 1) % (stops * 2 - 2)), SHUTTLE_MS);
+    return () => clearInterval(id);
+  }, [busy, stops]);
+
+  if (!busy) return <Text dimColor>{"─".repeat(SHUTTLE_CELLS)}</Text>;
+
+  // Fold the counter back on itself so the shuttle returns instead of wrapping.
+  const pos = step < stops ? step : stops * 2 - 2 - step;
+  let track = "";
+  for (let cell = 0; cell < SHUTTLE_CELLS; cell++) {
+    const left = cell * 2 >= pos && cell * 2 < pos + SHUTTLE_SPAN;
+    const right = cell * 2 + 1 >= pos && cell * 2 + 1 < pos + SHUTTLE_SPAN;
+    track += left && right ? "━" : left ? "╾" : right ? "╼" : "─";
+  }
+  return <Text color="yellow">{track}</Text>;
+}
+
+export function Banner({ width, mode, modelConfig, busy }: { width: number; mode: ModeId; modelConfig?: ModelConfig; busy: boolean }) {
   const m = modeById(mode);
   const left = `Mindweave${appVersion() ? ` v${appVersion()}` : ""}`;
   // Three separate facts, so three separate colours. As one run they read as a single
@@ -2202,11 +2252,13 @@ function Banner({ width, mode, modelConfig }: { width: number; mode: ModeId; mod
   // border below it, so the two anchor the screen the same way instead of
   // the header floating in from the sides while the box touches both edges.
   const innerWidth = Math.max(1, width - 2);
-  const gap = Math.max(1, innerWidth - left.length - right.length);
+  const gap = Math.max(1, innerWidth - left.length - 1 - SHUTTLE_CELLS - right.length);
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Box paddingX={1}>
         <Text bold color="yellow">{left}</Text>
+        <Text>{" "}</Text>
+        <Shuttle busy={busy} />
         <Text>{" ".repeat(gap)}</Text>
         <Text dimColor color={m.color}>{modeText}</Text>
         {modelConfig ? (
