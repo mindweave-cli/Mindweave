@@ -38,6 +38,7 @@ import type OpenAI from "openai";
 import type { Responses } from "openai/resources/responses/responses";
 import { basename } from "node:path";
 import { clientId } from "../clientId.js";
+import { RETRY_MAX_ATTEMPTS } from "../retryPolicy.js";
 import type {
   ModelRequest,
   StreamEvent,
@@ -76,7 +77,12 @@ async function api(): Promise<OpenAI> {
       );
     }
     const { default: OpenAIClient } = await import("openai");
-    client = new OpenAIClient({ apiKey, defaultHeaders: { "User-Agent": clientId() } });
+    // Retries made explicit rather than inherited. These two drivers reach their
+    // provider through a vendor SDK that retries on its own, while the other eleven
+    // go through `openaiCompat/wire.ts` and use `retryPolicy.ts`. Pinning the count
+    // here means a session behaves the same way whichever provider it is pointed at,
+    // and that an SDK upgrade changing its default cannot quietly change ours.
+    client = new OpenAIClient({ apiKey, maxRetries: RETRY_MAX_ATTEMPTS - 1, defaultHeaders: { "User-Agent": clientId() } });
   }
   return client;
 }

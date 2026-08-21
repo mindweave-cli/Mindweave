@@ -31,6 +31,8 @@ import type {
   Usage,
 } from "../types.js";
 import { clientId } from "../clientId.js";
+import { isAbortLike, isRetryable, nextDelayMs, retryAfterMs, RETRY_MAX_ATTEMPTS } from "../retryPolicy.js";
+import { salvagePartialTurn } from "../partialTurn.js";
 
 /** The facts one OpenAI-compatible provider has to supply. */
 export interface CompatProvider {
@@ -331,6 +333,7 @@ export async function consumeStream(
   let usage: Usage | undefined;
   let finishReason: string | null | undefined;
 
+  try {
   for await (const data of sseLines(response)) {
     if (data === "[DONE]") break;
     let chunk: StreamChunk;
@@ -379,6 +382,10 @@ export async function consumeStream(
       }
     }
   }
+  } catch (error) {
+    if (isAbortLike(error)) throw error;
+    return salvagePartialTurn(content, error);
+  }
 
   const assembled: ToolCall[] = [...tools.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -392,6 +399,7 @@ export async function consumeStream(
   const repaired = repair(provider, content, assembled);
   return { ...repaired, usage, stop: toStop(provider, finishReason) };
 }
+
 
 /**
  * Fold a usage object into the shared shape.
@@ -507,19 +515,70 @@ export function requireApiKey(provider: CompatProvider): string {
   return apiKey;
 }
 
+/** Wait, unless the user cancels first — in which case stop immediately rather than
+ *  serving out a backoff nobody is waiting for any more. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    };
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * One request to the provider, retried through the blips.
+ *
+ * The response is returned UNREAD: the caller decides whether to parse it as JSON or
+ * stream it. That is what keeps this safe to retry — every decision here is made from
+ * the status line, before a byte of the body is consumed and before anything reaches
+ * the screen, so a second attempt is a second attempt rather than a duplicate.
+ */
+async function send(provider: CompatProvider, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+  const started = Date.now();
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+    let response: Response | undefined;
+    try {
+      response = await fetch(`${provider.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}`, "User-Agent": clientId() },
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (response.ok) return response;
+      const detail = await response.text().catch(() => "");
+      lastError = new ProviderHttpError(response.status, detail, provider.label, response.statusText);
+    } catch (error) {
+      // A cancel is not a fault and must never be slept on or tried again.
+      if (isAbortLike(error)) throw error;
+      lastError = error;
+    }
+
+    const status = response ? response.status : null;
+    if (!isRetryable(lastError, status)) throw lastError;
+    if (attempt === RETRY_MAX_ATTEMPTS) break;
+
+    const delay = nextDelayMs(attempt, Date.now() - started, retryAfterMs(response?.headers.get("retry-after")));
+    // Null means the wait would outlast the budget. Surfacing the provider's own
+    // sentence, which usually names the cooldown, beats sleeping through it silently.
+    if (delay === null) break;
+    await sleep(delay, signal);
+  }
+  throw lastError;
+}
+
 /** POST to chat/completions, returning the parsed JSON body. */
 async function post(provider: CompatProvider, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}`, "User-Agent": clientId() },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new ProviderHttpError(response.status, detail, provider.label, response.statusText);
-  }
-  return response.json();
+  return (await send(provider, body, signal)).json();
 }
 
 /** POST a streaming request, returning the raw response for SSE reading. */
@@ -528,17 +587,7 @@ async function postStream(
   body: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<Response> {
-  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireApiKey(provider)}`, "User-Agent": clientId() },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new ProviderHttpError(response.status, detail, provider.label, response.statusText);
-  }
-  return response;
+  return send(provider, body, signal);
 }
 
 /** One entry from an OpenAI-compatible `GET /models` listing. */

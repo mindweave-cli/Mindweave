@@ -25,6 +25,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { basename } from "node:path";
 import { clientId } from "../clientId.js";
+import { RETRY_MAX_ATTEMPTS } from "../retryPolicy.js";
+import { isAbortLike } from "../retryPolicy.js";
+import { salvagePartialTurn } from "../partialTurn.js";
 import { extractSearch, SEARCH_MAX_USES, SEARCH_SYSTEM } from "../searchBlocks.js";
 import { cacheBreakpoints, needsLadder } from "./cachePoints.js";
 import type {
@@ -69,7 +72,12 @@ function api(): Anthropic {
           "(A per-project .env or an exported shell variable also works.)",
       );
     }
-    client = new Anthropic({ apiKey, defaultHeaders: { "User-Agent": clientId() } });
+    // Retries made explicit rather than inherited. These two drivers reach their
+    // provider through a vendor SDK that retries on its own, while the other eleven
+    // go through `openaiCompat/wire.ts` and use `retryPolicy.ts`. Pinning the count
+    // here means a session behaves the same way whichever provider it is pointed at,
+    // and that an SDK upgrade changing its default cannot quietly change ours.
+    client = new Anthropic({ apiKey, maxRetries: RETRY_MAX_ATTEMPTS - 1, defaultHeaders: { "User-Agent": clientId() } });
   }
   return client;
 }
@@ -417,14 +425,23 @@ export async function streamTurn(req: ModelRequest, options: StreamOptions = {})
     signal: options.signal,
   });
 
-  if (options.onEvent) {
-    for await (const event of stream) {
-      emit(event, options.onEvent);
+  // Accumulated alongside the emit so a stream that dies partway can still hand back
+  // what the user watched arrive. Only the onEvent path needs it: with no sink nothing
+  // reached the screen, so there is no visible reply to keep in step with.
+  let seen = "";
+  try {
+    if (options.onEvent) {
+      for await (const event of stream) {
+        if (event.type === "content_block_delta" && event.delta.type === "text_delta") seen += event.delta.text;
+        emit(event, options.onEvent);
+      }
     }
+    const message = await stream.finalMessage();
+    return { ...toTurn(message), usage: toUsage(message.usage) };
+  } catch (error) {
+    if (isAbortLike(error)) throw error;
+    return salvagePartialTurn(seen, error);
   }
-
-  const message = await stream.finalMessage();
-  return { ...toTurn(message), usage: toUsage(message.usage) };
 }
 
 /**
