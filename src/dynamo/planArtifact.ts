@@ -32,6 +32,7 @@
  * it, edit it, or delete it (deleting deactivates it — the user always wins).
  */
 import { promises as fs } from "node:fs";
+import { writeFileAtomic } from "../tools/atomicWrite.js";
 import { dirname, join } from "node:path";
 
 export const PLAN_DIR = ".mindweave";
@@ -64,7 +65,9 @@ export async function savePlanArtifact(root: string, plan: string, mode: PlanArt
   ].join("\n");
   const path = planPath(root);
   await fs.mkdir(dirname(path), { recursive: true });
-  await fs.writeFile(path, body, "utf8");
+  // Atomic: an approved plan is a decision the user made once, and the engine
+  // refuses to improvise around a plan it cannot read.
+  await writeFileAtomic(path, body);
 }
 
 /** Load the current artifact. Null when there is none, the file was deleted, or
@@ -94,7 +97,7 @@ export async function completePlanArtifact(root: string): Promise<void> {
   const path = planPath(root);
   try {
     const text = await fs.readFile(path, "utf8");
-    await fs.writeFile(path, text.replace("status=active", "status=done"), "utf8");
+    await writeFileAtomic(path, text.replace("status=active", "status=done"));
   } catch {
     // No artifact is already the desired end state.
   }

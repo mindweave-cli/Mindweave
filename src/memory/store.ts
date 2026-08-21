@@ -22,6 +22,7 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { writeFileAtomic } from "../tools/atomicWrite.js";
 import type { Entry, Session, SessionMeta } from "./types.js";
 
 /** Turn a project path into a single safe directory name (e.g. `D:\proj` → `D--proj`). */
@@ -96,7 +97,17 @@ export async function saveSession(session: Session): Promise<boolean> {
     await fs.mkdir(dir, { recursive: true });
 
     const lines = session.transcript.map((e) => JSON.stringify(e)).join("\n");
-    await fs.writeFile(transcriptPath(session.cwd, session.id), lines + "\n", "utf8");
+    // ATOMIC, like every other write in the project. `fs.writeFile` truncates the
+    // destination and then streams the new bytes in, so between those two moments the
+    // file on disk is empty or half-written. This file is rewritten WHOLE on every
+    // persist — before each tool batch, after each result, after each reply — so a
+    // session crossing that window is not exotic, and the crash that lands there is
+    // exactly the kind this project has already met (an OOM kill runs no handlers).
+    // What is lost is the user's entire conversation, and a zero-byte transcript is
+    // unrecoverable rather than merely damaged: the resume path finds nothing at all.
+    // The same reasoning already protects the user's SOURCE files; their session was
+    // the one thing still written the unsafe way.
+    await writeFileAtomic(transcriptPath(session.cwd, session.id), lines + "\n");
 
     // Extra roots = everything on the tool context beyond the primary (session.cwd).
     const extraRoots = (session.toolContext.roots ?? []).filter((r) => r !== session.cwd);
@@ -117,11 +128,11 @@ export async function saveSession(session: Session): Promise<boolean> {
       // ones, and that difference is the whole answer.
       ...(session.callLog && session.callLog.length > 0 ? { callLog: session.callLog } : {}),
     };
-    await fs.writeFile(metaPath(session.cwd, session.id), JSON.stringify(meta, null, 2), "utf8");
+    await writeFileAtomic(metaPath(session.cwd, session.id), JSON.stringify(meta, null, 2));
 
     // Session-memory notes sidecar (the maintained running state), when present.
     if (session.sessionMemory && session.sessionMemory.trim()) {
-      await fs.writeFile(notesPath(session.cwd, session.id), session.sessionMemory, "utf8");
+      await writeFileAtomic(notesPath(session.cwd, session.id), session.sessionMemory);
     }
     return true;
   } catch {

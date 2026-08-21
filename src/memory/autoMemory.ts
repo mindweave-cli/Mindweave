@@ -29,6 +29,7 @@
  */
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { writeFileAtomic } from "../tools/atomicWrite.js";
 import { projectDir } from "./store.js";
 
 /** The closed set of memory types (mirrors the prompt's taxonomy). */
@@ -129,7 +130,9 @@ export async function saveMemory(projectCwd: string, m: MemoryInput): Promise<Sa
 
   const previous = await existingName(path);
   const updated = previous !== null;
-  await fs.writeFile(path, renderMemoryFile(m), "utf8");
+  // Atomic: cross-session memory is the one thing here that OUTLIVES the session, so a
+  // torn write costs a fact the user expected to be remembered permanently.
+  await writeFileAtomic(path, renderMemoryFile(m));
   await upsertIndexLine(dir, file, `- [${oneLine(m.name)}](${file}) — ${oneLine(m.indexLine)}`);
 
   const replaced = previous && previous !== oneLine(m.name) ? previous : undefined;
@@ -198,9 +201,9 @@ async function upsertIndexLine(dir: string, file: string, line: string): Promise
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
       .trimEnd();
-    await fs.writeFile(indexPath, `${kept}\n${line}\n`, "utf8");
+    await writeFileAtomic(indexPath, `${kept}\n${line}\n`);
   } else {
-    await fs.writeFile(indexPath, `# Memory Index\n\n${line}\n`, "utf8");
+    await writeFileAtomic(indexPath, `# Memory Index\n\n${line}\n`);
   }
 }
 
