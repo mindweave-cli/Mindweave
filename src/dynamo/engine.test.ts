@@ -163,8 +163,11 @@ test("EVERY summarizer rejection counts toward the circuit breaker", () => {
   assert.ok(body);
   // Pin the property, not a count: BOTH ways out — a thrown error and a reply that
   // came back unusable — have to go through the same failure path.
-  assert.match(body, /if \(!usable\) return void fail\(\);/, "an unusable reply must count as a failure");
-  assert.match(body, /\} catch \{\s*\n\s*return void fail\(\);/, "a thrown error must count as a failure");
+  // The CALL is what is pinned, not its arguments: `fail` now also names the reason on
+  // screen, and freezing the exact spelling would fail every time that wording improved
+  // while still passing if the call vanished from one of the two paths.
+  assert.match(body, /if \(!usable\) return void fail\(/, "an unusable reply must count as a failure");
+  assert.match(body, /\} catch [\s\S]{0,20}?\{\s*\n\s*return void fail\(/, "a thrown error must count as a failure");
   assert.doesNotMatch(body, /if \(!summary\) return;/, "a bare return skips the breaker");
 });
 

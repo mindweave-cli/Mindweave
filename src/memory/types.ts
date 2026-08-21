@@ -278,6 +278,20 @@ export interface Session {
   /** Whether session memory has been initialized (past the warm-up bar) yet. */
   sessionMemoryInit?: boolean;
   /**
+   * How many transcript entries the notes were written from, i.e. the boundary between
+   * what has been recorded in session memory and what has not.
+   *
+   * A token watermark cannot serve here. Compacting from the notes has to keep every
+   * entry the notes do NOT cover, and "everything after token N" does not name an
+   * entry. See `sessionMemoryCompact.ts`.
+   */
+  sessionMemoryEntries?: number;
+  /** Whether the user has been warned that context is close to the compaction bar.
+   *  Cleared by a successful compaction, so the warning can fire again next time. */
+  compactWarned?: boolean;
+  /** Whether the user has been told autocompact gave up for this session. Told once. */
+  compactGaveUpTold?: boolean;
+  /**
    * When the last model call went out, as epoch ms. In-memory only — deliberately not
    * persisted, because a resumed session's cache is cold regardless of what the file
    * says, and a stale timestamp read back from disk would claim otherwise.

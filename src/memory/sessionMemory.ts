@@ -162,6 +162,10 @@ export async function updateSessionMemory(session: Session): Promise<boolean> {
     if (!notes) return false;
     session.sessionMemory = boundSessionMemory(notes);
     session.sessionMemoryTokens = estimateEntriesTokens(session.transcript);
+    // The boundary compaction-from-notes splits on: everything up to here is written
+    // down, everything after it has to be kept verbatim. Recorded at the same moment
+    // as the notes so the two can never describe different transcripts.
+    session.sessionMemoryEntries = session.transcript.length;
     session.sessionMemoryInit = true;
     return true;
   } catch {

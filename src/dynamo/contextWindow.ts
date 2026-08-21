@@ -133,6 +133,27 @@ export function microBarFor(window: number, summaryReserve = DEFAULT_SUMMARY_RES
   );
 }
 
+/**
+ * How far below the auto bar to start telling the user context is filling up.
+ *
+ * A share rather than a fixed number, so it scales with the model the way every other
+ * bar here does: 20K of warning is most of a small window's usable transcript and a
+ * rounding error on a large one. The point is to give roughly a turn or two of notice,
+ * and a turn is proportional to the window.
+ */
+const WARN_SHARE_OF_AUTO = 0.9;
+
+/**
+ * The point at which the user should be told, once, that a compaction is coming.
+ *
+ * Compaction rewrites the conversation. It is not a failure and it does not need
+ * permission, but arriving with no notice is how a user ends up wondering why the
+ * model forgot the middle of their session.
+ */
+export function warnBarFor(autoBar: number): number {
+  return Math.round(autoBar * WARN_SHARE_OF_AUTO);
+}
+
 /** Autocompact bar for a model, anchored to its driver's numbers. */
 export function autoCompactThreshold(model: string): number {
   return autoBarFor(sharpContextWindow(model), summaryReserveFor(model));

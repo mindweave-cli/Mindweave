@@ -35,12 +35,20 @@ import { selectActiveFiles } from "../memory/workingSet.js";
 import { rippleCheck } from "../tools/editRipple.js";
 import { fullReadPaths } from "../memory/presence.js";
 import {
+  RESTORE_MAX_TOKENS_PER_FILE,
+  renderRestored,
+  restoreBudgetFor,
+  selectForRestore,
+} from "../memory/restore.js";
+import {
   KEEP_LAST_N,
   KEEP_LAST_N_BOUNDARY,
   SUMMARY_REQUEST,
   SUMMARY_SYSTEM_PROMPT,
   dropOldestRounds,
   estimateEntriesTokens,
+  estimateTokens,
+  estimateTokensForChars,
   formatTranscriptForSummary,
   isContinuation,
   microcompact,
@@ -50,6 +58,7 @@ import {
 import { loadPlanArtifact, renderPlanBlock, planDivergenceStop } from "./planArtifact.js";
 import {
   autoCompactThreshold,
+  warnBarFor,
   microCompactThreshold,
   cacheLikelyCold,
   clearIsWorthIt,
@@ -58,6 +67,9 @@ import {
   type CompactionReport,
 } from "./contextWindow.js";
 import { renderSessionMemory, shouldUpdateSessionMemory, updateSessionMemory } from "../memory/sessionMemory.js";
+import { compactFromSessionMemory } from "../memory/sessionMemoryCompact.js";
+import { isContextOverflowError } from "../drivers/contextOverflow.js";
+import { detailOf, providerMessage } from "../drivers/providerError.js";
 
 /** Stop retrying autocompact after this many consecutive failures in a session, so a
  *  transcript that's irrecoverably over the limit can't hammer the summarizer each turn
@@ -917,6 +929,28 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       options.onActivity?.(`prompt cache reset — ${broke.detail}`, { context: true });
     }
 
+    // Shed the oldest whole rounds and retry, ONCE per turn. Shared by both ways a
+    // provider can refuse an over-long conversation, because the remedy is identical
+    // and having two copies of it is how they drift apart.
+    //
+    // Whole rounds, because a round is the only split the wire format guarantees is
+    // safe: every tool result is resolved before the next assistant turn, so a group
+    // starting at an assistant carries its own results. Cutting by entry count can
+    // sever a call from its result and turn a request that was merely too long into
+    // one that is malformed.
+    const shedAndRetry = async (): Promise<boolean> => {
+      if (overflowRecovered) return false;
+      const shed = dropOldestRounds(session.transcript);
+      if (!shed) return false;
+      overflowRecovered = true;
+      session.transcript = shed;
+      await options.persist?.();
+      options.onActivity?.("conversation was too long — dropped the oldest turns and retried", {
+        context: true,
+      });
+      return true;
+    };
+
     try {
       // Stamped BEFORE the call, not after: what matters for the cache is when the
       // request was sent, and a long-running turn would otherwise make the gap look
@@ -925,6 +959,14 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       result = await streamModel(request, options);
     } catch (error) {
       if (isAbort(error)) return interrupted(session);
+      // The other half of overflow, and the half that used to be fatal. Two of the
+      // thirteen providers report an over-long conversation as a finish reason on a
+      // successful response, which the branch below already recovers. Every other one
+      // REJECTS the request, and a rejection arrives here as a thrown error that
+      // `providerError.ts` rightly treats as our bug and surfaces loudly. For length
+      // specifically it is not our bug and it is recoverable, so it gets the same
+      // remedy rather than ending the turn. See drivers/contextOverflow.ts.
+      if (isContextOverflowError(error) && (await shedAndRetry())) continue;
       throw error;
     }
     const { content, toolCalls } = result;
@@ -949,31 +991,12 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     // Without checking, a reply cut off at the output ceiling looks identical to a
     // complete one and the loop carries on with half an answer.
     if (result.stop && result.stop !== "end") {
-      // Overflow is RECOVERABLE, and used not to be. The provider refused the request
-      // because the conversation no longer fits; the turn then ended and the user was
-      // told to compact by hand, mid-task, having already paid for the refused call.
-      //
-      // Dropping the OLDEST whole rounds and retrying is what makes that a hiccup
-      // instead of a stop. Whole rounds, because a round is the only split the wire
-      // format guarantees is safe — every tool result is resolved before the next
-      // assistant turn, so a group starting at an assistant carries its own results.
-      // Cutting by entry count can sever a call from its result and turn a request that
-      // was merely too long into one that is malformed.
-      //
-      // ONCE per turn: if a conversation is still too long after shedding its oldest
-      // rounds, retrying again is a loop, and autocompact is the right instrument.
-      if (result.stop === "overflow" && !overflowRecovered) {
-        const shed = dropOldestRounds(session.transcript);
-        if (shed) {
-          overflowRecovered = true;
-          session.transcript = shed;
-          await options.persist?.();
-          options.onActivity?.("conversation was too long — dropped the oldest turns and retried", {
-            context: true,
-          });
-          continue;
-        }
-      }
+      // Overflow is RECOVERABLE, and used not to be. The provider said the conversation
+      // no longer fits; the turn then ended and the user was told to compact by hand,
+      // mid-task, having already paid for the refused call. Shedding the oldest rounds
+      // makes it a hiccup instead of a stop. Once per turn: if it is still too long
+      // afterwards, retrying again is a loop and autocompact is the right instrument.
+      if (result.stop === "overflow" && (await shedAndRetry())) continue;
       const note = stopReasonNote(result.stop);
       if (content.trim()) session.transcript.push({ role: "assistant", content });
       await options.persist?.();
@@ -1658,12 +1681,40 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
       // Silent by design — trimming stale context is background machinery.
     }
   }
+  // Say it is coming, once, before it happens. Compaction rewrites the conversation,
+  // and arriving with no notice is how a user ends up wondering why the model forgot
+  // the middle of their session. Cleared by a successful compaction so the next
+  // approach warns again.
+  if (!session.compactWarned && used() >= warnBarFor(autoBar) && used() < autoBar) {
+    session.compactWarned = true;
+    options.onActivity?.(
+      `context is ${Math.round((used() / autoBar) * 100)}% of the way to a compaction`,
+      { context: true },
+    );
+  }
+
+  if (used() < autoBar) return;
+
   // Circuit-breaker: once autocompact has failed MAX_COMPACT_FAILURES times this
   // session, stop trying (the transcript is likely irrecoverable) rather than burning
   // a doomed summarizer call every turn.
-  if (used() >= autoBar && (session.compactFailures ?? 0) < MAX_COMPACT_FAILURES) {
-    await autocompact(session, options);
+  if ((session.compactFailures ?? 0) >= MAX_COMPACT_FAILURES) {
+    // Giving up SILENTLY was the real defect here. The breaker stopped the runaway
+    // retries it was built for and then left the session running unmanaged, past the
+    // bar, with nothing on screen to say so — so the user's next clue was a provider
+    // error they had no way to connect to compaction. Told once, not per step.
+    if (!session.compactGaveUpTold) {
+      session.compactGaveUpTold = true;
+      options.onActivity?.(
+        `compaction failed ${MAX_COMPACT_FAILURES} times and has stopped retrying — ` +
+          `context will keep growing. /compact to try again, or start a new session.`,
+        { context: true },
+      );
+    }
+    return;
   }
+
+  await autocompact(session, options);
 }
 
 /**
@@ -1671,15 +1722,34 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
  * of size. Safe on a short transcript — it just summarizes what's there.
  */
 export async function compactNow(session: Session, options: RespondOptions = {}): Promise<void> {
+  // Clear the stale tool bodies BEFORE summarizing. The summarizer is billed on what it
+  // is shown, and a transcript full of superseded file dumps costs real money to have
+  // condensed into one line of "we read some files". The automatic path already does
+  // both in order; the manual one used to jump straight to the expensive half.
+  //
+  // Unconditional, unlike the automatic pass: `clearIsWorthIt` weighs a clear against
+  // the cache rewrite it causes, and a compaction is about to discard that cache
+  // anyway, so the argument for holding back does not apply here.
+  session.transcript = microcompact(session.transcript).entries;
   await autocompact(session, options);
 }
 
 /**
- * Replace the old prefix of the transcript with a 9-section summary, keep the
- * last N turns verbatim, then re-read the working-set files so nothing the model
- * was mid-edit on is lost. The one model call here is small relative to
- * DeepSeek's 1M window (the transcript triggered at ~90K), so — unlike agents on
- * a ~200K model — there's no prompt-too-long risk to retry around.
+ * Replace the old prefix of the transcript with a summary and keep the last N turns
+ * verbatim.
+ *
+ * Two ways to get that summary, cheapest first. The session notes are tried before the
+ * summarizer, because they already ARE a maintained record of the session and cost
+ * nothing; only when they are missing, empty or too stale to cover the prefix is a
+ * model call spent. See `memory/sessionMemoryCompact.ts`.
+ *
+ * The summarizer call is sized to fit by construction rather than by luck: the auto bar
+ * is the window minus the driver's declared output reserve minus turn headroom, so a
+ * transcript that has just crossed it, plus the reserve the reply needs, still sits
+ * inside the window. Verified across every model in the registry, not assumed. (This
+ * comment previously justified the same thing with "DeepSeek's 1M window" and a 90K
+ * trigger, both of which stopped being true when the bars became model-anchored and the
+ * driver lineup grew past two.)
  */
 async function autocompact(session: Session, options: RespondOptions): Promise<void> {
   if (session.transcript.length === 0) return;
@@ -1687,14 +1757,43 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
   // so the bar the user sees is the number the system actually acted on.
   const before = contextUsed(session);
 
-  const fail = () => {
+  const fail = (why: string) => {
     // Keep the full transcript rather than lose it, and count the failure so the
     // circuit-breaker can stop retrying a doomed compaction. EVERY rejection counts,
     // not just a thrown error: a summarizer that keeps returning something unusable
     // burns a model call on every step forever, which is the exact runaway the
     // breaker exists to stop.
     session.compactFailures = (session.compactFailures ?? 0) + 1;
+    // And SAY so. A compaction that silently does not happen leaves the session
+    // running past its bar with no sign anything is wrong; the user cannot ask for
+    // /compact, or start a fresh session, over a problem nobody mentioned.
+    options.onActivity?.(
+      `compaction did not succeed (${why}) — the conversation was kept intact, ` +
+        `attempt ${session.compactFailures} of ${MAX_COMPACT_FAILURES}`,
+      { context: true },
+    );
   };
+
+  // Free first. The notes are a structured, continuously-refreshed record of this
+  // session maintained outside the transcript, which is very nearly what the
+  // summarizer is about to be paid to produce. When they are current enough to cover
+  // the prefix being dropped, spending a model call buys something already owned.
+  // Declines rather than approximates: stale or empty notes fall through.
+  const fromNotes = compactFromSessionMemory(
+    session.transcript,
+    session.sessionMemory,
+    session.sessionMemoryEntries,
+    envInt("MINDWEAVE_AUTOCOMPACT_TOKENS", autoCompactThreshold(session.modelConfig.model)),
+    contextUsed(session) - estimateEntriesTokens(session.transcript),
+  );
+  if (fromNotes) {
+    session.transcript = fromNotes.entries;
+    // The notes now describe everything before the tail they were spliced in front of.
+    session.sessionMemoryEntries = 1;
+    session.sessionMemoryTokens = estimateEntriesTokens(session.transcript);
+    await finishCompaction(session, options, before);
+    return;
+  }
 
   let summary: string;
   try {
@@ -1712,18 +1811,38 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
     // by exactly the work nobody could see.
     if (turn.usage) options.onEvent?.({ type: "usage", ...turn.usage });
     const usable = usableSummary(turn.content, turn.stop);
-    if (!usable) return void fail();
+    if (!usable) return void fail(turn.stop && turn.stop !== "end" ? `the summary came back ${turn.stop}` : "the summary was unusable");
     summary = usable;
-  } catch {
-    return void fail();
+  } catch (error) {
+    return void fail(providerMessage(detailOf(error)) || "the summarizer call failed");
   }
-  session.compactFailures = 0; // a clean compaction resets the breaker
 
   // A summary replaces the transcript prefix, so file contents read before it are gone.
   // Nothing re-injects them: the working-set block that used to do so was removed for
   // costing up to 12K per model call. The model re-reads what it still needs, which
   // read_file allows because the summary also clears the presence set the dedup checks.
   session.transcript = spliceSummary(session.transcript, summary, KEEP_LAST_N);
+  // The notes no longer describe the transcript they were measured against, and the
+  // summary now covers everything before the kept tail.
+  session.sessionMemoryEntries = 1;
+  session.sessionMemoryTokens = estimateEntriesTokens(session.transcript);
+  await finishCompaction(session, options, before);
+}
+
+/**
+ * The half of a compaction that is the same however the new transcript was produced.
+ *
+ * Shared by the summarizer path and the session-notes path deliberately: every one of
+ * these steps is a consequence of "the transcript was just rewritten", not of how it
+ * was rewritten, and the two paths silently disagreeing about which of them ran is a
+ * defect that would only show up as an unexplained cache warning or a stale memory
+ * file weeks later.
+ */
+async function finishCompaction(session: Session, options: RespondOptions, before: number): Promise<void> {
+  session.compactFailures = 0; // a clean compaction resets the breaker
+  session.compactWarned = false; // and the approach warning can fire again next time
+
+  await restoreAfterCompaction(session);
 
   // Report it. Compaction is the one context operation worth showing: it REWRITES the
   // conversation, so a user who is not told will later wonder why the model forgot the
@@ -1734,11 +1853,104 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
     window: sharpContextWindow(session.modelConfig.model),
   });
 
+  // The prefix we are about to send bears no resemblance to the last one, and that is
+  // the POINT rather than a problem. Dropping the stored print means the next step has
+  // nothing to diff against and stays quiet, instead of announcing a cache reset the
+  // user cannot act on and did not cause. Only an UNEXPLAINED break is worth a line.
+  session.prefixPrint = undefined;
+
   // A compaction rewrites the transcript, so any MINDWEAVE.md edit the model was
   // relying on having written is now summarized away — and the prompt cache is being
   // discarded for this request regardless. Both reasons point the same way: this is
   // the moment to pick the file back up, and it costs nothing extra here.
   await reloadProjectMemory(session).catch(() => {});
+}
+
+/**
+ * Reconcile the read ledger with the transcript, and put the working files back.
+ *
+ * Order matters and is the whole design. The ledger is SNAPSHOTTED, then CLEARED, then
+ * repopulated only by the files actually restored — so afterwards it describes exactly
+ * what the model can see, no more. Clearing is the correctness half and it happens
+ * whether or not a single byte is restored: `ctx.reads` survives a compaction that
+ * deleted the contents it describes, and a read-before-edit gate consulting a stale
+ * ledger tells the model it has a file that is no longer on screen.
+ *
+ * Restoring is the smoothness half and is allowed to fail quietly. A file that has been
+ * deleted, or grown past its share of the budget, simply is not put back; the model
+ * reads it again, which is exactly what it would have done anyway.
+ */
+async function restoreAfterCompaction(session: Session): Promise<void> {
+  const ctx = session.toolContext;
+  const reads = ctx.reads;
+  if (!reads || reads.size === 0) return;
+
+  const snapshot = new Map(reads);
+  // The correctness half. Unconditional, and before anything that can throw.
+  reads.clear();
+
+  const budget = restoreBudgetFor(
+    envInt("MINDWEAVE_AUTOCOMPACT_TOKENS", autoCompactThreshold(session.modelConfig.model)),
+  );
+  if (budget <= 0) return;
+
+  // What the kept tail still shows. Re-sending a file the model can already see costs
+  // its full length and buys nothing.
+  const visible = fullReadPaths(session.transcript, (p) => {
+    try {
+      return resolvePath(ctx, p);
+    } catch {
+      return undefined;
+    }
+  });
+
+  const picked = selectForRestore(snapshot, visible, (path) =>
+    // MINDWEAVE.md is reloaded from disk by `reloadProjectMemory` on this same path, so
+    // restoring it here would put the same bytes in twice.
+    /(^|[\\/])MINDWEAVE\.md$/i.test(path),
+  );
+  if (picked.length === 0) return;
+
+  const restored: { path: string; content: string }[] = [];
+  let spent = 0;
+  for (const { path } of picked) {
+    if (spent >= budget) break;
+    try {
+      const stat = await fsp.stat(path);
+      // Cheap pre-filter on BYTES before reading: a file far past its share should not
+      // be pulled into memory only to be discarded.
+      if (estimateTokensForChars(stat.size) > Math.min(RESTORE_MAX_TOKENS_PER_FILE, budget - spent)) continue;
+      const content = await fsp.readFile(path, "utf8");
+      if (!content.trim()) continue;
+      const cost = estimateTokens(content);
+      // A file that would bust the remaining budget is skipped rather than truncated:
+      // half a file restored under a heading that says "the file you were working in"
+      // is the context-that-lies failure this whole path exists to end.
+      if (spent + cost > budget) continue;
+      restored.push({ path, content });
+      spent += cost;
+      // The ledger may claim this file again, because the model can now genuinely see
+      // it. Recorded from the CURRENT stat, so the freshness gate compares against what
+      // was just read rather than what was read before the compaction.
+      const record = snapshot.get(path);
+      reads.set(path, {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        full: true,
+        touchedAt: Date.now(),
+        ...(record?.focus ? { focus: record.focus } : {}),
+      });
+    } catch {
+      /* a file that cannot be read now is simply not restored */
+    }
+  }
+  if (restored.length === 0) return;
+
+  // Placed immediately after the summary rather than at the end. Both positions render
+  // as a user message and the codebase already emits consecutive ones (background
+  // events do), but index 1 is the only position that cannot interact with tool
+  // pairing in the kept tail no matter what the tail happens to end with.
+  session.transcript.splice(1, 0, { role: "user", content: renderRestored(restored), synthetic: true });
 }
 
 /**

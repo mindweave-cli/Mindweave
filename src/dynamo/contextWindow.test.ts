@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  warnBarFor,
   sharpContextWindow,
   summaryReserveFor,
   autoCompactThreshold,
@@ -133,4 +134,16 @@ test("micro stays below auto for every window and reserve combination", () => {
       assert.ok(micro < auto, `${win}/${reserve}: micro ${micro} must stay below auto ${auto}`);
     }
   }
+});
+
+test("the approach warning sits below the bar and scales with the model", () => {
+  // A fixed 20K of notice is most of a small window's usable transcript and a rounding
+  // error on a large one; the point is roughly a turn or two of warning, and a turn is
+  // proportional to the window.
+  for (const auto of [20_000, 107_000, 171_000, 299_000]) {
+    const warn = warnBarFor(auto);
+    assert.ok(warn < auto, `warning must come before the bar (auto ${auto})`);
+    assert.ok(warn > auto * 0.5, `but not so early it is meaningless (auto ${auto})`);
+  }
+  assert.ok(warnBarFor(299_000) - warnBarFor(107_000) > 0, "a bigger window gets more absolute room");
 });
