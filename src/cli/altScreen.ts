@@ -1,26 +1,26 @@
 /**
  * altScreen.ts — enter/exit the terminal's alternate screen buffer by hand.
  *
- * The installed Ink version (5.2.1) has no built-in `alternateScreen` render
- * option (that landed in Ink 7, which needs React 19 — a two-major-version
- * bump we're not taking just for this). The escape sequences themselves are
- * three lines and stable across every VT100-descended terminal, so we own
- * them directly instead.
+ * Ink has an `alternateScreen` render option, but the sequences are owned here instead:
+ * they have to be paired with the wheel-reporting teardown and written from signal
+ * handlers Ink knows nothing about, so a second owner of the same modes would only
+ * create a way for the two to disagree. They are three lines and stable across every
+ * VT100-descended terminal.
  *
- * Must always be paired with `exitAltScreen()` before the process actually
- * dies, or the user's shell is left showing a blank alternate-screen buffer.
- * Covers the three ways this process ends: a clean exit, a signal (Ctrl+C /
- * kill), and an uncaught exception — each calls the same idempotent restore.
+ * Must always be paired with `exitAltScreen()` before the process actually dies, or the
+ * user's shell is left showing a blank alternate-screen buffer. Covers the ways this
+ * process ends that still run code: a clean exit, a signal (Ctrl+C, kill, or the
+ * terminal window closing), and an uncaught exception — each calls the same idempotent
+ * restore.
+ *
+ * The ways it ends that do NOT run code — a V8 fatal out-of-memory, SIGKILL, a
+ * force-quit — cannot be covered from in here at all. That is what
+ * `mindweave --reset-terminal` is for; see `terminalRestore.ts`.
  */
-const ENTER = "[?1049h";
-const EXIT = "[?1049l";
-const HIDE_CURSOR = "[?25l";
-const SHOW_CURSOR = "[?25h";
-// Wheel reporting is turned on while the app runs (see mouse.ts). Its own
-// cleanup runs on unmount, but a signal or a crash skips React entirely — and a
-// terminal left reporting mouse events spews escape codes into the next shell
-// prompt, so the restore path below turns it off unconditionally.
-const MOUSE_OFF = "[?1006l[?1000l";
+import { TERMINAL_RESTORE } from "./terminalRestore.js";
+
+const ENTER = "\x1b[?1049h";
+const HIDE_CURSOR = "\x1b[?25l";
 
 let active = false;
 
@@ -40,6 +40,13 @@ export function enterAltScreen(): void {
     exitAltScreen();
     process.exit(143);
   });
+  // The terminal window being closed. Node raises this on Windows too, and without a
+  // listener the default action kills the process outright, skipping the restore — which
+  // matters because the same terminal program is usually reopened onto the same profile.
+  process.on("SIGHUP", () => {
+    exitAltScreen();
+    process.exit(129);
+  });
   process.on("uncaughtException", (err) => {
     exitAltScreen();
     // eslint-disable-next-line no-console
@@ -48,10 +55,14 @@ export function enterAltScreen(): void {
   });
 }
 
-/** Restores the primary screen buffer and the cursor. Idempotent — safe to
- *  call from multiple exit paths without double-writing escape codes. */
+/** Restores the primary screen buffer, the cursor, and wheel reporting. Idempotent —
+ *  safe to call from multiple exit paths without double-writing escape codes.
+ *
+ *  Wheel reporting is turned on separately (see mouse.ts) and has its own cleanup on
+ *  unmount, but a signal or a crash skips React entirely, so it is turned off here
+ *  unconditionally rather than being left to a component that may never unmount. */
 export function exitAltScreen(): void {
   if (!active) return;
   active = false;
-  process.stdout.write(MOUSE_OFF + EXIT + SHOW_CURSOR);
+  process.stdout.write(TERMINAL_RESTORE);
 }

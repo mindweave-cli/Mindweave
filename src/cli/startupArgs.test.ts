@@ -59,3 +59,23 @@ test("help names the flags it supports and where the key goes", () => {
   // /help is the in-session list; the two must not be confused for each other.
   assert.match(text, /\/help/);
 });
+
+test("--reset-terminal repairs instead of running or printing", () => {
+  // Not `print`: whether there is a terminal to write escapes to is a question about the
+  // real stdout, and this parser stays pure. Above all not `run` — the terminal is
+  // already misbehaving, and starting a session would put it straight back.
+  assert.equal(parseStartupArgs(["--reset-terminal"]).kind, "reset");
+});
+
+test("--reset-terminal is discoverable", () => {
+  // The flag is worthless if nobody can find it: by the time it is needed the terminal
+  // is spraying escape codes, and --help is where someone looks.
+  assert.match(helpText(), /--reset-terminal/);
+});
+
+test("a near miss is not treated as the repair flag", () => {
+  // Repairing when asked to start a session would look like a crash on launch.
+  for (const arg of ["--reset", "--reset-term", "-r", "reset-terminal"]) {
+    assert.equal(parseStartupArgs([arg]).kind, "run", arg);
+  }
+});

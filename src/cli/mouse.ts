@@ -22,10 +22,11 @@
  * and every other full-screen tool strikes.
  */
 
+import { MOUSE_OFF } from "./terminalRestore.js";
+
 /** Report wheel/button presses (1000) using SGR encoding (1006), the only
  *  encoding that stays correct past column 223. */
 const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
-const MOUSE_OFF = "\x1b[?1006l\x1b[?1000l";
 
 /**
  * An SGR mouse report: `ESC [ < button ; col ; row (M|m)`.

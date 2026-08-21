@@ -18,6 +18,7 @@ import { loadConfig } from "./cli/bootstrap.js";
 import { sweepTempInBackground } from "./tools/tempSweep.js";
 import { parseStartupArgs } from "./cli/startupArgs.js";
 import { enterAltScreen } from "./cli/altScreen.js";
+import { TERMINAL_RESTORE } from "./cli/terminalRestore.js";
 import { instrumentStdout, flush as flushPerf, perf, perfEnabled } from "./cli/perfLog.js";
 import { MAX_FPS } from "./cli/frameRate.js";
 import { framebufferStdout } from "./cli/framebuffer/writer.js";
@@ -29,6 +30,20 @@ import { framebufferStdout } from "./cli/framebuffer/writer.js";
 const startup = parseStartupArgs(process.argv.slice(2));
 if (startup.kind === "print") {
   process.stdout.write(startup.text + "\n");
+  process.exit(0);
+}
+if (startup.kind === "reset") {
+  // Repairing a terminal a dead run left in mouse-reporting mode. Nothing else may run
+  // first: this is typed when the terminal is already misbehaving, and loading config or
+  // sweeping temp would only add ways for it to fail before it writes the one thing it
+  // came to write. Escapes go out only to a real terminal, since into a pipe they would
+  // be corruption rather than repair.
+  if (process.stdout.isTTY) {
+    process.stdout.write(TERMINAL_RESTORE);
+    process.stdout.write("terminal restored\n");
+  } else {
+    process.stdout.write("not a terminal, nothing to restore\n");
+  }
   process.exit(0);
 }
 

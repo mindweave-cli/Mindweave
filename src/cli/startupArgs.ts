@@ -9,9 +9,12 @@
  * Parsing is a pure function returning what to print, so it is testable without
  * spawning a process, and `index.ts` keeps the one side effect: print and exit.
  *
- * Deliberately tiny. Mindweave takes no launch options — it roots at the current
- * directory and everything else is configured in `~/.mindweave/.env` or in-session.
- * Inventing flags here would create a second place to configure the same things.
+ * Deliberately tiny. Mindweave takes no launch CONFIGURATION options — it roots at the
+ * current directory and everything else is set in `~/.mindweave/.env` or in-session, and
+ * inventing flags here would create a second place to configure the same things. What
+ * does belong is the handful of things you ask the command to DO instead of starting a
+ * session: report its version, explain itself, or repair a terminal a previous run left
+ * broken.
  */
 import { appVersion } from "./version.js";
 
@@ -19,7 +22,11 @@ export type Startup =
   /** Start normally. */
   | { kind: "run" }
   /** Print `text` and exit 0. */
-  | { kind: "print"; text: string };
+  | { kind: "print"; text: string }
+  /** Write the terminal-restore sequences and exit 0. Separate from `print` because
+   *  whether there is a terminal to restore is a question about the actual stdout, and
+   *  parsing stays pure. */
+  | { kind: "reset" };
 
 /** `mindweave --version` output: the bare version, which is what scripts parse. */
 export function versionText(): string {
@@ -34,9 +41,14 @@ export function helpText(): string {
     `Mindweave${v ? ` ${v}` : ""} — a terminal coding agent that works inside your repository.`,
     "",
     "Usage:",
-    "  mindweave              start a session in the current directory",
-    "  mindweave --help       show this and exit",
-    "  mindweave --version    print the version and exit",
+    "  mindweave                     start a session in the current directory",
+    "  mindweave --help              show this and exit",
+    "  mindweave --version           print the version and exit",
+    "  mindweave --reset-terminal    put a terminal back in order after a crash",
+    "",
+    "If a run ends badly the terminal can be left reporting mouse events, so every",
+    "scroll writes something like ^[[<64;36;23M into your shell. --reset-terminal",
+    "stops that. It is safe to run at any time.",
     "",
     "Setup:",
     "  Put your model API key in ~/.mindweave/.env, for example:",
@@ -63,6 +75,9 @@ export function parseStartupArgs(argv: readonly string[]): Startup {
   for (const arg of argv) {
     if (arg === "--help" || arg === "-h") return { kind: "print", text: helpText() };
     if (arg === "--version" || arg === "-v") return { kind: "print", text: versionText() };
+    // No short form on purpose: this is typed once in a blue moon, by someone reading it
+    // out of --help, and a one-letter alias for it would be a trap next to -h and -v.
+    if (arg === "--reset-terminal") return { kind: "reset" };
   }
   return { kind: "run" };
 }
