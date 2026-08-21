@@ -386,6 +386,9 @@ export class McpManager {
    * the trust gate — the previous wiring repainted and nothing else.
    */
   private onConnectionChange(): void {
+    // Catalogs are reloaded here (connect, and again on `list_changed`), so this is the
+    // one point every drop passes through, whichever load produced it.
+    for (const connection of this.connections.values()) this.notices.push(...connection.takeToolWarnings());
     this.trustQueue = this.trustQueue.then(() => this.recheckTrust()).catch(() => {});
     this.onChange?.();
   }

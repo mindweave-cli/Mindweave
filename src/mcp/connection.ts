@@ -25,6 +25,7 @@
  */
 import { appVersion } from "../cli/version.js";
 import { parseToolList, type McpToolDef } from "./catalog.js";
+import { paramHeaders } from "./paramHeaders.js";
 import type { McpServerConfig } from "./config.js";
 import { probe, UnsupportedProtocolVersionError, type Negotiated } from "./discover.js";
 import { buildMeta, DEFAULT_CLIENT_CAPABILITIES, cacheDirectiveOf, type CacheDirective } from "./protocol.js";
@@ -91,6 +92,10 @@ export class McpConnection {
   private transport: Transport | null = null;
   private negotiated: Negotiated | null = null;
   private toolDefs: McpToolDef[] = [];
+  /** Tools dropped from the last catalog load, with the reason. Drained by the manager
+   *  into user-facing notices — a tool that silently does not exist is the failure mode
+   *  quarantine already taught us to avoid. */
+  private toolWarnings: string[] = [];
   private promptDefs: McpPrompt[] = [];
   private resourceDefs: McpResource[] = [];
   private templateDefs: McpResourceTemplate[] = [];
@@ -292,11 +297,11 @@ export class McpConnection {
    * A request on the negotiated dialect: `_meta` is attached on stateless servers and
    * omitted on handshake ones, where it would be an unknown field.
    */
-  private async call(method: string, params?: Record<string, unknown>): Promise<unknown> {
+  private async call(method: string, params?: Record<string, unknown>, mirrored?: Record<string, string>): Promise<unknown> {
     if (!this.transport || !this.negotiated) throw new RpcError(-32603, `mcp server '${this.config.name}' is not connected`);
     const meta = buildMeta(this.negotiated.dialect, this.negotiated.version, { name: "mindweave", version: appVersion() });
     const body = meta ? { ...(params ?? {}), _meta: meta } : params;
-    return this.transport.request(method, body);
+    return this.transport.request(method, body, mirrored);
   }
 
   /** Fetch (or refresh) the tool catalog, honouring the server's own `ttlMs`. */
@@ -305,7 +310,12 @@ export class McpConnection {
       if (Date.now() - this.toolsFetchedAt < this.cache.ttlMs) return; // still fresh
     }
     const result = await this.call("tools/list");
-    this.toolDefs = parseToolList(this.config.name, result);
+    this.toolDefs = parseToolList(this.config.name, result, {
+      mirrorsHeaders: this.config.type === "http",
+      onReject: (tool, reason) => {
+        this.toolWarnings.push(`'${this.config.name}' tool '${tool}' was dropped: ${reason}`);
+      },
+    });
     this.cache = cacheDirectiveOf(result);
     this.toolsFetchedAt = Date.now();
   }
@@ -379,9 +389,24 @@ export class McpConnection {
     return parseResourceRead(await this.call("resources/read", { uri }));
   }
 
-  /** Invoke a tool on this server. */
+  /** Invoke a tool on this server.
+   *
+   *  Any parameter the server annotated with `x-mcp-header` is repeated in the headers.
+   *  Not an optimisation: a server MUST reject a call whose annotated value is in the
+   *  body but absent from the headers, so a tool with an annotation is simply uncallable
+   *  without this. The annotations were validated when the catalog was parsed, which is
+   *  why nothing here can fail. */
   async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    return this.call("tools/call", { name, arguments: args });
+    const annotations = this.toolDefs.find((d) => d.name === name)?.paramHeaders;
+    const mirrored = annotations?.length ? paramHeaders(annotations, args) : undefined;
+    return this.call("tools/call", { name, arguments: args }, mirrored);
+  }
+
+  /** Drain warnings about tools dropped from this server's catalog. One-shot. */
+  takeToolWarnings(): string[] {
+    const out = this.toolWarnings;
+    this.toolWarnings = [];
+    return out;
   }
 
   /**

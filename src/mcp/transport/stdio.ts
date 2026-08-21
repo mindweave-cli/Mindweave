@@ -208,6 +208,8 @@ export class StdioTransport implements Transport {
     }
   }
 
+  /** Mirrored headers are accepted and ignored: a pipe has no headers, and the spec lets
+   *  a non-HTTP client ignore `x-mcp-header` annotations entirely. */
   request(method: string, params?: Record<string, unknown>): Promise<unknown> {
     if (this.disposed) return Promise.reject(new RpcError(-32603, "mcp transport is closed"));
     const id = this.nextId++;

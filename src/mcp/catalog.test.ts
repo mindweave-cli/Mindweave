@@ -144,3 +144,40 @@ test("the description cap bounds what one server can cost", () => {
   const perTool = estimateCatalogTokens(defs) / defs.length;
   assert.ok(perTool < (MAX_DESCRIPTION_CHARS / 3.5) * 1.2, `each tool stays near the cap (was ${perTool})`);
 });
+
+test("a tool with a valid x-mcp-header annotation keeps it", () => {
+  const [def] = parseToolList(
+    "srv",
+    { tools: [{ name: "sql", inputSchema: { type: "object", properties: { region: { type: "string", "x-mcp-header": "Region" } } } }] },
+    { mirrorsHeaders: true },
+  );
+  assert.deepEqual(def!.paramHeaders, [{ path: ["region"], header: "Region", type: "string" }]);
+});
+
+test("an invalid annotation drops that tool and only that tool, with a reason", () => {
+  // The spec's remedy is to exclude the tool from tools/list. A whole server going dark
+  // because one definition is malformed would be the worse failure.
+  const rejects: string[] = [];
+  const defs = parseToolList(
+    "srv",
+    {
+      tools: [
+        { name: "good", inputSchema: { type: "object", properties: { a: { type: "string" } } } },
+        { name: "bad", inputSchema: { type: "object", properties: { a: { type: "number", "x-mcp-header": "A" } } } },
+      ],
+    },
+    { mirrorsHeaders: true, onReject: (tool, reason) => rejects.push(`${tool}: ${reason}`) },
+  );
+  assert.deepEqual(defs.map((d) => d.name), ["good"]);
+  assert.equal(rejects.length, 1);
+  assert.match(rejects[0]!, /^bad: /);
+});
+
+test("a transport that sends no headers ignores the annotation entirely", () => {
+  // Explicitly allowed for non-HTTP clients. On a pipe the annotation cannot break a
+  // call, so dropping the tool would cost the user a working tool for nothing.
+  const raw = { tools: [{ name: "bad", inputSchema: { type: "object", properties: { a: { type: "number", "x-mcp-header": "A" } } } }] };
+  const defs = parseToolList("srv", raw);
+  assert.deepEqual(defs.map((d) => d.name), ["bad"]);
+  assert.equal(defs[0]!.paramHeaders, undefined);
+});

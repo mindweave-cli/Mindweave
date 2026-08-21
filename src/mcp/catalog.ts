@@ -23,6 +23,7 @@
  */
 import type { ToolSchema } from "../tools/types.js";
 import { frameExternal } from "../tools/untrusted.js";
+import { scanParamHeaders, type ParamAnnotation } from "./paramHeaders.js";
 
 /**
  * Longest tool description we will pass to the model, in characters.
@@ -43,6 +44,22 @@ export interface McpToolDef {
   description: string;
   inputSchema: Record<string, unknown>;
   readOnly: boolean;
+  /** Parameters this server asked to have mirrored into `Mcp-Param-*` headers, already
+   *  validated. Only populated for transports that actually send headers; empty
+   *  everywhere else, which is also the shape of the overwhelmingly common case. */
+  paramHeaders?: readonly ParamAnnotation[];
+}
+
+/** How a tool list should treat `x-mcp-header` annotations. */
+export interface ToolListOptions {
+  /** True when the transport mirrors body fields into headers, i.e. Streamable HTTP.
+   *  On a pipe the annotations are inert and the spec allows ignoring them, so a tool
+   *  that would be rejected over HTTP stays usable over stdio rather than vanishing for
+   *  a reason that does not apply to it. */
+  readonly mirrorsHeaders?: boolean;
+  /** Told about each tool dropped for a bad annotation, so the user can be shown why
+   *  instead of watching a tool quietly not exist. */
+  readonly onReject?: (tool: string, reason: string) => void;
 }
 
 /**
@@ -88,32 +105,48 @@ export function capDescription(description: string, max = MAX_DESCRIPTION_CHARS)
  * unusable. Defensive on purpose: a server is third-party code and a single malformed
  * tool must not take down the catalog, let alone the session.
  */
-export function parseToolDef(server: string, raw: unknown): McpToolDef | null {
+export function parseToolDef(server: string, raw: unknown, options: ToolListOptions = {}): McpToolDef | null {
   const t = raw as { name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: { readOnlyHint?: unknown } } | null;
   const name = typeof t?.name === "string" ? t.name.trim() : "";
   if (!name || name.length > MAX_TOOL_NAME_CHARS) return null;
+  const inputSchema =
+    t?.inputSchema && typeof t.inputSchema === "object" && !Array.isArray(t.inputSchema)
+      ? (t.inputSchema as Record<string, unknown>)
+      : { type: "object" };
+
+  let paramHeaders: readonly ParamAnnotation[] | undefined;
+  if (options.mirrorsHeaders) {
+    const scan = scanParamHeaders(inputSchema);
+    if (!scan.ok) {
+      // Dropping the tool is the required response, not a choice: we would have to send
+      // headers we cannot construct, and every call would be rejected anyway. One bad
+      // definition must not cost the server's other tools, so this is per-tool.
+      options.onReject?.(name, scan.reason);
+      return null;
+    }
+    if (scan.annotations.length > 0) paramHeaders = scan.annotations;
+  }
+
   return {
     server,
     name,
     description: capDescription(typeof t?.description === "string" ? t.description : ""),
-    inputSchema:
-      t?.inputSchema && typeof t.inputSchema === "object" && !Array.isArray(t.inputSchema)
-        ? (t.inputSchema as Record<string, unknown>)
-        : { type: "object" },
+    inputSchema,
     // `readOnlyHint` is a HINT from an untrusted party. We use it only to widen what a
     // read-only turn may call, never to skip a safety gate.
     readOnly: t?.annotations?.readOnlyHint === true,
+    ...(paramHeaders ? { paramHeaders } : {}),
   };
 }
 
 /** Parse a whole `tools/list` payload, dropping entries that don't survive. */
-export function parseToolList(server: string, result: unknown): McpToolDef[] {
+export function parseToolList(server: string, result: unknown, options: ToolListOptions = {}): McpToolDef[] {
   const tools = (result as { tools?: unknown } | null)?.tools;
   if (!Array.isArray(tools)) return [];
   const out: McpToolDef[] = [];
   const seen = new Set<string>();
   for (const raw of tools) {
-    const def = parseToolDef(server, raw);
+    const def = parseToolDef(server, raw, options);
     // A server that lists the same tool twice would otherwise produce duplicate
     // schemas, which some providers reject outright.
     if (!def || seen.has(def.name)) continue;

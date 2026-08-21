@@ -31,8 +31,15 @@ export interface Notification {
 }
 
 export interface Transport {
-  /** Send a request and resolve with its `result`, or reject with `RpcError`. */
-  request(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  /**
+   * Send a request and resolve with its `result`, or reject with `RpcError`.
+   *
+   * `headers` carries values the caller has already mirrored out of `params` — today the
+   * `Mcp-Param-*` set a server asked for via `x-mcp-header`. It is a hint, not a
+   * contract: a transport with no headers to speak of ignores it, which is exactly what
+   * the spec permits a non-HTTP client to do with those annotations.
+   */
+  request(method: string, params?: Record<string, unknown>, headers?: Record<string, string>): Promise<unknown>;
   /** Fire-and-forget notification (no id, no reply). */
   notify(method: string, params?: Record<string, unknown>): void;
   /** Release the underlying resource. Idempotent.

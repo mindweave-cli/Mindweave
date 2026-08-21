@@ -19,7 +19,11 @@
  * HTTP+SSE (the old two-endpoint transport) is deliberately not implemented. It was
  * deprecated in 2025-03-26 and its sunset has already passed.
  */
+import { META_PROTOCOL_VERSION } from "../protocol.js";
+import { encodeHeaderValue } from "./headerValue.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS, RpcError, type Notification, type Transport } from "./types.js";
+
+export { encodeHeaderValue };
 
 export interface HttpOptions {
   url: string;
@@ -91,6 +95,39 @@ export function drainSseEvents(buffer: string): { events: string[]; rest: string
   return { events, rest };
 }
 
+/**
+ * The metadata headers Streamable HTTP mirrors out of the body so that intermediaries
+ * can route and inspect a request without parsing it (2026-07-28).
+ *
+ * A conforming server checks every one of these against the body and MUST answer a
+ * mismatch, or a missing required header, with 400 and `-32020 HeaderMismatch`. That
+ * cuts both ways, and both directions are load-bearing here: `Mcp-Name` carries
+ * `params.name` or `params.uri` — never the method, which would disagree with the body
+ * on every single `tools/call` — and it is omitted outright when the request has no
+ * target rather than being padded with something that cannot match.
+ *
+ * The body stays the source of truth, which is why the protocol version is read back out
+ * of `_meta` rather than passed in alongside it. Two sources drift; one cannot.
+ */
+export function metadataHeaders(method: string, params?: Record<string, unknown>): Record<string, string> {
+  const headers: Record<string, string> = { "mcp-method": method };
+
+  // `tools/call` and `prompts/get` name their target; `resources/read` addresses one by
+  // uri. Deriving from the value rather than from a list of methods covers those three
+  // and stays correct for anything later that mirrors a target the same way.
+  const target = params?.name ?? params?.uri;
+  if (typeof target === "string") headers["mcp-name"] = encodeHeaderValue(target);
+
+  const meta = params?._meta as Record<string, unknown> | undefined;
+  const version = meta?.[META_PROTOCOL_VERSION];
+  // Absent on the handshake dialect, where the version was agreed once in `initialize`
+  // and there is no `_meta` to mirror. Asserting a version we did not take from the body
+  // would manufacture the very disagreement this header exists to prevent.
+  if (typeof version === "string") headers["mcp-protocol-version"] = version;
+
+  return headers;
+}
+
 export class HttpTransport implements Transport {
   private nextId = 1;
   private disposed = false;
@@ -109,7 +146,7 @@ export class HttpTransport implements Transport {
     });
   }
 
-  async request(method: string, params?: Record<string, unknown>): Promise<unknown> {
+  async request(method: string, params?: Record<string, unknown>, mirrored?: Record<string, string>): Promise<unknown> {
     if (this.disposed) throw new RpcError(-32603, "mcp transport is closed");
     const id = this.nextId++;
     const message = { jsonrpc: "2.0", id, method, ...(params ? { params } : {}) };
@@ -128,11 +165,13 @@ export class HttpTransport implements Transport {
           // The client says it takes either shape; the SERVER picks. A single result
           // comes back as JSON, a long-running call upgrades to a stream.
           accept: "application/json, text/event-stream",
-          // Required on Streamable HTTP POSTs as of 2026-07-28, so intermediaries can
-          // route without parsing the body.
-          "mcp-method": method,
-          "mcp-name": method,
           ...(this.options.headers ?? {}),
+          // Mirrored last, so configuration cannot overwrite them. These are not
+          // settings — they are a restatement of the body, checked against it by the
+          // server, and a configured header that disagreed would earn a -32020 on every
+          // call with no way for the user to see why.
+          ...metadataHeaders(method, params),
+          ...(mirrored ?? {}),
         },
         body: JSON.stringify(message),
       });
@@ -177,8 +216,7 @@ export class HttpTransport implements Transport {
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        "mcp-method": method,
-        "mcp-name": method,
+        ...metadataHeaders(method, params),
         ...(this.options.headers ?? {}),
       },
       body: JSON.stringify({ jsonrpc: "2.0", method, ...(params ? { params } : {}) }),
@@ -213,8 +251,7 @@ export class HttpTransport implements Transport {
       headers: {
         "content-type": "application/json",
         accept: "text/event-stream",
-        "mcp-method": method,
-        "mcp-name": method,
+        ...metadataHeaders(method, params),
         ...(this.options.headers ?? {}),
       },
       // No id: nothing resolves this, and a stream is not a request/response pair.

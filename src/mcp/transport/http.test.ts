@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RpcError } from "./types.js";
-import { HttpTransport, drainSseEvents, findResponse, httpErrorCode, parseSseEvents } from "./http.js";
+import { HttpTransport, drainSseEvents, encodeHeaderValue, findResponse, httpErrorCode, parseSseEvents } from "./http.js";
 
 /** A fetch stub that records the request and replies with whatever it is given. */
 function stubFetch(reply: { body: string; contentType?: string; status?: number }) {
@@ -76,12 +76,75 @@ test("the required 2026-07-28 headers are sent, and no session header is", async
   await t.request("tools/list");
   const headers = seen[0]!.init.headers as Record<string, string>;
   assert.equal(headers["mcp-method"], "tools/list");
-  assert.equal(headers["mcp-name"], "tools/list");
+  // `tools/list` has no target, so there is nothing for `Mcp-Name` to mirror. Filling it
+  // with the method would disagree with the body and earn a -32020.
+  assert.ok(!("mcp-name" in headers));
   assert.match(headers.accept!, /application\/json/);
   assert.match(headers.accept!, /text\/event-stream/);
   assert.equal(headers.authorization, "Bearer t", "configured headers are passed through");
   // Sessions were removed from the transport in 2026-07-28.
   assert.ok(!Object.keys(headers).some((k) => /session/i.test(k)));
+  await t.close();
+});
+
+test("mirrored headers carry the body's values, not the method", async () => {
+  const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+  const t = new HttpTransport({ url: "https://x.dev/mcp", fetchImpl: impl });
+  const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28" };
+  await t.request("tools/call", { name: "get_weather", arguments: { location: "Seattle, WA" }, _meta: meta });
+
+  const headers = seen[0]!.init.headers as Record<string, string>;
+  const body = JSON.parse(seen[0]!.init.body as string);
+  assert.equal(headers["mcp-method"], "tools/call");
+  assert.equal(headers["mcp-name"], "get_weather", "Mcp-Name mirrors params.name");
+  assert.equal(headers["mcp-protocol-version"], "2026-07-28");
+  // The rule a conforming server enforces: every mirrored header equals its body field.
+  assert.equal(headers["mcp-method"], body.method);
+  assert.equal(headers["mcp-name"], body.params.name);
+  assert.equal(headers["mcp-protocol-version"], body.params._meta["io.modelcontextprotocol/protocolVersion"]);
+  await t.close();
+});
+
+test("resources/read mirrors the uri; prompts/get mirrors the name", async () => {
+  // A fresh transport each time: the stub answers to id 1, and ids do not reset.
+  const nameFor = async (method: string, params: Record<string, unknown>) => {
+    const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+    const t = new HttpTransport({ url: "https://x.dev/mcp", fetchImpl: impl });
+    await t.request(method, params);
+    await t.close();
+    return (seen[0]!.init.headers as Record<string, string>)["mcp-name"];
+  };
+  assert.equal(await nameFor("resources/read", { uri: "file:///projects/myapp/config.json" }), "file:///projects/myapp/config.json");
+  assert.equal(await nameFor("prompts/get", { name: "review" }), "review");
+});
+
+test("a version is only claimed when the body carries one", async () => {
+  const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+  const t = new HttpTransport({ url: "https://x.dev/mcp", fetchImpl: impl });
+  // The handshake dialect agrees a version in `initialize` and sends no `_meta`; a header
+  // invented here could only ever contradict the body.
+  await t.request("tools/call", { name: "x" });
+  assert.ok(!("mcp-protocol-version" in (seen[0]!.init.headers as Record<string, string>)));
+  await t.close();
+});
+
+test("header values outside the safe set travel in the base64 sentinel", () => {
+  // Vectors published in the 2026-07-28 Value Encoding table, so this checks the
+  // encoding against the spec rather than against itself.
+  assert.equal(encodeHeaderValue("us-west1"), "us-west1");
+  assert.equal(encodeHeaderValue("Hello, 世界"), "=?base64?SGVsbG8sIOS4lueVjA==?=");
+  assert.equal(encodeHeaderValue(" padded "), "=?base64?IHBhZGRlZCA=?=");
+  assert.equal(encodeHeaderValue("line1\nline2"), "=?base64?bGluZTEKbGluZTI=?=");
+  // A plain value that merely looks encoded must be encoded too, or a server would
+  // decode something the client never wrote and compare the wrong bytes to the body.
+  assert.equal(encodeHeaderValue("=?base64?literal?="), "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=");
+});
+
+test("an unsafe tool name reaches the header encoded", async () => {
+  const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+  const t = new HttpTransport({ url: "https://x.dev/mcp", fetchImpl: impl });
+  await t.request("tools/call", { name: "поиск" });
+  assert.equal((seen[0]!.init.headers as Record<string, string>)["mcp-name"], "=?base64?0L/QvtC40YHQug==?=");
   await t.close();
 });
 
@@ -171,5 +234,33 @@ test("a refused subscription is an error the caller can shrug off", async () => 
   const { impl } = stubFetch({ body: "", status: 405 });
   const t = new HttpTransport({ url: "https://x.dev/mcp", fetchImpl: impl });
   await assert.rejects(() => t.openStream!("subscriptions/listen", {}), RpcError);
+  await t.close();
+});
+
+test("mirrored param headers reach the wire and survive configured headers", async () => {
+  const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+  const t = new HttpTransport({
+    url: "https://x.dev/mcp",
+    // A configured header deliberately colliding with a mirrored one. Configuration must
+    // not win: these restate the body, and a server rejects any header that disagrees
+    // with it, so an override would break every call with no visible cause.
+    headers: { authorization: "Bearer t", "mcp-param-Region": "eu-west1" },
+    fetchImpl: impl,
+  });
+  await t.request("tools/call", { name: "execute_sql", arguments: { region: "us-west1" } }, { "mcp-param-Region": "us-west1" });
+
+  const headers = seen[0]!.init.headers as Record<string, string>;
+  assert.equal(headers["mcp-param-Region"], "us-west1");
+  assert.equal(headers["mcp-name"], "execute_sql");
+  assert.equal(headers.authorization, "Bearer t", "unrelated configured headers still pass through");
+  await t.close();
+});
+
+test("a request with nothing to mirror sends no param headers", async () => {
+  const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+  const t = new HttpTransport({ url: "https://x.dev/mcp", fetchImpl: impl });
+  await t.request("tools/call", { name: "plain" });
+  const headers = seen[0]!.init.headers as Record<string, string>;
+  assert.ok(!Object.keys(headers).some((k) => k.toLowerCase().startsWith("mcp-param-")));
   await t.close();
 });
