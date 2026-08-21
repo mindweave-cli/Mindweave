@@ -67,6 +67,12 @@ export interface ClientIdentity {
  * migration advice is to pass paths as tool parameters, call the LLM provider directly,
  * and log to stderr. Advertising them would invite servers to use them and would make
  * us responsible for features scheduled to disappear.
+ *
+ * It is also empty of `elicitation`, and that emptiness is now load-bearing rather than
+ * merely absent: under MRTR a server "MUST NOT send an inputRequests that the client has
+ * not declared support for", so declaring nothing is what keeps servers from asking us
+ * questions we have no way to put to the user. Adding a key here without building the UI
+ * behind it would invite exactly the requests we would then have to fail.
  */
 export interface ClientCapabilities {
   extensions?: Record<string, unknown>;
@@ -124,6 +130,56 @@ export type ResultType = "complete" | "input_required";
 export function resultTypeOf(result: unknown): ResultType {
   const t = (result as { resultType?: unknown } | null)?.resultType;
   return t === "input_required" ? "input_required" : "complete";
+}
+
+/**
+ * The three methods a server may answer with `input_required`.
+ *
+ * Closed by the spec — "Servers MUST NOT send InputRequiredResult responses on any other
+ * client requests" — which is why this is a list and not a flag on every call. A
+ * `tools/list` that claimed to need input would be a broken server, and treating it as a
+ * continuation rather than as a catalog would hide that.
+ */
+export const MRTR_METHODS = ["tools/call", "resources/read", "prompts/get"] as const;
+
+/** What a server asked us to go and find out, unpacked from an `InputRequiredResult`. */
+export interface InputRequired {
+  /**
+   * Server-assigned key -> the request it wants answered. The keys are the server's
+   * own and the answers must come back under the same ones, so the map is carried
+   * whole rather than flattened into a list.
+   */
+  readonly inputRequests: Record<string, { method: string }>;
+  /**
+   * Opaque continuation token. MUST be echoed back exactly on the retry, and MUST NOT
+   * be sent at all when the server did not supply one — so "absent" and "empty string"
+   * are genuinely different here and undefined is not a stand-in for either.
+   */
+  readonly requestState?: string;
+}
+
+/**
+ * Read an `InputRequiredResult`, or null if this result is simply complete (pure).
+ *
+ * Nothing is inspected beyond the shape: `requestState` is the server's private
+ * business and the spec forbids parsing it, so it is passed through as the string it
+ * arrived as. From `inputRequests` only the method names are lifted, and only so a
+ * failure can say what was asked for — the params belong to whoever can answer them.
+ */
+export function readInputRequired(result: unknown): InputRequired | null {
+  if (resultTypeOf(result) !== "input_required") return null;
+  const r = result as { inputRequests?: unknown; requestState?: unknown };
+  const requests: Record<string, { method: string }> = {};
+  if (r.inputRequests && typeof r.inputRequests === "object" && !Array.isArray(r.inputRequests)) {
+    for (const [key, value] of Object.entries(r.inputRequests as Record<string, unknown>)) {
+      const method = (value as { method?: unknown } | null)?.method;
+      requests[key] = { method: typeof method === "string" ? method : "unknown" };
+    }
+  }
+  return {
+    inputRequests: requests,
+    ...(typeof r.requestState === "string" ? { requestState: r.requestState } : {}),
+  };
 }
 
 /**

@@ -28,7 +28,7 @@ import { parseToolList, type McpToolDef } from "./catalog.js";
 import { paramHeaders } from "./paramHeaders.js";
 import type { McpServerConfig } from "./config.js";
 import { probe, UnsupportedProtocolVersionError, type Negotiated } from "./discover.js";
-import { buildMeta, DEFAULT_CLIENT_CAPABILITIES, cacheDirectiveOf, type CacheDirective } from "./protocol.js";
+import { buildMeta, DEFAULT_CLIENT_CAPABILITIES, cacheDirectiveOf, readInputRequired, type CacheDirective } from "./protocol.js";
 import { hasPrompts, parsePromptList, type McpPrompt } from "./prompts.js";
 import {
   hasResources,
@@ -59,6 +59,17 @@ export const MAX_CONNECT_ATTEMPTS = 3;
  * and say so; `/mcp` can always retry by hand.
  */
 export const RECONNECT_BACKOFF_MS = [1_000, 4_000, 10_000];
+
+/**
+ * How many extra round trips one MRTR call may take before we give up.
+ *
+ * A server is explicitly allowed to keep answering `input_required` "if they want to
+ * repeatedly prompt the user for information until they have what they need", so nothing
+ * on the server side ever has to stop. Terminating is therefore the client's job. Four
+ * is well past any ordinary exchange (which is one, occasionally two) and small enough
+ * that a server looping on us costs a moment rather than a session.
+ */
+export const MAX_INPUT_ROUNDS = 4;
 
 export type ConnectionState = "pending" | "connected" | "failed" | "needs-auth" | "disabled";
 
@@ -297,6 +308,51 @@ export class McpConnection {
    * A request on the negotiated dialect: `_meta` is attached on stateless servers and
    * omitted on handshake ones, where it would be an unknown field.
    */
+  /**
+   * A call that may take several round trips (MRTR, 2026-07-28).
+   *
+   * A server that cannot finish in one go does not hold a connection open and does not
+   * ask us a question over a side channel — both of those are gone. It returns
+   * `resultType: "input_required"` with an opaque `requestState`, and the client calls
+   * again, echoing that state back. Each attempt is a genuinely independent request with
+   * its own id; nothing on this side is resumed.
+   *
+   * Two rules of the echo are easy to get subtly wrong, so they are explicit below: the
+   * state is whatever THIS round returned, never a value carried over from an earlier
+   * one, and a round that returns no state must be retried with no state rather than
+   * with the last one we happened to hold.
+   *
+   * We answer no `inputRequests`, and that is a consequence of declaring no elicitation
+   * capability rather than an omission here — a conforming server is forbidden from
+   * sending them (see `ClientCapabilities`). If one arrives anyway we fail the call and
+   * say what was asked for. Returning the half-finished result instead, which is what
+   * happened before this existed, told the model the tool had answered.
+   */
+  private async callMultiRound(method: string, params: Record<string, unknown>, mirrored?: Record<string, string>): Promise<unknown> {
+    let requestState: string | undefined;
+    for (let round = 0; round <= MAX_INPUT_ROUNDS; round++) {
+      const body = requestState === undefined ? params : { ...params, requestState };
+      const result = await this.call(method, body, mirrored);
+      const pending = readInputRequired(result);
+      if (!pending) return result;
+
+      const asked = Object.values(pending.inputRequests).map((r) => r.method);
+      if (asked.length > 0) {
+        throw new RpcError(
+          -32603,
+          `mcp server '${this.config.name}' asked for input this client cannot provide (${[...new Set(asked)].join(", ")}). ` +
+            `Mindweave declares no elicitation capability, so a conforming server should not have requested it.`,
+        );
+      }
+      requestState = pending.requestState;
+    }
+    // A server MAY ask again on every attempt, so terminating is our job, not its own.
+    throw new RpcError(
+      -32603,
+      `mcp server '${this.config.name}' still needed more input after ${MAX_INPUT_ROUNDS + 1} attempts at ${method}`,
+    );
+  }
+
   private async call(method: string, params?: Record<string, unknown>, mirrored?: Record<string, string>): Promise<unknown> {
     if (!this.transport || !this.negotiated) throw new RpcError(-32603, `mcp server '${this.config.name}' is not connected`);
     const meta = buildMeta(this.negotiated.dialect, this.negotiated.version, { name: "mindweave", version: appVersion() });
@@ -339,7 +395,7 @@ export class McpConnection {
   /** Render one of this server's prompts. Rejects, because the caller is a command the
    *  user just typed and silence would be worse than an error. */
   async getPrompt(name: string, args: Record<string, string>): Promise<unknown> {
-    return this.call("prompts/get", { name, ...(Object.keys(args).length > 0 ? { arguments: args } : {}) });
+    return this.callMultiRound("prompts/get", { name, ...(Object.keys(args).length > 0 ? { arguments: args } : {}) });
   }
 
   /**
@@ -386,7 +442,7 @@ export class McpConnection {
 
   /** Read one resource by URI. */
   async readResource(uri: string): Promise<McpContentBlock[]> {
-    return parseResourceRead(await this.call("resources/read", { uri }));
+    return parseResourceRead(await this.callMultiRound("resources/read", { uri }));
   }
 
   /** Invoke a tool on this server.
@@ -399,7 +455,7 @@ export class McpConnection {
   async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
     const annotations = this.toolDefs.find((d) => d.name === name)?.paramHeaders;
     const mirrored = annotations?.length ? paramHeaders(annotations, args) : undefined;
-    return this.call("tools/call", { name, arguments: args }, mirrored);
+    return this.callMultiRound("tools/call", { name, arguments: args }, mirrored);
   }
 
   /** Drain warnings about tools dropped from this server's catalog. One-shot. */
