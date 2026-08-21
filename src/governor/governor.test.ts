@@ -253,3 +253,47 @@ test("an absurd number of skills is capped, and the overflow is reported", () =>
   assert.equal(entries.length, 100, "capped at the backstop");
   assert.match(out, /30 more skill\(s\) exist/, "silence here would hide capabilities from the model");
 });
+
+test("the deny-list is not escaped by changing a path's case", () => {
+  // Windows and macOS filesystems are case-insensitive, so `.env` and `.ENV` are ONE
+  // file. A case-sensitive compare let the second spelling straight past a rule written
+  // with the first, and nothing adversarial was needed to hit it: a model that writes
+  // `.ENV` because it saw that spelling somewhere escaped the deny-list and wrote the
+  // very file it was forbidden. Windows is the platform this ships on.
+  const cfg = { root: join("D:", "proj"), patterns: [".env", "src/legacy", "secrets/**"] };
+  const cases: [string, string[]][] = [
+    [".env", [[".env"], [".ENV"], [".Env"]].flat()],
+    ["src/legacy", ["src/legacy/a.ts", "src/Legacy/a.ts", "SRC/legacy/a.ts"]],
+    ["secrets/**", ["secrets/k.pem", "Secrets/k.pem", "SECRETS/k.pem"]],
+  ];
+  for (const [pattern, paths] of cases) {
+    for (const rel of paths) {
+      const abs = join(cfg.root, ...rel.split("/"));
+      assert.equal(forbiddenPathReason(cfg, abs), pattern, `${rel} must be caught by ${pattern}`);
+    }
+  }
+});
+
+test("a path that traverses back into a forbidden folder is still caught", () => {
+  // `..` is resolved before matching, so dressing the path up does not help.
+  const cfg = { root: join("D:", "proj"), patterns: ["src/legacy"] };
+  for (const rel of ["src/legacy/../legacy/secret.ts", "harmless/../src/legacy/secret.ts"]) {
+    assert.equal(forbiddenPathReason(cfg, join(cfg.root, ...rel.split("/"))), "src/legacy", rel);
+  }
+});
+
+test("paths outside the project root stay unmatched by relative patterns", () => {
+  // Deliberate: a relative pattern describes this project. Matching it against another
+  // tree would deny files the rule was never about.
+  const cfg = { root: join("D:", "proj"), patterns: ["src/legacy"] };
+  assert.equal(forbiddenPathReason(cfg, join("D:", "other", "src", "legacy", "a.ts")), null);
+});
+
+test("the shell bypass check is not escaped by case either", () => {
+  // `cat SRC/LEGACY/keys` names the same file on Windows as the lower-case spelling.
+  const cfg = { root: join("D:", "proj"), patterns: ["src/legacy"] };
+  for (const cmd of ["cat src/legacy/keys", "cat SRC/LEGACY/keys", "type Src/Legacy/keys"]) {
+    assert.equal(forbiddenCommandReason(cfg, cmd), "src/legacy", cmd);
+  }
+  assert.equal(forbiddenCommandReason(cfg, "npm test"), null, "unrelated commands still run");
+});

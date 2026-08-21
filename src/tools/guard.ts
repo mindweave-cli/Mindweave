@@ -25,7 +25,18 @@
 // Path segments / names that are off-limits. Matched against the POSIX-style
 // path so it works the same on Windows and Unix.
 const PROTECTED_PATTERNS: { test: RegExp; what: string }[] = [
+  // Three spellings, because two of them were getting through. `.env` and `.env.local`
+  // were covered; `prod.env`, `staging.env` and `production.env` were NOT, and a
+  // per-environment file is one of the commonest places a real secret actually lives.
+  // `.envrc` (direnv) was not covered either, and it routinely holds exported keys.
+  //
+  // The suffix form is anchored to the end of the BASENAME rather than matched loosely,
+  // which is what keeps ordinary code out of the net: `src/environment.ts` and
+  // `src/env.ts` must stay readable, and a floor that blocked those would be worked
+  // around rather than obeyed.
   { test: /(^|\/)\.env(\.|$|\/)/i, what: "an environment/secrets file" },
+  { test: /(^|\/)[^/]*\.env$/i, what: "an environment/secrets file" },
+  { test: /(^|\/)\.envrc$/i, what: "an environment/secrets file" },
   { test: /(^|\/)\.git(\/|$)/i, what: "the git internals directory" },
   { test: /(^|\/)\.ssh(\/|$)/i, what: "an SSH key directory" },
   { test: /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.|$)/i, what: "a private SSH key" },

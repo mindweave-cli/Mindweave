@@ -661,3 +661,29 @@ test("files_with_matches leaves no focus behind — it showed no lines", async (
   await grepDef.execute({ pattern: "TODO", output_mode: "files_with_matches" }, ctx);
   assert.equal(ctx.reads.size, 0, "a path list is not something the model was shown");
 });
+
+test("per-environment secret files are on the hard floor, ordinary code is not", () => {
+  // `.env` and `.env.local` were covered; `prod.env`, `staging.env` and
+  // `production.env` were NOT, and a per-environment file is one of the commonest
+  // places a real secret actually lives. `.envrc` (direnv) routinely holds exported
+  // keys and was also getting through. This floor is the "never, whatever you are
+  // asked" list, so a miss here is not a policy question, it is a hole.
+  for (const p of [
+    "D:/proj/prod.env",
+    "D:/proj/staging.env",
+    "D:/proj/env/production.env",
+    "D:/proj/.envrc",
+    "D:/proj/.env",
+    "D:/proj/.env.local",
+    "C:/Users/x/.mindweave/.env",
+  ]) {
+    assert.ok(protectedPathReason(p), `${p} must never be readable`);
+  }
+
+  // The other half, and the reason the suffix is anchored to the basename rather than
+  // matched loosely: a floor that blocked ordinary source would be worked around
+  // rather than obeyed.
+  for (const p of ["D:/proj/src/environment.ts", "D:/proj/src/env.ts", "D:/proj/docs/secretsanta.md"]) {
+    assert.equal(protectedPathReason(p), null, `${p} is ordinary code and must stay readable`);
+  }
+});

@@ -140,7 +140,11 @@ export function forbiddenPathReason(cfg: ForbiddenConfig | undefined, absPath: s
     if (re.test(rel)) return raw;
     // A bare folder/file prefix matches the path itself and anything under it,
     // so `src/legacy` forbids `src/legacy` and `src/legacy/x.ts` alike.
-    if (prefix && (rel === prefix || rel.startsWith(prefix + "/"))) return raw;
+    // Case-folded, matching globToRegExp: on Windows and macOS `src/Legacy` IS
+    // `src/legacy`, and a sensitive compare let the other spelling through.
+    const lower = prefix.toLowerCase();
+    const relLower = rel.toLowerCase();
+    if (prefix && (relLower === lower || relLower.startsWith(lower + "/"))) return raw;
   }
   return null;
 }
@@ -157,7 +161,10 @@ export function forbiddenCommandReason(cfg: ForbiddenConfig | undefined, command
   for (const { raw, prefix } of compile(cfg.patterns)) {
     // Need a meaningful literal to scan for; a pure-glob pattern like `*.pem`
     // has prefix "" and can't be located in free-form command text.
-    if (prefix.length >= 2 && command.includes(prefix)) return raw;
+    // Case-folded like the path check. `cat SRC/LEGACY/keys` names the same file on
+    // Windows as `src/legacy/keys`, and a sensitive scan is the shell bypass this
+    // function exists to prevent, spelled slightly differently.
+    if (prefix.length >= 2 && command.toLowerCase().includes(prefix.toLowerCase())) return raw;
   }
   return null;
 }
