@@ -18,7 +18,7 @@ import { readFileSync, promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { compactNow } from "./engine.js";
+import { compactNow, toolFailureResult } from "./engine.js";
 import { estimateEntriesTokens } from "../memory/compaction.js";
 import type { Entry, Session } from "../memory/types.js";
 
@@ -240,4 +240,59 @@ test("a file too large for its share is skipped, not truncated", async () => {
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// A throwing tool must never unwind the turn.
+//
+// By the time a tool runs, the assistant entry carrying tool_calls has been pushed
+// AND persisted. A rejection escaping the call site therefore ends the turn with tool
+// calls that have no results, and since the provider requires every tool_call_id to be
+// answered, EVERY later request in that live session is malformed. The transcript is
+// repaired on load, so the damage lasts exactly until the user restarts, which is the
+// worst shape for a fault: the fix is invisible and the session merely looks broken.
+//
+// Probed before building this: all 28 tools, five wrong argument types each, no
+// arguments, and ten Windows path shapes that make `fs` throw. Zero threw. So this is
+// defence in depth against a single point of failure, not a fix for an observed bug,
+// and the next tool added inherits it.
+// ---------------------------------------------------------------------------
+
+test("a thrown tool fault becomes a result the model can act on", () => {
+  const r = toolFailureResult("run_command", new Error("spawn EACCES"));
+  assert.equal(r.isError, true, "it has to read as a failure, not a successful empty result");
+  assert.match(r.output, /run_command tool failed/, "names the tool that broke");
+  assert.match(r.output, /spawn EACCES/, "and carries the reason");
+  // Told only that something failed, a model reliably assumes it called the tool
+  // wrongly and retries the identical call.
+  assert.match(r.output, /fault in the tool, not in your request/);
+});
+
+test("a tool fault never carries a stack trace into the transcript", () => {
+  // A stack is noise to the model, and it names absolute paths that would then be
+  // re-sent to the provider on every later turn of the session.
+  const error = new Error("boom");
+  error.stack = "Error: boom\n    at secretThing (D:\Users\someone\private\path.ts:1:1)";
+  const out = toolFailureResult("edit", error).output;
+  assert.doesNotMatch(out, /\bat \w+ \(/, "no stack frames");
+  assert.doesNotMatch(out, /private\path\.ts/, "no absolute paths from the stack");
+});
+
+test("a non-Error thrown value still produces a usable result", () => {
+  // Nothing stops a library rejecting with a string or an object.
+  for (const thrown of ["just a string", { code: 42 }, null, undefined]) {
+    const r = toolFailureResult("search", thrown);
+    assert.equal(r.isError, true, String(thrown));
+    assert.ok(r.output.length > 0);
+  }
+});
+
+test("the tool call site catches faults but lets an interrupt through", () => {
+  const body = engineSource.match(/const runCall = async \([\s\S]*?\n    \};/)?.[0];
+  assert.ok(body, "runCall not found — did it get renamed?");
+  assert.match(body, /try \{\s*\n\s*result = await tool\.execute\(/, "execute must be guarded");
+  assert.match(body, /toolFailureResult\(call\.name, error\)/, "and a fault must become a result");
+  // Esc is the user, not a fault. Swallowing it here would report a broken tool
+  // instead of an interruption, and the loop would carry on after a cancel.
+  assert.match(body, /if \(isAbort\(error\)\) throw error;/, "an abort must still travel");
 });

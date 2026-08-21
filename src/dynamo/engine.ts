@@ -439,6 +439,28 @@ function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+/**
+ * Shape a thrown tool fault into a result the model can act on (pure).
+ *
+ * The MESSAGE only, never the stack. A stack is noise to the model, and it names
+ * absolute paths that would then live in the user's transcript and be re-sent to the
+ * provider on every later turn.
+ *
+ * It says whose fault it is on purpose. Told only that something failed, a model
+ * reliably assumes it called the tool wrongly and retries the identical call; naming
+ * the tool as the faulty party is what turns a loop into a change of approach.
+ */
+export function toolFailureResult(name: string, error: unknown): { output: string; summary: string; isError: true } {
+  const why = error instanceof Error && error.message ? error.message : String(error);
+  return {
+    output:
+      `The ${name} tool failed unexpectedly: ${why}\n` +
+      `This is a fault in the tool, not in your request. Try a different approach, or tell the user what is not working.`,
+    summary: `${name} failed`,
+    isError: true,
+  };
+}
+
 /** Record and return a clean interrupted reply (well-formed transcript). */
 function interrupted(session: Session): string {
   const msg = "(interrupted)";
@@ -1152,7 +1174,33 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         }
         if (decision === "allow-all") ctx.guardAllowAll = true;
       }
-      const result = await tool.execute(parseArgs(call.arguments), session.toolContext);
+      // A tool must never be able to unwind the turn by throwing, and this is the only
+      // place that can guarantee it.
+      //
+      // The cost of the gap was out of all proportion to its likelihood. By the time a
+      // tool runs, the assistant entry carrying `tool_calls` has been pushed AND
+      // persisted, so a rejection escaping here ends the turn with tool calls that have
+      // no results. That is not merely a lost turn: the provider requires every
+      // tool_call_id to be answered, so EVERY later request in that live session is
+      // malformed. The transcript is repaired on load (reconcileInterruptedTools), which
+      // means the damage lasts exactly until the user restarts — the worst shape for a
+      // fault, because the fix is invisible and the session looks broken.
+      //
+      // Probed before writing this: all 28 tools were called with five wrong argument
+      // types, with no arguments, and with ten Windows path shapes that make `fs` throw
+      // (reserved device names, invalid characters, a null byte, an over-long name).
+      // Zero threw — every one returned an error result. So this catches nothing today
+      // and is deliberately defence in depth: it removes a single point of failure
+      // rather than fixing an observed bug, and the next tool added inherits it.
+      let result;
+      try {
+        result = await tool.execute(parseArgs(call.arguments), session.toolContext);
+      } catch (error) {
+        // An abort is the user, not a fault: let it travel so the loop's own handling
+        // reports an interruption instead of a broken tool.
+        if (isAbort(error)) throw error;
+        return { call, ...toolFailureResult(call.name, error), detail: undefined as string | undefined };
+      }
       return {
         call,
         output: result.output,
