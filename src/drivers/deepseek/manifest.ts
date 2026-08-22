@@ -18,6 +18,9 @@ import type { DriverManifest, Effort, ModelChoice, ModelConfig, ModelId, ModelPr
 
 export const FLASH = "deepseek-v4-flash";
 export const PRO = "deepseek-v4-pro";
+/** The multimodal model, added 2026-08-21. `-exp` is DeepSeek's own suffix: they
+ *  ship it as experimental, and the id is theirs, not a label we chose. */
+export const VISION = "deepseek-v4-flash-vision-exp";
 
 /** The model used when nothing is saved and no env override is set. */
 export const DEFAULT_MODEL = FLASH;
@@ -26,6 +29,7 @@ export const DEFAULT_MODEL = FLASH;
 export const MODELS: ModelChoice[] = [
   { id: FLASH, label: "DeepSeek V4 Flash", description: "fast & cheap — the default" },
   { id: PRO, label: "DeepSeek V4 Pro", description: "stronger, for harder work" },
+  { id: VISION, label: "DeepSeek V4 Flash Vision", description: "reads images — experimental" },
 ];
 
 /**
@@ -58,9 +62,19 @@ const ACCEPTED_EFFORTS = new Set<Effort>(["low", "high", "max"]);
  * The ladder is identical for both, so it is built once. What differs between Flash
  * and Pro is the size of the model underneath, not the settings it accepts.
  */
-export function thinkLevels(_model: ModelId): ThinkLevel[] {
+export function thinkLevels(model: ModelId): ThinkLevel[] {
+  const standard: ThinkLevel = { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" };
+  // The vision model is offered WITHOUT a reasoning ladder, and the omission is
+  // deliberate. DeepSeek's vision guide documents the request shape, the formats and
+  // the image budget, and says nothing at all about `reasoning_effort` on this id.
+  // This driver has already been bitten by assuming a rung exists: `xhigh` was
+  // advertised for a year, is not a value DeepSeek accepts, and so the setting had
+  // never once done anything. Advertising a level that may be rejected is worse than
+  // withholding one that turns out to work, because only the first breaks a request.
+  // Add the other two the moment the docs name them.
+  if (model === VISION) return [standard];
   return [
-    { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" },
+    standard,
     { label: "High", description: "think first, then answer", thinking: true, effort: "high" },
     { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
   ];
@@ -72,6 +86,10 @@ export function thinkLevels(_model: ModelId): ThinkLevel[] {
 const PRICES: Record<string, ModelPrice> = {
   [FLASH]: { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 },
   [PRO]: { cacheHit: 0.028, cacheMiss: 0.28, output: 0.56 },
+  // DeepSeek's price list gives vision exactly Flash's rates, so it is written as the
+  // same numbers rather than derived from them: if Flash's estimate is corrected one
+  // day, that is a judgment about Flash and should not silently move a second model.
+  [VISION]: { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 },
 };
 const DEFAULT_PRICE: ModelPrice = PRICES[FLASH]!;
 
@@ -116,7 +134,24 @@ const PRO_WINDOW = 256_000;
 const FLASH_WINDOW = 192_000;
 
 export function contextWindow(model: ModelId): number {
+  // Vision anchors to Flash. DeepSeek documents the same 1M store for all three and
+  // states its pure-text ability is on par with Flash, so the sharp-window judgment
+  // made for Flash is the one that applies; inventing a separate number for a model
+  // with no published multi-needle curve of its own would be a guess wearing a
+  // decimal point.
   return model === PRO ? PRO_WINDOW : FLASH_WINDOW;
+}
+
+/**
+ * Only the vision model takes image input, and only since 2026-08-21.
+ *
+ * This used to be absent entirely, with a comment recording that as a fact rather
+ * than an oversight. It is now true of exactly one id, so the check is by id and not
+ * by provider: pointing an image at Flash or Pro still degrades before anything is
+ * sent, which is what core does with a false answer here.
+ */
+export function acceptsImages(model: ModelId): boolean {
+  return model === VISION;
 }
 
 /**
@@ -128,14 +163,15 @@ export function contextWindow(model: ModelId): number {
  * switching between them preserves the user's reasoning choice instead of quietly
  * demoting it. See thinkLevels for why the old Pro-only Maximum was wrong.
  */
-// No `acceptsImages` here, and that is the current fact rather than an omission:
-// neither model DeepSeek documents takes image input, so an attached image is named
-// for the model but never sent. Add the function when that changes; nothing in core
-// needs to move.
-
 export function normalize(config: ModelConfig): ModelConfig {
-  const model: ModelId = config.model === PRO ? PRO : FLASH;
-  const thinking = config.thinking === true;
+  // Three ids now, so this can no longer be "PRO or else FLASH": that shape would
+  // have quietly rewritten a vision selection back to Flash, and the user would have
+  // watched their chosen model change itself with no message.
+  const model: ModelId = config.model === PRO ? PRO : config.model === VISION ? VISION : FLASH;
+  // Thinking is forced off on vision for the reason thinkLevels gives none: the flag
+  // is undocumented there, and this is the gate that stops a config saved on another
+  // model carrying one in.
+  const thinking = model === VISION ? false : config.thinking === true;
   // Anything outside DeepSeek's accepted set becomes `high`. That covers a config
   // saved by an older build (which stored `xhigh`) and a rung belonging to another
   // provider. `max` is accepted on BOTH models and is no longer stepped down.
@@ -153,5 +189,6 @@ export const deepseekManifest: DriverManifest = {
   thinkLevels,
   price,
   contextWindow,
+  acceptsImages,
   normalize,
 };

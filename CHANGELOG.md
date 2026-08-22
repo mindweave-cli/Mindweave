@@ -22,6 +22,23 @@ Matching also became case-insensitive. Windows and macOS filesystems are, so `.e
 `.ENV` are one file, and a case-sensitive comparison let the second spelling past a rule
 written with the first.
 
+### DeepSeek can read images
+
+`deepseek-v4-flash-vision-exp` shipped on 2026-08-21 and is now offered by `/model`.
+It reads images; the other two DeepSeek models still do not, and pointing a picture at
+one of those still says so rather than sending the message without it.
+
+Adding it exposed a gap underneath. The shared transport used by eleven providers had
+no way to send an image at all: the field carrying one was our own, spread onto the
+request untouched, so a provider saw an unknown key and the bytes never left the
+machine. A request built that way looks perfectly well formed. That transport now emits
+proper multimodal content, which every provider on it inherits.
+
+The model is offered without a reasoning ladder. DeepSeek documents the request shape,
+the formats and the image budget for it, and says nothing about reasoning effort. This
+driver has already shipped a reasoning level the API does not accept once, so an
+unverified one is not advertised again.
+
 ### Everything else
 
 Long sessions hold together across a summary, a rate limit no longer ends a turn, a

@@ -217,13 +217,38 @@ function wireToolCall(c: NonNullable<ChatMessage["tool_calls"]>[number]): Record
  * step before the bytes leave. Sending `meta` verbatim would put an unknown key on the
  * wire under a name no provider knows.
  */
+/**
+ * Render one message's content, as multimodal parts when it carries images.
+ *
+ * OpenAI's shape, which is what every provider on this transport speaks: `content`
+ * becomes an ARRAY of typed parts instead of a string, and an image is an
+ * `image_url` whose url is a `data:` URI. DeepSeek documents exactly this for its
+ * vision model, so nothing here is provider-specific.
+ *
+ * The text part comes FIRST and is always present, even when empty. A message that
+ * is only images reads as a bare attachment with no request attached to it, and the
+ * text is what carries the user's actual question.
+ */
+function toWireContent(m: ChatMessage): string | Record<string, unknown>[] {
+  if (!m.images || m.images.length === 0) return m.content;
+  return [
+    { type: "text", text: m.content },
+    ...m.images.map((img) => ({
+      type: "image_url",
+      image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+    })),
+  ];
+}
+
 export function toWireMessages(messages: ChatMessage[]): Record<string, unknown>[] {
   return messages.map((m) => {
-    if (!m.tool_calls || m.tool_calls.length === 0) {
-      const { tool_calls: _drop, ...rest } = m;
-      return { ...rest };
-    }
-    return { ...m, tool_calls: m.tool_calls.map(wireToolCall) };
+    // `images` is OUR field, not a wire field. It was previously spread onto the
+    // request untouched, so a provider saw an unknown key and the picture itself
+    // never left the machine — the attachment was silently text-only.
+    const { tool_calls: calls, images: _ours, ...rest } = m;
+    const base = { ...rest, content: toWireContent(m) };
+    if (!calls || calls.length === 0) return base;
+    return { ...base, tool_calls: calls.map(wireToolCall) };
   });
 }
 
