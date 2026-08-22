@@ -7,6 +7,31 @@ Mindweave lands on npm and the numbering resets.
 
 ---
 
+## Unreleased
+
+Work since v1.9.9, not yet given a version.
+
+### Forbidden paths now cover every folder in the workspace
+
+v1.9.9 recorded the opposite, and it was accurate at the time: patterns were measured
+only against the project you opened, so a rule refusing a folder did nothing in one
+added with `/include` while still being listed and still appearing to be in force.
+Paths are now measured against every root in the workspace.
+
+Matching also became case-insensitive. Windows and macOS filesystems are, so `.env` and
+`.ENV` are one file, and a case-sensitive comparison let the second spelling past a rule
+written with the first.
+
+### Everything else
+
+Long sessions hold together across a summary, a rate limit no longer ends a turn, a
+dropped connection keeps the reply you already saw, sessions are written atomically, a
+failing tool cannot take the session with it, and a saved memory can no longer become
+unfindable. Full detail in the commit history until this section is written up properly
+for the release.
+
+---
+
 ## v1.9.9 (2026-08-09): the last three audits
 
 Compaction, session resume, and the governor were the only parts of the core never
