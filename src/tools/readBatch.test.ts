@@ -9,8 +9,9 @@
  * batching moved into the tool, where it does not depend on the model agreeing.
  *
  * What is defended here: the list actually works, one bad path cannot destroy the good
- * results (that would cost the extra round trip this exists to avoid), a range still
- * means one file, and a session resumed from the old single-path schema still runs.
+ * results (that would cost the extra round trip this exists to avoid), a range across a
+ * list is dropped WITHOUT losing a file, and a session resumed from the old single-path schema
+ * still runs.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -75,14 +76,24 @@ test("a single path keeps its old output exactly — no header, no count", async
   assert.match(r.summary ?? "", /^read a\.ts \(/);
 });
 
-test("a range means ONE file, and asking for both is refused", async () => {
+test("a range across a list is dropped, and every file still comes back", async () => {
   // offset/limit name lines. Spread across a list they would return a different slice of
-  // each file, which looks like an answer and is not one.
+  // each file, which looks like an answer and is not one — so the range is ignored.
+  //
+  // It is NOT a failed call. This shape happens for real: a small model filled every
+  // parameter it could see and sent two paths with offset 1 and limit 150. When the tool
+  // refused and told it to pass a single path, it obeyed literally — it retried with the
+  // first file and never read the second at all. The dropped file was the expensive part,
+  // not the wasted round trip, because nothing on screen said a file had gone missing.
   const ctx = freshCtx();
   await seed(ctx, ["a.ts", "b.ts"]);
-  const r = await readFile.execute({ paths: ["a.ts", "b.ts"], offset: 2 }, ctx);
-  assert.equal(r.isError, true);
-  assert.match(r.output, /single path/);
+  const r = await readFile.execute({ paths: ["a.ts", "b.ts"], offset: 2, limit: 1 }, ctx);
+  assert.equal(r.isError, undefined, "a dropped range must not fail the call");
+  // `offset: 2` would have skipped line 1. Both files show theirs, so the range really is
+  // gone rather than applied per file.
+  assert.match(r.output, /content of a\.ts/, "the first file is missing");
+  assert.match(r.output, /content of b\.ts/, "the second file was dropped — the whole point");
+  assert.match(r.output, /range was ignored/, "the model is not told the range was dropped");
 });
 
 test("a range still works on one file", async () => {

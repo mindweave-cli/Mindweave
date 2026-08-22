@@ -79,8 +79,9 @@ export const readFile: Tool = {
     `whole conversation, so four separate reads cost several times what one read of ` +
     `four files costs, and take four times as long. Up to ${MAX_FILES} at a time. ` +
     `When you already know which part of a file you need, READ ONLY THAT PART: pass ` +
-    `\`offset\` (and optionally \`limit\`). A range applies to a SINGLE file, so ask for ` +
-    `one path when you use them. Reading a file whole costs its full length on this ` +
+    `\`offset\` (and optionally \`limit\`). A range applies to a SINGLE file: pass one path ` +
+    `when you use one, or the range is ignored and the files come back whole. ` +
+    `Reading a file whole costs its full length on this ` +
     `request and on every later one this turn, so a needless whole read is paid for many ` +
     `times over. ` +
     `A whole read past ~${Math.round(WHOLE_READ_TOKEN_BUDGET / 1000)}k tokens returns the ` +
@@ -118,12 +119,12 @@ export const readFile: Tool = {
       offset: {
         type: "integer",
         minimum: 1,
-        description: "1-based line number to start at. Single file only.",
+        description: "1-based line number to start at. Ignored unless `paths` holds exactly one file.",
       },
       limit: {
         type: "integer",
         minimum: 1,
-        description: "Number of lines to read from `offset`. Single file only.",
+        description: "Number of lines to read from `offset`. Ignored unless `paths` holds exactly one file.",
       },
     },
   },
@@ -134,12 +135,24 @@ export const readFile: Tool = {
     if (paths.length > MAX_FILES) {
       return fail(`Too many files (${paths.length}). Read at most ${MAX_FILES} in one call.`);
     }
-    const offset = toPositiveInt(args.offset);
-    const limit = toPositiveInt(args.limit);
+    let offset = toPositiveInt(args.offset);
+    let limit = toPositiveInt(args.limit);
     // A range names lines in ONE file. Applying it across a list would silently return a
-    // different slice of each, which reads as an answer and is not one.
-    if ((offset !== undefined || limit !== undefined) && paths.length > 1) {
-      return fail("`offset`/`limit` read a range of ONE file. Pass a single path with them.");
+    // different slice of each, which reads as an answer and is not one — so the range is
+    // DROPPED here rather than honoured.
+    //
+    // It is dropped, though, and not treated as a failed call. Rejecting the whole call
+    // costs a round trip to recover, which is the exact cost this tool exists to avoid —
+    // the same reason one unreadable path below does not fail the others. In practice it
+    // cost more than the round trip: told only to pass a single path, a model retried
+    // with the first path and silently abandoned the rest of its list.
+    //
+    // Whole reads are already bounded by WHOLE_READ_TOKEN_BUDGET, so dropping a range
+    // cannot turn a cheap ranged read into an unbounded one.
+    const rangeDropped = (offset !== undefined || limit !== undefined) && paths.length > 1;
+    if (rangeDropped) {
+      offset = undefined;
+      limit = undefined;
     }
 
     const parts: string[] = [];
@@ -164,6 +177,14 @@ export const readFile: Tool = {
         ...(failures > 0 ? { isError: true as const } : {}),
         ...(fullPaths.length > 0 ? { fullContentOf: fullPaths } : {}),
       };
+    }
+    // Prepended as another part rather than raised as an error, so the model learns the
+    // rule and still gets every file it asked for.
+    if (rangeDropped) {
+      parts.unshift(
+        "Note: `offset`/`limit` name lines in a single file, so the range was ignored and " +
+          `all ${paths.length} files were read whole. To read a range, call again with one path.`,
+      );
     }
     return {
       output: parts.join("\n\n"),
