@@ -130,10 +130,35 @@ function compile(patterns: string[]): Compiled[] {
  * otherwise null. Paths outside the project root are never matched by relative
  * patterns. `cfg` may be undefined (no forbidden list) → always allow.
  */
-export function forbiddenPathReason(cfg: ForbiddenConfig | undefined, absPath: string): string | null {
+export function forbiddenPathReason(
+  cfg: ForbiddenConfig | undefined,
+  absPath: string,
+  roots: readonly string[] = [],
+): string | null {
   if (!cfg || cfg.patterns.length === 0) return null;
   const abs = isAbsolute(absPath) ? absPath : resolve(cfg.root, absPath);
-  const rel = toPosix(relative(cfg.root, abs));
+
+  // EVERY root in the workspace, not just the one the project started in.
+  //
+  // A pattern is written relative to a project, and a session can hold several once
+  // `/include` has added a folder. Judging only against the primary meant a rule that
+  // blocked `src/legacy` in the project you opened silently did nothing in the folder
+  // you added, which is the shape of failure a deny-list can least afford: the rule is
+  // still listed, still shown by `/forbidden`, and simply not in force.
+  //
+  // Erring towards denying is deliberate and the same call made for case folding. A
+  // pattern that matches something in an included folder the user did not have in mind
+  // costs one refusal they can adjust; the other direction costs the protection itself.
+  for (const base of [cfg.root, ...roots]) {
+    const hit = matchUnderRoot(cfg, abs, base);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Test one absolute path against the patterns, read relative to `base`. */
+function matchUnderRoot(cfg: ForbiddenConfig, abs: string, base: string): string | null {
+  const rel = toPosix(relative(base, abs));
   if (rel === "" || rel.startsWith("..")) return null; // the root itself / outside it
 
   for (const { raw, re, prefix } of compile(cfg.patterns)) {

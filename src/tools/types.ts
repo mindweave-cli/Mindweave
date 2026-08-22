@@ -374,6 +374,17 @@ export interface ToolContext {
    */
   transcriptFull?: Set<string>;
   /**
+   * Every project path this session has worked in, and never emptied.
+   *
+   * Separate from `reads` on purpose, because the two answer different questions and
+   * were briefly answering them with one structure. `reads` is "what can the model see
+   * RIGHT NOW", so a compaction clears it — the contents it described are gone. Rule
+   * scoping asks "what is this session ABOUT", which a compaction does not change: a
+   * standing rule the user scoped to `src/api/**` must not stop applying because the
+   * transcript was summarised.
+   */
+  scopePaths?: Set<string>;
+  /**
    * The pool of connected MCP servers, when the session has any. Their tools are merged
    * into the model's tool list and dispatched through the same path as built-ins, so
    * nothing else in the codebase needs to know MCP exists. Absent in tests and in any

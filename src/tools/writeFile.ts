@@ -82,7 +82,7 @@ export const writeFile: Tool = {
       const denied = await requestAgentDataAccess(ctx, otherTool, `Writing ${rawPath}`);
       if (denied) return denied;
     }
-    const forbidden = forbiddenPathReason(ctx.governance?.forbidden, filePath);
+    const forbidden = forbiddenPathReason(ctx.governance?.forbidden, filePath, ctx.roots ?? []);
     if (forbidden) {
       const lift = await requestForbiddenLift(
         ctx,

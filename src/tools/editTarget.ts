@@ -56,7 +56,7 @@ export async function prepareEditTarget(
     if (denied) return { ok: false, error: denied };
   }
 
-  const forbidden = forbiddenPathReason(ctx.governance?.forbidden, filePath);
+  const forbidden = forbiddenPathReason(ctx.governance?.forbidden, filePath, ctx.roots ?? []);
   if (forbidden) {
     const lift = await requestForbiddenLift(
       ctx,

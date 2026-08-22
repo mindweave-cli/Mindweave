@@ -279,9 +279,17 @@ function governancePrompt(session: Session): GovernancePrompt {
   // The working set: project-relative POSIX paths the model has touched this
   // session. Glob-scoped rules fire only when one of these matches their globs.
   const root = g.forbidden.root;
-  const workingSet = [...session.toolContext.reads.keys()].map((abs) =>
-    relative(root, abs).split("\\").join("/"),
-  );
+  // Union, not just `reads`. A compaction clears the read ledger (the contents it
+  // described are no longer on screen), and scoping used to ride on that alone — so a
+  // rule the user scoped to a folder silently stopped applying the moment the session
+  // was summarised, and only came back if the model happened to re-read a matching
+  // file. What this session has WORKED IN does not change when the transcript is
+  // rewritten, so it is tracked separately and never emptied.
+  const touched = new Set<string>([
+    ...session.toolContext.reads.keys(),
+    ...(session.toolContext.scopePaths ?? []),
+  ]);
+  const workingSet = [...touched].map((abs) => relative(root, abs).split("\\").join("/"));
   return {
     // Rules render into the VOLATILE tail, so glob-scoping them against the working set
     // is free — the tail is rebuilt every step regardless.
@@ -1934,6 +1942,10 @@ async function restoreAfterCompaction(session: Session): Promise<void> {
   if (!reads || reads.size === 0) return;
 
   const snapshot = new Map(reads);
+  // Remembered before the ledger is emptied, so glob-scoped rules keep applying. The
+  // ledger is about what is on screen; this is about what the session is working on,
+  // and a compaction changes the first without changing the second.
+  ctx.scopePaths = new Set([...(ctx.scopePaths ?? []), ...snapshot.keys()]);
   // The correctness half. Unconditional, and before anything that can throw.
   reads.clear();
 

@@ -13,18 +13,22 @@
  * place before the first import can read it. `stateRoot()` reads the variable on every
  * call rather than caching it at import, which is what makes that ordering enough.
  *
- * A fixed name per run rather than a random one: the suite spans several processes
- * (`--test-concurrency`), and they have to agree on where the state lives or a test
- * that writes in one and reads in another would look flaky for no reason.
+ * A FRESH directory per process, which matters more than it looks. Node runs each test
+ * file in its own process, so this gives every file its own state and nothing carries
+ * over between runs. A fixed shared name was tried first and broke two tests that were
+ * already isolating themselves with a temporary HOME: the state outlived the run, so a
+ * memory saved by yesterday's suite made today's "this is a new memory" assertion fail.
+ * Isolation that only holds on a clean machine is not isolation.
+ *
+ * A test needing two processes to share state sets the variable itself, which is
+ * respected below.
  */
-import { mkdirSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Respect an override that is already set, so a developer can point a run somewhere
-// specific without editing this file.
+// specific, and so a test that spawns children can share one state directory with them.
 if (!process.env.MINDWEAVE_STATE_DIR) {
-  const dir = join(tmpdir(), "mindweave-test-state");
-  mkdirSync(dir, { recursive: true });
-  process.env.MINDWEAVE_STATE_DIR = dir;
+  process.env.MINDWEAVE_STATE_DIR = mkdtempSync(join(tmpdir(), "mindweave-test-state-"));
 }

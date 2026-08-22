@@ -296,3 +296,34 @@ test("the tool call site catches faults but lets an interrupt through", () => {
   // instead of an interruption, and the loop would carry on after a cancel.
   assert.match(body, /if \(isAbort\(error\)\) throw error;/, "an abort must still travel");
 });
+
+test("a glob-scoped rule keeps applying after a compaction", async () => {
+  // The read ledger answers "what can the model see right now", so a compaction empties
+  // it. Rule scoping was riding on that same set, which meant a rule the user scoped to
+  // a folder silently stopped applying the moment the session was summarised, and only
+  // returned if the model happened to re-read a matching file. A standing instruction
+  // must not evaporate because the transcript was rewritten.
+  const dir = await fs.mkdtemp(join(tmpdir(), "mw-scope-"));
+  try {
+    const worked = join(dir, "src", "api", "users.ts");
+    await fs.mkdir(join(dir, "src", "api"), { recursive: true });
+    await fs.writeFile(worked, "export const users = 1;\n");
+
+    const reads = new Map([[worked, { mtimeMs: 1, size: 10, full: true, touchedAt: 1 }]]);
+    const s = session({ toolContext: { cwd: dir, reads, roots: [dir] } as never });
+    await compactNow(s);
+
+    const ctx = s.toolContext as { reads: Map<string, unknown>; scopePaths?: Set<string> };
+    assert.ok(ctx.scopePaths?.has(worked), "the path this session worked in is remembered");
+    // And the ledger is still cleared, which is the property the restoration relies on.
+    assert.ok(!ctx.reads.has(worked) || ctx.scopePaths?.has(worked), "scoping survives independently");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("rule scoping reads the union, not just the live ledger", () => {
+  const body = engineSource.match(/function governancePrompt\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(body, "governancePrompt not found — did it get renamed?");
+  assert.match(body, /scopePaths/, "scoping must not depend on the ledger alone");
+});

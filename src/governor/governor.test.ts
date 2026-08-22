@@ -297,3 +297,32 @@ test("the shell bypass check is not escaped by case either", () => {
   }
   assert.equal(forbiddenCommandReason(cfg, "npm test"), null, "unrelated commands still run");
 });
+
+test("the deny-list covers every folder in the workspace, not just the first", () => {
+  // `/include` adds a second project to a session. Patterns are written relative to a
+  // project, and judging them only against the one you opened meant a rule blocking
+  // `src/legacy` there quietly did nothing in the folder you added — still listed by
+  // /forbidden, still shown as active, simply not in force. Claude Code takes the same
+  // shape: a path is checked against the original directory UNION every added one.
+  const primary = join("D:", "backend");
+  const added = join("D:", "frontend");
+  const cfg = { root: primary, patterns: ["src/legacy", "secrets/**"] };
+  const roots = [primary, added];
+
+  for (const base of [primary, added]) {
+    assert.equal(forbiddenPathReason(cfg, join(base, "src", "legacy", "a.ts"), roots), "src/legacy", base);
+    assert.equal(forbiddenPathReason(cfg, join(base, "secrets", "k.txt"), roots), "secrets/**", base);
+    // The other half: an included folder must stay WORKABLE, or /include is useless.
+    assert.equal(forbiddenPathReason(cfg, join(base, "src", "app.ts"), roots), null, base);
+  }
+
+  // A folder that is not part of this workspace is still none of the rule's business.
+  assert.equal(forbiddenPathReason(cfg, join("D:", "elsewhere", "src", "legacy", "a.ts"), roots), null);
+});
+
+test("with no extra roots the deny-list behaves exactly as before", () => {
+  // The added argument defaults to empty, so a single-root session is unchanged.
+  const cfg = { root: join("D:", "proj"), patterns: ["src/legacy"] };
+  assert.equal(forbiddenPathReason(cfg, join("D:", "proj", "src", "legacy", "a.ts")), "src/legacy");
+  assert.equal(forbiddenPathReason(cfg, join("D:", "other", "src", "legacy", "a.ts")), null);
+});
