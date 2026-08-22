@@ -37,7 +37,25 @@ export function sanitizeProjectPath(cwd: string): string {
  * project's state is always filed under the same key.
  */
 export function projectDir(projectCwd: string): string {
-  return join(homedir(), ".mindweave", "projects", sanitizeProjectPath(projectCwd));
+  return join(stateRoot(), "projects", sanitizeProjectPath(projectCwd));
+}
+
+/**
+ * Where Mindweave keeps everything, overridable.
+ *
+ * The override is not a feature, it is the fix for a real mess. This path is derived
+ * from the working directory, so a test that ran anything against a temp directory
+ * wrote a permanent folder into the user's HOME. Measured on this machine: 6,761 of
+ * 6,770 directories under `~/.mindweave/projects` were test litter, growing with every
+ * suite run and never cleaned up, because nothing knew they were disposable.
+ *
+ * Read on every call rather than once at import, so a test can point it somewhere
+ * disposable before touching anything. The default is unchanged, so a real session is
+ * unaffected.
+ */
+export function stateRoot(): string {
+  const override = process.env.MINDWEAVE_STATE_DIR?.trim();
+  return override ? override : join(homedir(), ".mindweave");
 }
 
 /** The directory holding all sessions for a given project (its state dir). */
