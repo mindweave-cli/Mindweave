@@ -190,6 +190,154 @@ one picking among 39, at any context length.
 Every file write goes through an atomic path, so a crash or a killed process
 can't leave you with a half-written or zero-byte file.
 
+## Remote MCP servers work against the current spec
+
+Mindweave connects to MCP servers, and it targets the current revision of that
+protocol, where a request repeats a few of its own details in HTTP headers so a
+gateway can route it without reading the body. Servers check those headers against
+the request and reject the call outright if the two disagree.
+
+Three of them were wrong, and each fault broke calls rather than merely slowing them
+down. The header naming what a call is aimed at carried the name of the operation
+instead of the name of the tool, so every tool call to a remote server contradicted
+itself. The protocol version header, required on every request, was not sent at all.
+And where a server asks for particular tool arguments to be repeated in headers,
+Mindweave was not repeating them, which quietly made any tool using that feature
+impossible to call.
+
+All three are fixed and checked against a real server rather than a stand-in. A tool
+whose definition breaks the rules for those headers is now left out of the listing
+with a note naming it and the reason, rather than being offered and then failing when
+you reach for it. One bad definition costs a server that one tool and no others.
+
+Local servers, the ones Mindweave starts as a program on your machine, were never
+affected. They do not speak HTTP and have no headers to get wrong.
+
+## A tool call can take more than one trip
+
+Some servers cannot finish a job in a single exchange. The protocol has them say so
+and hand back a token, and the client calls again with it until the work is done.
+Mindweave was not reading that answer. It took "I need another round" to mean "here
+is your result", and passed the model whatever partial content happened to come with
+it. Nothing failed and nothing was logged. The call simply looked like it had worked.
+
+It now carries the call through as many trips as the server asks for, up to a limit,
+because a server is allowed to keep asking indefinitely and stopping is the client's
+job. If a server asks for something Mindweave has no way to supply, the call fails
+saying what was wanted, instead of returning an empty answer dressed as a success.
+
+## Long sessions hold together
+
+Mindweave summarises the older part of a conversation when it grows too large, keeps
+the recent part, and carries on. That is what lets a session outlive the model's
+context window. Six things around it were wrong, and they had a habit in common:
+each of them failed quietly.
+
+**Compaction that gave up said nothing.** After three failed attempts it stopped
+trying, which is right, and then the session kept running past its own limit with
+nothing on screen to say so. The first sign of trouble was an error nobody could
+connect to the cause. A failure now says what went wrong, the stop is announced, and
+you get a heads-up before a compaction rather than after it.
+
+**A conversation that outgrows the window now recovers on every provider.** It used
+to recover on two of thirteen. Two of them report the problem as part of an
+otherwise normal reply; the other eleven reject the request, which looked identical
+to Mindweave sending something broken. It is now told apart from the provider's own
+words and handled the same way: drop the oldest exchanges and carry on.
+
+**Compacting is often free now.** Mindweave already keeps a running set of notes on
+what the session is doing, maintained outside the conversation. When those notes are
+current enough to cover the part being dropped, they are used instead of paying a
+model to write a summary of what they already say. When they are not, the summary
+still happens. It declines rather than guessing.
+
+**And the work continues afterwards.** Mindweave tracks which files it has read, and
+that record lived outside the conversation, so it survived a compaction that had just
+removed the file contents it described. The check that stops Mindweave editing a file
+it has not read then agreed the file had been read. Nothing was corrupted, but the
+tool and the model disagreed about what was on screen. The record is now rebuilt from
+what actually survives, and the handful of files being worked in are read back, so a
+long task picks up where it left off instead of retracing its steps.
+
+## A rate limit no longer ends your turn
+
+Eleven of the thirteen providers had no retries at all. A single rate limit, or one
+gateway hiccup, ended the turn partway through. You had already paid for the request,
+the work was gone, and the only option was to type it again. Providers return those
+constantly and mean nothing by them.
+
+Those are retried now, with a growing, jittered wait. Only the failures that deserve
+it: a malformed request is not retried, because it will not work the second time
+either and repeating it only makes a real bug harder to spot. The waiting is kept
+short on purpose, so it reads as working rather than as a freeze, and a cooldown
+longer than that is reported to you instead of sat through in silence.
+
+**And if the connection drops mid-answer, you keep what you saw.** Words already on
+screen used to be thrown away, because the failure unwound the turn before anything
+was written down: you would watch an answer arrive that the conversation had no
+record of, and the next turn could not see it either. It is now kept and marked
+incomplete.
+
+## Your session is written the way your files are
+
+Mindweave already wrote every file it edits for you through a temporary file and a
+rename, so a crash can never leave one half written. Your session was not going
+through that path. The transcript is rewritten in full every time it saves, and it
+saves constantly, so the unsafe moment was crossed many times a minute. A crash
+inside it takes the whole conversation, and takes it in the worst way: an empty
+transcript reads as nothing to resume rather than as something to repair.
+
+Sessions, cross-session memory and approved plans now write the same careful way.
+
+## Your rules stay in force
+
+Rules you set are meant to be standing instructions, and there were two ways one could
+stop applying without saying so.
+
+A rule can be scoped to a set of paths, so it switches on once the session is working in
+them. That was decided from the record of which files were currently in view, and
+summarising a long conversation clears that record. So a rule scoped to a folder quietly
+stopped applying the moment the session got long enough to compact, and came back only
+if the same folder was opened again. What is on screen changes when a conversation is
+summarised; what you are working on does not, and those are now tracked separately.
+
+The second is about workspaces. `/include` adds another project to a session, but a
+forbidden path was only ever measured against the project you started in. A rule
+refusing to touch a folder did nothing in the folder you added, while still being listed
+and still looking active. Paths are now measured against every folder in the workspace.
+
+Folders you add stay workable, and a folder that is not part of your workspace is still
+none of the rule's business.
+
+## Two ways round the file protections, closed
+
+Mindweave has two guards on what it will touch: the deny-list you write per project,
+and a fixed floor of files it will never read or write whatever it is asked, which is
+where secrets and keys live. Both had a hole.
+
+The deny-list compared paths with case, and Windows and macOS filesystems do not. A
+project forbidding `.env` still allowed `.ENV`; one forbidding `src/legacy` still
+allowed `src/Legacy`. Same file, either way. Nothing clever was needed to reach it, as
+writing a name in a different case is something a model does on its own, and the rule
+then quietly did not apply.
+
+The floor recognised `.env` and `.env.local` but not `prod.env`, `staging.env` or
+`.envrc`. A per-environment file is one of the commonest places a real secret sits.
+
+Both are fixed, and ordinary source stays readable: `environment.ts` and `env.ts` are
+not secrets and Mindweave still reads them.
+
+## One command puts your terminal back
+
+If Mindweave is killed outright, by running out of memory or by a force quit, it
+never reaches its own cleanup, and your terminal is left reporting mouse movement.
+Every scroll after that writes stray characters into your shell, and it survives
+closing Mindweave because Mindweave is already gone.
+
+`mindweave --reset-terminal` puts it back, and is safe to run at any time. Closing
+the terminal window is now handled properly as well, so the ordinary ways of quitting
+do not leave anything behind either.
+
 ## What we took out
 
 Mindweave used to rank your codebase by structural centrality, a PageRank walk
