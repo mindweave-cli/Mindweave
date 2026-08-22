@@ -22,7 +22,7 @@ import { addFocus } from "./focus.js";
 import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
 import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
 import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 const MAX_FILES = 5_000;
 /** Cap on matching lines returned. Exported so the merged `search` tool states the
@@ -121,7 +121,7 @@ export const grepDef: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const pattern = typeof args.pattern === "string" ? args.pattern : "";
-    if (!pattern) return fail("`pattern` is required.");
+    if (!pattern) return failQuietly("`pattern` is required.");
 
     const mode: Mode =
       args.output_mode === "content" || args.output_mode === "count"
@@ -159,7 +159,7 @@ export const grepDef: Tool = {
       }
       const o: GrepOpts = { pattern, mode, before, after, multiline, caseInsensitive, glob, ctx, unit, isFile: stat.isFile() };
       const got = haveRg ? await grepViaRipgrep(o) : await grepViaWalk(o);
-      if (got.invalid) return fail(got.invalid);
+      if (got.invalid) return failQuietly(got.invalid);
       lines.push(...got.lines);
     }
 

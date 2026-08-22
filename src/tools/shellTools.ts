@@ -9,7 +9,7 @@
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { relativize } from "./paths.js";
 import { MAX_READ_CHARS, type ShellInfo } from "./backgroundShells.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 /**
  * One read-only tool at two levels of specificity: no `id` lists, an `id` reads.
@@ -86,7 +86,7 @@ export const shellsTool: Tool = {
     // The dispatch: naming a shell reads it, otherwise list what there is.
     if (args.id === undefined || args.id === null) return listAll(ctx);
     const id = toId(args.id);
-    if (id === null) return fail("`id` must be a shell number.");
+    if (id === null) return failQuietly("`id` must be a shell number.");
 
     const res = await mgr.read(id);
     if (!res) return fail(`no background shell #${id}.`);
@@ -140,7 +140,7 @@ export const killShell: Tool = {
     const mgr = ctx.backgroundShells;
     if (!mgr) return fail("no background shells are available in this context.");
     const id = toId(args.id);
-    if (id === null) return fail("`id` must be a shell number.");
+    if (id === null) return failQuietly("`id` must be a shell number.");
     const killed = mgr.kill(id);
     return killed
       ? { output: `Stopped background shell #${id}.`, summary: `killed shell #${id}` }

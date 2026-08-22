@@ -119,9 +119,9 @@ export const edit: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const rawPath = typeof args.path === "string" ? args.path.trim() : "";
-    if (!rawPath) return fail("`path` is required — it names the one file this call edits.");
+    if (!rawPath) return failQuietly("`path` is required — it names the one file this call edits.");
     if (!Array.isArray(args.edits) || args.edits.length === 0) {
-      return fail("`edits` is required and must be a non-empty array of {old_string, new_string} edits.");
+      return failQuietly("`edits` is required and must be a non-empty array of {old_string, new_string} edits.");
     }
 
     // Validate and normalize each edit up front, so a bad shape is reported before we
@@ -129,24 +129,24 @@ export const edit: Tool = {
     const ops: EditOp[] = [];
     for (let i = 0; i < args.edits.length; i++) {
       const e = args.edits[i] as Record<string, unknown>;
-      if (!e || typeof e !== "object") return fail(`edit #${i + 1} is not an object.`);
+      if (!e || typeof e !== "object") return failQuietly(`edit #${i + 1} is not an object.`);
       // A per-edit path is refused rather than ignored. Silently dropping it would apply
       // the edit to the WRONG file — the top-level one — which is the worst outcome
       // available here, so say what to do instead.
       if (typeof e.path === "string" && e.path.trim() && e.path.trim() !== rawPath) {
-        return fail(
+        return failQuietly(
           `edit #${i + 1} names a different file (${e.path.trim()}). One edit call changes one file: ` +
             `make a separate call for each file you need to change.`,
         );
       }
       if (typeof e.old_string !== "string" || e.old_string === "") {
-        return fail(`edit #${i + 1}: \`old_string\` is required and must not be empty.`);
+        return failQuietly(`edit #${i + 1}: \`old_string\` is required and must not be empty.`);
       }
       if (typeof e.new_string !== "string") {
-        return fail(`edit #${i + 1}: \`new_string\` is required (use an empty string to delete).`);
+        return failQuietly(`edit #${i + 1}: \`new_string\` is required (use an empty string to delete).`);
       }
       if (e.old_string === e.new_string) {
-        return fail(`edit #${i + 1}: \`old_string\` and \`new_string\` are identical — nothing to change.`);
+        return failQuietly(`edit #${i + 1}: \`old_string\` and \`new_string\` are identical — nothing to change.`);
       }
       ops.push({ oldString: e.old_string, newString: e.new_string, replaceAll: e.replace_all === true });
     }

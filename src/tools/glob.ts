@@ -13,7 +13,7 @@ import { relativize, searchUnits, type SearchUnit } from "./paths.js";
 import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
 import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
 import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 /** Cap on paths returned. Exported for the merged `search` tool's description. */
 export const GLOB_MAX_RESULTS = 100;
@@ -54,7 +54,7 @@ export const globDef: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const pattern = typeof args.pattern === "string" ? args.pattern.trim() : "";
-    if (!pattern) return fail("`pattern` is required.");
+    if (!pattern) return failQuietly("`pattern` is required.");
 
     // Patterns are matched against a ROOT-RELATIVE path, which a leading slash can
     // never equal. Decided here rather than inside either engine because the two read

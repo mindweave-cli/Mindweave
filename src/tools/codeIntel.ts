@@ -17,7 +17,7 @@ import { excludedFromSearch } from "./guard.js";
 import { isSupported } from "../alternator/chassis/treesitter.js";
 import { isMarkupSupported } from "../alternator/chassis/markup.js";
 import type { Confidence, DirectorySummary, OutlineEntry } from "../alternator/chassis/types.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 const DIR_FILE_CAP = 40;
 const REF_CAP = 100;
@@ -152,7 +152,7 @@ const definitionDef: Tool = {
   async execute(args, ctx): Promise<ToolResult> {
     if (allChassis(ctx).length === 0) return degraded();
     const name = typeof args.name === "string" ? args.name.trim() : "";
-    if (!name) return fail("`name` is required.");
+    if (!name) return failQuietly("`name` is required.");
 
     const { symbols, confidence } = await mergedDefinition(ctx, name);
     if (symbols.length === 0) {
@@ -196,7 +196,7 @@ const referencesDef: Tool = {
   async execute(args, ctx): Promise<ToolResult> {
     if (allChassis(ctx).length === 0) return degraded();
     const name = typeof args.name === "string" ? args.name.trim() : "";
-    if (!name) return fail("`name` is required.");
+    if (!name) return failQuietly("`name` is required.");
 
     const { refs, confidence } = await mergedReferences(ctx, name);
     if (refs.length === 0) {

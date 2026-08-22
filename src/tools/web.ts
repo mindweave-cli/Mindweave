@@ -19,7 +19,7 @@ import type { Tool, ToolResult } from "./types.js";
 import { searchWeb } from "./webSearch.js";
 import { fetchWeb } from "./webFetch.js";
 import { DISTILL_OVER_CHARS } from "./webFetch.js";
-import { fail } from "./results.js";
+import { failQuietly } from "./results.js";
 
 export const web: Tool = {
   name: "web",
@@ -70,11 +70,11 @@ export const web: Tool = {
     // Both is refused rather than silently picking one: it means the model was unsure
     // what it wanted, and quietly answering half the request is the worse outcome.
     if (url && query) {
-      return fail("pass either `query` to search or `url` to read a page, not both.");
+      return failQuietly("pass either `query` to search or `url` to read a page, not both.");
     }
     if (url) return fetchWeb(args, ctx);
     if (query) return searchWeb(args, ctx);
-    return fail("`query` (to search) or `url` (to read a page) is required.");
+    return failQuietly("`query` (to search) or `url` (to read a page) is required.");
   },
 };
 

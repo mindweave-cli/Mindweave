@@ -21,7 +21,7 @@ import type { SearchResult } from "../drivers/types.js";
 import { activeDriver } from "../drivers/registry.js";
 import { frameExternal } from "./untrusted.js";
 import { outputDetail } from "./detail.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 /** Sources listed per answer. Enough to judge the answer, short enough to read. */
 const MAX_SOURCES = 8;
@@ -52,7 +52,7 @@ const webSearchTool: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const query = typeof args.query === "string" ? args.query.trim() : "";
-    if (!query) return fail("`query` is required.");
+    if (!query) return failQuietly("`query` is required.");
 
     const driver = activeDriver();
     if (!driver.webSearch) {

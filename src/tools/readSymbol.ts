@@ -17,7 +17,7 @@ import { relativize, resolvePath, nextTouch } from "./paths.js";
 import { addFocus, coversSpan } from "./focus.js";
 import { allChassis, symbolSpans } from "./chassisMux.js";
 import { sliceBody } from "./spanCore.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 // Even a single symbol can be huge (a 900-line class). Cap what we return so one
 // read_symbol can't flood the context; the model can read_file a range for more.
@@ -59,7 +59,7 @@ export const readSymbolTool: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const name = typeof args.name === "string" ? args.name.trim() : "";
-    if (!name) return fail("`name` is required.");
+    if (!name) return failQuietly("`name` is required.");
     if (allChassis(ctx).length === 0) {
       return {
         output: "The code map isn't available here — use outline, grep, and read_file instead.",

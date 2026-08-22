@@ -19,7 +19,7 @@ import { addFocus, coversSpan } from "./focus.js";
 import { chassisForPath } from "./chassisMux.js";
 import { renderOutlineEntries } from "./codeIntel.js";
 import { estimateTokens } from "../memory/compaction.js";
-import { fail } from "./results.js";
+import { failQuietly } from "./results.js";
 
 // Caps protect the model's context window, not the disk. They are deliberately
 // MODEL-AGNOSTIC fixed defaults, not derived from any one model's context window —
@@ -132,9 +132,9 @@ export const readFile: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const paths = toPathList(args);
-    if (paths.length === 0) return fail("`paths` is required — pass at least one file.");
+    if (paths.length === 0) return failQuietly("`paths` is required — pass at least one file.");
     if (paths.length > MAX_FILES) {
-      return fail(`Too many files (${paths.length}). Read at most ${MAX_FILES} in one call.`);
+      return failQuietly(`Too many files (${paths.length}). Read at most ${MAX_FILES} in one call.`);
     }
     let offset = toPositiveInt(args.offset);
     let limit = toPositiveInt(args.limit);

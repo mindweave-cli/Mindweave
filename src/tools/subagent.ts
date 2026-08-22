@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { STATUS_INSTRUCTION, renderVerdict, verifySubagentReport } from "./subagentReport.js";
 import type { Tool, ToolResult } from "./types.js";
 import type { EngineEvent } from "../dynamo/engine.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 const MAX_SUBAGENT_DEPTH = 1;
 /** Default step budget for a worker; the caller can scale it with `max_steps`. */
@@ -138,7 +138,7 @@ export const spawnSubagent: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const task = typeof args.task === "string" ? args.task.trim() : "";
-    if (!task) return fail("`task` is required — describe the subtask for the child agent.");
+    if (!task) return failQuietly("`task` is required — describe the subtask for the child agent.");
 
     const depth = ctx.subagentDepth ?? 0;
     if (depth >= MAX_SUBAGENT_DEPTH) {

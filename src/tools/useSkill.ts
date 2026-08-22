@@ -10,7 +10,7 @@
  */
 import type { Tool, ToolResult } from "./types.js";
 import { findSkill, loadSkillBody, substituteSkillArgs } from "../governor/skills.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 export const useSkill: Tool = {
   name: "use_skill",
@@ -55,7 +55,7 @@ export const useSkill: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const name = typeof args.name === "string" ? args.name.trim() : "";
-    if (!name) return fail("`name` is required.");
+    if (!name) return failQuietly("`name` is required.");
     const argString = typeof args.arguments === "string" ? args.arguments : "";
 
     const skills = ctx.governance?.skills ?? [];

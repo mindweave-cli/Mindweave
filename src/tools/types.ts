@@ -94,9 +94,16 @@ export interface ToolResult {
    * same call already made for background machinery like compaction and verification,
    * which run silently rather than narrating themselves.
    *
+   * The other half is a call whose ARGUMENTS were malformed — a missing required field,
+   * a value outside an enum, two options that cannot both be given. The model wrote the
+   * call wrong, is told exactly how, and rewrites it. Claude Code draws the same line
+   * from the other side: its schema validation collapses to a flat "Invalid tool
+   * parameters" on screen while the model still gets the detail.
+   *
    * Only for failures the model can resolve on its own, in the same turn, with no user
    * involvement. A refused permission, a missing file, a failed write, a command that
-   * exited non-zero — those are real news and stay visible.
+   * exited non-zero — those are real news and stay visible. Over-applying this is the
+   * dangerous direction, so both halves of the line are held by quietFailures.test.ts.
    */
   quiet?: boolean;
 

@@ -15,7 +15,7 @@
  */
 import type { Tool, ToolResult } from "./types.js";
 import { isMemoryType, MEMORY_TYPES, saveMemory as persist } from "../memory/autoMemory.js";
-import { fail } from "./results.js";
+import { failQuietly } from "./results.js";
 
 /** The fixed session root state files are filed under (cwd may have moved via cd). */
 function projectRoot(ctx: { cwd: string; governance?: { forbidden: { root: string } } }): string {
@@ -83,10 +83,10 @@ export const saveMemoryTool: Tool = {
     const description = str(args.description);
     const body = str(args.body);
     const indexLine = str(args.index_line);
-    if (!name) return fail("`name` is required.");
-    if (!body) return fail("`body` is required — the memory needs content.");
+    if (!name) return failQuietly("`name` is required.");
+    if (!body) return failQuietly("`body` is required — the memory needs content.");
     if (!isMemoryType(args.type)) {
-      return fail(`\`type\` must be one of: ${MEMORY_TYPES.join(", ")}.`);
+      return failQuietly(`\`type\` must be one of: ${MEMORY_TYPES.join(", ")}.`);
     }
 
     // Save directly — no confirmation. Memory is non-destructive and the user does

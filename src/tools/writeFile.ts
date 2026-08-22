@@ -23,7 +23,7 @@ import { recordWrite, relativize, resolvePath } from "./paths.js";
 import { writeDetail, withScope } from "./detail.js";
 import { applyEol, dirEol, fileEol } from "./eol.js";
 import { writeFileAtomic } from "./atomicWrite.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 export const writeFile: Tool = {
   name: "write_file",
@@ -66,9 +66,9 @@ export const writeFile: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const rawPath = typeof args.path === "string" ? args.path.trim() : "";
-    if (!rawPath) return fail("`path` is required.");
+    if (!rawPath) return failQuietly("`path` is required.");
     if (typeof args.content !== "string") {
-      return fail("`content` is required (use an empty string for an empty file).");
+      return failQuietly("`content` is required (use an empty string for an empty file).");
     }
     const content = args.content;
 

@@ -14,7 +14,7 @@
  */
 import type { Tool, ToolResult } from "./types.js";
 import { APPROVAL_DISMISSED } from "./approval.js";
-import { fail } from "./results.js";
+import { failQuietly } from "./results.js";
 
 const askUserDef: Tool = {
   name: "ask_user",
@@ -63,8 +63,8 @@ const askUserDef: Tool = {
     const options = Array.isArray(args.options)
       ? args.options.filter((o): o is string => typeof o === "string" && o.trim() !== "").map((o) => o.trim())
       : [];
-    if (!question) return fail("`question` is required.");
-    if (options.length < 2) return fail("provide at least 2 concrete `options`.");
+    if (!question) return failQuietly("`question` is required.");
+    if (options.length < 2) return failQuietly("provide at least 2 concrete `options`.");
 
     // No approval channel (headless run / tests): can't ask — tell the model to
     // proceed on its best judgment rather than stall.

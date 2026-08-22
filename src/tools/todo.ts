@@ -22,7 +22,7 @@
  * exactly the kind of model-work we keep out of the prompt).
  */
 import type { Tool, ToolContext, ToolResult, TodoItem, TodoStatus } from "./types.js";
-import { fail } from "./results.js";
+import { failQuietly } from "./results.js";
 
 const STATUSES: TodoStatus[] = ["pending", "in_progress", "completed"];
 
@@ -77,7 +77,7 @@ export const todoWrite: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const parsed = parseTodos(args.todos);
-    if (typeof parsed === "string") return fail(parsed);
+    if (typeof parsed === "string") return failQuietly(parsed);
 
     // All done → clear the list (a finished list disappears).
     const allDone = parsed.length > 0 && parsed.every((t) => t.status === "completed");

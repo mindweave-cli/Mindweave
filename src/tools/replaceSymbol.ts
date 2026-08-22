@@ -20,7 +20,7 @@ import { applyEol } from "./eol.js";
 import { editDetail, lineCount, magnitude, withScope } from "./detail.js";
 import { numberedWindow } from "./editWindow.js";
 import { normalizeLf } from "./editCore.js";
-import { prepareEditTarget, unreadError, fail, errText } from "./editTarget.js";
+import { prepareEditTarget, unreadError, fail, failQuietly, errText } from "./editTarget.js";
 import { allChassis, symbolSpans } from "./chassisMux.js";
 import { rawLines, spliceLines } from "./spanCore.js";
 import { writeFileAtomic } from "./atomicWrite.js";
@@ -72,9 +72,9 @@ export const replaceSymbolBody: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const name = typeof args.name === "string" ? args.name.trim() : "";
-    if (!name) return fail("`name` is required.");
+    if (!name) return failQuietly("`name` is required.");
     if (typeof args.new_definition !== "string" || args.new_definition.trim() === "") {
-      return fail("`new_definition` is required and must not be empty (use edit to delete a symbol).");
+      return failQuietly("`new_definition` is required and must not be empty (use edit to delete a symbol).");
     }
     if (allChassis(ctx).length === 0) {
       return fail("the code map isn't available here — use edit with an exact old_string instead.");
@@ -113,7 +113,7 @@ export const replaceSymbolBody: Tool = {
     const oldBody = rawLines(before, span.start, span.end);
     const updatedNorm = spliceLines(before, span.start, span.end, args.new_definition);
     if (updatedNorm === before) {
-      return fail(`\`new_definition\` matches the current definition of '${name}' — nothing to change.`);
+      return failQuietly(`\`new_definition\` matches the current definition of '${name}' — nothing to change.`);
     }
     const updated = applyEol(updatedNorm, eol);
 

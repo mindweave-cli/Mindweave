@@ -25,7 +25,7 @@ import { activeDriver } from "../drivers/registry.js";
 import { frameExternal } from "./untrusted.js";
 import { outputDetail } from "./detail.js";
 import { estimateTokens } from "../memory/compaction.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 const FETCH_TIMEOUT_MS = 20_000;
 const DOWNLOAD_CAP_BYTES = 3_000_000; // stop reading a response past ~3MB
@@ -71,10 +71,10 @@ const webFetchTool: Tool = {
   async execute(args, ctx): Promise<ToolResult> {
     const rawUrl = typeof args.url === "string" ? args.url.trim() : "";
     const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
-    if (!rawUrl) return fail("`url` is required.");
+    if (!rawUrl) return failQuietly("`url` is required.");
 
     const url = normalizeUrl(rawUrl);
-    if (typeof url === "string") return fail(url); // a validation message
+    if (typeof url === "string") return failQuietly(url); // a validation message
 
     const blocked = ssrfReason(url);
     if (blocked) return fail(blocked);

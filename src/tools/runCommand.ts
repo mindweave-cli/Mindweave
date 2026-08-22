@@ -44,7 +44,7 @@ import { canonicalRoot, relativize } from "./paths.js";
 import { outputDetail, withOutcome } from "./detail.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
 import { findRunningDuplicate, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -158,7 +158,7 @@ export const runCommand: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const command = typeof args.command === "string" ? args.command.trim() : "";
-    if (!command) return fail("`command` is required.");
+    if (!command) return failQuietly("`command` is required.");
 
     // A shell can change files in ways the checkpoint net never sees (a formatter, a
     // codegen step, a `git checkout`). Flag the turn so /undo says what it did NOT

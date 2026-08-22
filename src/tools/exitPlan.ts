@@ -21,7 +21,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { savePlanArtifact } from "../dynamo/planArtifact.js";
-import { fail } from "./results.js";
+import { fail, failQuietly } from "./results.js";
 
 /** What the user chose at the approval prompt. Order is the display order. */
 export const PLAN_CHOICES = [
@@ -82,7 +82,7 @@ export const exitPlan: Tool = {
 
   async execute(args, ctx): Promise<ToolResult> {
     const plan = typeof args.plan === "string" ? args.plan.trim() : "";
-    if (!plan) return fail("`plan` is required — put the whole plan in it.");
+    if (!plan) return failQuietly("`plan` is required — put the whole plan in it.");
 
     if (!ctx.requestApproval) {
       return fail(

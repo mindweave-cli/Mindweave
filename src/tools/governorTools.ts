@@ -13,7 +13,7 @@ import type { Tool, ToolResult } from "./types.js";
 import { isMcpToolName } from "../mcp/catalog.js";
 import { writeRule, appendForbidden, appendForbiddenCommand, appendForbiddenMcpTool, deriveRuleName, slugify, writeSkill } from "../governor/write.js";
 import { parseGlobs } from "../governor/rules.js";
-import { fail } from "./results.js";
+import { failQuietly } from "./results.js";
 
 /** The project root for state files: the fixed session root, carried on the
  *  governance config (cwd may have moved via `cd`; the root never does). */
@@ -31,7 +31,7 @@ type Ctx = Parameters<Tool["execute"]>[1];
 
 async function doRememberRule(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
   const body = typeof args.value === "string" ? args.value.trim() : "";
-  if (!body) return fail("`value` is required — the rule text.");
+  if (!body) return failQuietly("`value` is required — the rule text.");
   const name = (typeof args.name === "string" && args.name.trim()) || deriveRuleName(body);
   const globs = parseGlobs(typeof args.globs === "string" ? args.globs : undefined);
 
@@ -56,10 +56,10 @@ async function doRememberRule(args: Record<string, unknown>, ctx: Ctx): Promise<
 
 async function doForbidPath(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
   const pattern = typeof args.value === "string" ? args.value.trim() : "";
-  if (!pattern) return fail("`value` is required — the path glob to forbid.");
+  if (!pattern) return failQuietly("`value` is required — the path glob to forbid.");
 
   const result = await appendForbidden(projectRoot(ctx), pattern);
-  if (!result.pattern) return fail("the pattern is empty after normalization.");
+  if (!result.pattern) return failQuietly("the pattern is empty after normalization.");
 
   // Mirror into the live forbidden config (new array → matcher recompiles).
   if (ctx.governance && result.added) {
@@ -78,10 +78,10 @@ async function doForbidPath(args: Record<string, unknown>, ctx: Ctx): Promise<To
 
 async function doForbidCommand(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
   const pattern = typeof args.value === "string" ? args.value.trim() : "";
-  if (!pattern) return fail("`value` is required — the command to forbid.");
+  if (!pattern) return failQuietly("`value` is required — the command to forbid.");
 
   const result = await appendForbiddenCommand(projectRoot(ctx), pattern);
-  if (!result.pattern) return fail("the pattern is empty after normalization.");
+  if (!result.pattern) return failQuietly("the pattern is empty after normalization.");
 
   // Mirror into the live forbidden config (new array → enforced this turn on).
   if (ctx.governance && result.added) {
@@ -100,15 +100,15 @@ async function doForbidCommand(args: Record<string, unknown>, ctx: Ctx): Promise
 
 async function doForbidMcpTool(args: Record<string, unknown>, ctx: Ctx): Promise<ToolResult> {
   const name = typeof args.value === "string" ? args.value.trim() : "";
-  if (!name) return fail("`value` is required — the full MCP tool name.");
+  if (!name) return failQuietly("`value` is required — the full MCP tool name.");
   // Guarding the shape matters: a bare tool name would be written to disk, never
   // match anything, and look like the ban silently failed.
   if (!isMcpToolName(name)) {
-    return fail(`'${name}' is not an MCP tool name. Use the full name from your tool list, e.g. 'mcp__github__create_issue'.`);
+    return failQuietly(`'${name}' is not an MCP tool name. Use the full name from your tool list, e.g. 'mcp__github__create_issue'.`);
   }
 
   const result = await appendForbiddenMcpTool(projectRoot(ctx), name);
-  if (!result.pattern) return fail("the name is empty after normalization.");
+  if (!result.pattern) return failQuietly("the name is empty after normalization.");
 
   // Mirror into the live config AND the live pool, so the ban takes effect on the
   // next step rather than the next session.
@@ -195,7 +195,7 @@ export const governor: Tool = {
     // Naming the valid set beats a bare "invalid action": the model corrects in one
     // step instead of guessing at the spelling.
     if (!handler) {
-      return fail(`\`action\` must be one of: ${Object.keys(ACTIONS).join(", ")}.`);
+      return failQuietly(`\`action\` must be one of: ${Object.keys(ACTIONS).join(", ")}.`);
     }
     return handler(args, ctx);
   },
@@ -262,8 +262,8 @@ export const createSkill: Tool = {
     const name = typeof args.name === "string" ? args.name.trim() : "";
     const description = typeof args.description === "string" ? args.description.trim() : "";
     const body = typeof args.steps === "string" ? args.steps.trim() : "";
-    if (!name) return fail("`name` is required.");
-    if (!body) return fail("`steps` is required — the skill needs a body.");
+    if (!name) return failQuietly("`name` is required.");
+    if (!body) return failQuietly("`steps` is required — the skill needs a body.");
 
     const saved = await writeSkill(projectRoot(ctx), {
       name,
