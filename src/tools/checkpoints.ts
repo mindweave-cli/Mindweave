@@ -29,6 +29,7 @@
  *    hundreds of megabytes resident. The count bound never was the real limit.
  */
 import { promises as fs } from "node:fs";
+import { writeFileAtomic } from "./atomicWrite.js";
 
 /**
  * Per-file ceiling on what we will hold. We keep two copies of every checkpointed
@@ -358,7 +359,11 @@ export class Checkpoints {
 
       try {
         if (action === "delete") await fs.rm(path, { force: true });
-        else await fs.writeFile(path, state.original as string, "utf8");
+        // ATOMIC, like every other write to a user's file. Writing straight onto the
+        // destination truncates it first, so a crash inside that window destroys the
+        // file — during the one operation whose entire purpose is to save it. Undo is
+        // the recovery mechanism; it must not be the thing that loses the work.
+        else await writeFileAtomic(path, state.original as string);
         restored.push(path);
         cp.files.delete(path);
       } catch {

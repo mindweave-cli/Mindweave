@@ -25,6 +25,9 @@ const GUARDED: [string, string][] = [
   ["the session transcript, meta and notes", "./store.ts"],
   ["cross-session memory and its index", "./autoMemory.ts"],
   ["an approved plan", "../dynamo/planArtifact.ts"],
+  // The recovery path itself. A torn write here destroys the file during the one
+  // operation whose whole purpose is to save it.
+  ["a file restored by /undo", "../tools/checkpoints.ts"],
 ];
 
 for (const [what, file] of GUARDED) {
