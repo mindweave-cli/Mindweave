@@ -14,6 +14,7 @@
  */
 import type { Tool, ToolResult } from "./types.js";
 import { APPROVAL_DISMISSED } from "./approval.js";
+import { fail } from "./results.js";
 
 const askUserDef: Tool = {
   name: "ask_user",
@@ -122,6 +123,3 @@ function clip(s: string, max = 40): string {
   return flat.length <= max ? flat : flat.slice(0, max - 1) + "…";
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

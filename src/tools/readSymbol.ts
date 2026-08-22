@@ -17,6 +17,7 @@ import { relativize, resolvePath, nextTouch } from "./paths.js";
 import { addFocus, coversSpan } from "./focus.js";
 import { allChassis, symbolSpans } from "./chassisMux.js";
 import { sliceBody } from "./spanCore.js";
+import { fail } from "./results.js";
 
 // Even a single symbol can be huge (a 900-line class). Cap what we return so one
 // read_symbol can't flood the context; the model can read_file a range for more.
@@ -156,6 +157,3 @@ export const readSymbolTool: Tool = {
   },
 };
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

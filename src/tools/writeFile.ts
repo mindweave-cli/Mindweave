@@ -23,6 +23,7 @@ import { recordWrite, relativize, resolvePath } from "./paths.js";
 import { writeDetail, withScope } from "./detail.js";
 import { applyEol, dirEol, fileEol } from "./eol.js";
 import { writeFileAtomic } from "./atomicWrite.js";
+import { fail } from "./results.js";
 
 export const writeFile: Tool = {
   name: "write_file",
@@ -167,9 +168,6 @@ export const writeFile: Tool = {
   },
 };
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
 
 function errText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

@@ -20,6 +20,7 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { canonicalRoot, rootLabel, rootsOf } from "./paths.js";
 import { discoverRelatedRoots } from "./workspaceDiscover.js";
 import { startChassis, stopChassis } from "../alternator/lane.js";
+import { fail } from "./results.js";
 
 /**
  * One tool, two levels of specificity: a `path` adds that folder, no `path` discovers.
@@ -232,6 +233,3 @@ export function removeRoot(ctx: ToolContext, pathOrLabel: string): { removed?: s
   return { removed: label };
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

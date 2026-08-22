@@ -44,6 +44,7 @@ import { canonicalRoot, relativize } from "./paths.js";
 import { outputDetail, withOutcome } from "./detail.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
 import { findRunningDuplicate, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
+import { fail } from "./results.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -713,6 +714,3 @@ function clip(s: string, max = 60): string {
   return flat.length <= max ? flat : flat.slice(0, max - 1) + "…";
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

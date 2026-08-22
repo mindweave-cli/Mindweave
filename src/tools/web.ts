@@ -19,6 +19,7 @@ import type { Tool, ToolResult } from "./types.js";
 import { searchWeb } from "./webSearch.js";
 import { fetchWeb } from "./webFetch.js";
 import { DISTILL_OVER_CHARS } from "./webFetch.js";
+import { fail } from "./results.js";
 
 export const web: Tool = {
   name: "web",
@@ -77,6 +78,3 @@ export const web: Tool = {
   },
 };
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

@@ -15,6 +15,10 @@ import { forbiddenPathReason } from "../governor/forbidden.js";
 import { requestAgentDataAccess, requestForbiddenLift } from "./approval.js";
 import { resolvePath } from "./paths.js";
 import { detectEol } from "./eol.js";
+import { fail, failQuietly } from "./results.js";
+
+// Re-exported because the edit tools reach for these alongside the gauntlet itself.
+export { fail, failQuietly } from "./results.js";
 
 export interface EditTarget {
   ok: true;
@@ -158,20 +162,6 @@ export function changedSinceRead(
   return false;
 }
 
-export function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
-
-/**
- * A failure the model is expected to fix by itself, this turn.
- *
- * Identical to `fail` for the model — same error text, same `isError`, so nothing about
- * its recovery changes — but marked `quiet` so the UI does not paint a red row for what
- * is really a mid-thought correction. See `ToolResult.quiet` for where the line sits.
- */
-export function failQuietly(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message, quiet: true };
-}
 
 export function errText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

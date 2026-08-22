@@ -10,6 +10,7 @@
  */
 import type { Tool, ToolResult } from "./types.js";
 import { findSkill, loadSkillBody, substituteSkillArgs } from "../governor/skills.js";
+import { fail } from "./results.js";
 
 export const useSkill: Tool = {
   name: "use_skill",
@@ -76,6 +77,3 @@ export const useSkill: Tool = {
   },
 };
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

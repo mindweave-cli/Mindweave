@@ -21,6 +21,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { savePlanArtifact } from "../dynamo/planArtifact.js";
+import { fail } from "./results.js";
 
 /** What the user chose at the approval prompt. Order is the display order. */
 export const PLAN_CHOICES = [
@@ -155,6 +156,3 @@ export const exitPlan: Tool = {
  *  The plan is passed alongside it as detail and printed into the transcript. */
 export const PLAN_QUESTION = "Start on this?";
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

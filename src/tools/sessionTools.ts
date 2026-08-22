@@ -31,6 +31,7 @@ import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { anchorOf } from "./paths.js";
 import { listSessions, loadSessionNotes, loadTranscript } from "../memory/store.js";
 import type { Entry, SessionMeta } from "../memory/types.js";
+import { fail } from "./results.js";
 
 /** How many sessions to list at once unless asked for more. */
 const DEFAULT_LIMIT = 10;
@@ -234,6 +235,3 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
   return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

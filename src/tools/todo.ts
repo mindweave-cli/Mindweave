@@ -22,6 +22,7 @@
  * exactly the kind of model-work we keep out of the prompt).
  */
 import type { Tool, ToolContext, ToolResult, TodoItem, TodoStatus } from "./types.js";
+import { fail } from "./results.js";
 
 const STATUSES: TodoStatus[] = ["pending", "in_progress", "completed"];
 
@@ -144,7 +145,4 @@ function summarize(todos: TodoItem[], allDone: boolean): string {
   return `${head} (${done}/${todos.length} done)`;
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
 

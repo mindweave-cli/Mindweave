@@ -10,6 +10,7 @@ import { join } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { isMultiRoot, relativize, searchUnits, type SearchUnit } from "./paths.js";
 import { DEFAULT_IGNORES } from "./walk.js";
+import { fail } from "./results.js";
 
 /** Entries shown per directory before the list is cut short (the cut is always
  *  announced). Exported so the number in the description is pinned to the real value. */
@@ -147,6 +148,3 @@ function indent(text: string): string {
   return text.split("\n").map((l) => `  ${l}`).join("\n");
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

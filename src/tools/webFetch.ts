@@ -25,6 +25,7 @@ import { activeDriver } from "../drivers/registry.js";
 import { frameExternal } from "./untrusted.js";
 import { outputDetail } from "./detail.js";
 import { estimateTokens } from "../memory/compaction.js";
+import { fail } from "./results.js";
 
 const FETCH_TIMEOUT_MS = 20_000;
 const DOWNLOAD_CAP_BYTES = 3_000_000; // stop reading a response past ~3MB
@@ -457,9 +458,6 @@ function hostOf(u: string | URL): string {
   }
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
 
 /** The fetch half of the merged `web` tool. Logic unchanged. */
 export const fetchWeb = webFetchTool.execute;

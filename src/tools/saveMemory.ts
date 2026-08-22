@@ -15,6 +15,7 @@
  */
 import type { Tool, ToolResult } from "./types.js";
 import { isMemoryType, MEMORY_TYPES, saveMemory as persist } from "../memory/autoMemory.js";
+import { fail } from "./results.js";
 
 /** The fixed session root state files are filed under (cwd may have moved via cd). */
 function projectRoot(ctx: { cwd: string; governance?: { forbidden: { root: string } } }): string {
@@ -122,6 +123,3 @@ function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

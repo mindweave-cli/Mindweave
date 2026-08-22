@@ -19,6 +19,7 @@ import { addFocus, coversSpan } from "./focus.js";
 import { chassisForPath } from "./chassisMux.js";
 import { renderOutlineEntries } from "./codeIntel.js";
 import { estimateTokens } from "../memory/compaction.js";
+import { fail } from "./results.js";
 
 // Caps protect the model's context window, not the disk. They are deliberately
 // MODEL-AGNOSTIC fixed defaults, not derived from any one model's context window —
@@ -380,9 +381,6 @@ function toPathList(args: Record<string, unknown>): string[] {
   return raw.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
 
 /** A positive integer from an env var, or `fallback`. Lets caps be tuned without
  *  baking any one model's limits into the code. */

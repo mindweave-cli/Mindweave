@@ -22,6 +22,7 @@ import { addFocus } from "./focus.js";
 import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
 import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
 import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
+import { fail } from "./results.js";
 
 const MAX_FILES = 5_000;
 /** Cap on matching lines returned. Exported so the merged `search` tool states the
@@ -473,6 +474,3 @@ function nonNegative(v: unknown): number {
   return typeof v === "number" && v > 0 ? Math.floor(v) : 0;
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

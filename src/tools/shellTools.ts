@@ -9,6 +9,7 @@
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { relativize } from "./paths.js";
 import { MAX_READ_CHARS, type ShellInfo } from "./backgroundShells.js";
+import { fail } from "./results.js";
 
 /**
  * One read-only tool at two levels of specificity: no `id` lists, an `id` reads.
@@ -200,6 +201,3 @@ function toId(value: unknown): number | null {
   return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

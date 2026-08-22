@@ -21,6 +21,7 @@ import type { SearchResult } from "../drivers/types.js";
 import { activeDriver } from "../drivers/registry.js";
 import { frameExternal } from "./untrusted.js";
 import { outputDetail } from "./detail.js";
+import { fail } from "./results.js";
 
 /** Sources listed per answer. Enough to judge the answer, short enough to read. */
 const MAX_SOURCES = 8;
@@ -147,9 +148,6 @@ export function formatElapsed(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
 
 /** The search half of the merged `web` tool. Logic unchanged. */
 export const searchWeb = webSearchTool.execute;

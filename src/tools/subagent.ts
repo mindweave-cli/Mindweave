@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import { STATUS_INSTRUCTION, renderVerdict, verifySubagentReport } from "./subagentReport.js";
 import type { Tool, ToolResult } from "./types.js";
 import type { EngineEvent } from "../dynamo/engine.js";
+import { fail } from "./results.js";
 
 const MAX_SUBAGENT_DEPTH = 1;
 /** Default step budget for a worker; the caller can scale it with `max_steps`. */
@@ -212,9 +213,6 @@ export const spawnSubagent: Tool = {
   },
 };
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
 
 /** A clamped positive step budget from the model's `max_steps`, or undefined. */
 export function clampSteps(value: unknown): number | undefined {

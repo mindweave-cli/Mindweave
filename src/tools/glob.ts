@@ -13,6 +13,7 @@ import { relativize, searchUnits, type SearchUnit } from "./paths.js";
 import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
 import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
 import { ripgrepAvailable, runRipgrep } from "./ripgrep.js";
+import { fail } from "./results.js";
 
 /** Cap on paths returned. Exported for the merged `search` tool's description. */
 export const GLOB_MAX_RESULTS = 100;
@@ -137,6 +138,3 @@ async function globViaWalk(pattern: string, unit: SearchUnit, ctx: ToolContext):
     .map((f) => relativize(ctx, f.abs));
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}

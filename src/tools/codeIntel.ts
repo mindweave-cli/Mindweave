@@ -17,6 +17,7 @@ import { excludedFromSearch } from "./guard.js";
 import { isSupported } from "../alternator/chassis/treesitter.js";
 import { isMarkupSupported } from "../alternator/chassis/markup.js";
 import type { Confidence, DirectorySummary, OutlineEntry } from "../alternator/chassis/types.js";
+import { fail } from "./results.js";
 
 const DIR_FILE_CAP = 40;
 const REF_CAP = 100;
@@ -240,9 +241,6 @@ function degraded(): ToolResult {
   };
 }
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
 
 /**
  * These four never render a row.

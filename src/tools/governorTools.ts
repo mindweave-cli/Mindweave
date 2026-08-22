@@ -13,6 +13,7 @@ import type { Tool, ToolResult } from "./types.js";
 import { isMcpToolName } from "../mcp/catalog.js";
 import { writeRule, appendForbidden, appendForbiddenCommand, appendForbiddenMcpTool, deriveRuleName, slugify, writeSkill } from "../governor/write.js";
 import { parseGlobs } from "../governor/rules.js";
+import { fail } from "./results.js";
 
 /** The project root for state files: the fixed session root, carried on the
  *  governance config (cwd may have moved via `cd`; the root never does). */
@@ -286,6 +287,3 @@ export const createSkill: Tool = {
   },
 };
 
-function fail(message: string): ToolResult {
-  return { output: `Error: ${message}`, isError: true, summary: message };
-}
