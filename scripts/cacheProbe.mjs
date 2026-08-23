@@ -10,7 +10,7 @@
  * schemas, because that is the thing in question. A hand-written curl would prove only
  * that Google can cache something, not that it caches what WE send.
  *
- * Usage (needs GEMINI_API_KEY in the environment):
+ * Usage — run from the repository root, which is where tsx resolves:
  *   node --import tsx scripts/cacheProbe.mjs
  *   node --import tsx scripts/cacheProbe.mjs gemini-3.5-flash-lite gemini-3.7-flash
  *   node --import tsx scripts/cacheProbe.mjs --calls 8 gemini-3.5-flash-lite
@@ -18,6 +18,7 @@
  * Reads nothing, writes nothing, changes no files. It only spends tokens — a default
  * run is 6 calls per model against a ~10K prefix, so cents, not dollars.
  */
+import { loadConfig } from "../src/cli/bootstrap.ts";
 import { basePrompt } from "../src/dynamo/prompt.ts";
 import { toolSchemas } from "../src/tools/registry.ts";
 import { toolTurn } from "../src/drivers/gemini/client.ts";
@@ -34,8 +35,11 @@ if (ci !== -1) {
 // wrong", which is the whole failure mode this script exists to avoid.
 const models = argv.length > 0 ? argv : ["gemini-3.5-flash-lite", "gemini-3.7-flash"];
 
+// The key normally lives in ~/.mindweave/.env, not the shell — read it the way the CLI
+// does, so a probe works for anyone who can already run the agent.
+loadConfig();
 if (!process.env.GEMINI_API_KEY) {
-  console.error("GEMINI_API_KEY is not set — nothing to probe.");
+  console.error("No GEMINI_API_KEY — set it in ~/.mindweave/.env or the shell.");
   process.exit(1);
 }
 
