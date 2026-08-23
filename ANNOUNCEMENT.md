@@ -30,6 +30,13 @@ reading width that keeps answers legible even on a maximized window. Compaction
 shows a before-and-after bar with the exact token count it just reclaimed, every
 time it runs, not only when you ask for it.
 
+**Fewer red rows that never mattered.** When a model gets a tool call's arguments wrong,
+it is told what was wrong and writes the call again a moment later, with nothing for you
+to do about it. Mindweave used to paint that as an error, which trains you to skim past
+error rows, and skimming past them is how you miss the ones that count. Those corrections
+are now silent. Real news stays loud: a command that failed, a write that was refused, a
+path that does not exist.
+
 **Typing is fast now.** It used to lag in long conversations, and the cause was
 not the work being done. The renderer was capped at 30 frames a second, which put
 a 34-millisecond floor under every keystroke no matter how little there was to
@@ -55,6 +62,15 @@ Meta's Muse Spark is offered two ways: the normal tier, and a "Contributor" tier
 that runs roughly 12x cheaper in exchange for letting Meta train on your prompts
 and completions. Both are real, and Mindweave never picks the cheaper one for
 you. The default is always the one that keeps your data yours.
+
+## Mindweave can look at a picture
+
+Drop an image into the conversation with `@screenshot.png` and a model that can see will
+actually see it. Mindweave reads what the running model is capable of rather than
+assuming: a text-only model is told plainly that an image was attached and could not be
+read, instead of being handed a message claiming a picture it cannot see. DeepSeek's
+vision model is offered alongside the rest, and images are carried as references so a
+long conversation does not re-send the same picture on every step.
 
 ## DeepSeek tuned, not just supported
 
@@ -126,6 +142,11 @@ Two changes, both aimed at the same habit.
 round trips, each re-sending your entire conversation to the provider. One call
 with four paths costs a quarter of that and takes a quarter as long. A bad path in
 the list is reported in place instead of throwing away the files that read fine.
+
+Asking for a line range across several files at once used to be refused outright, which
+cost a whole round trip to recover and, worse, could quietly lose a file: told to ask for
+one path, the answer was to retry with the first one and abandon the rest. Every file you
+asked for now comes back, with a note that the range was skipped and how to ask for one.
 
 **A large file comes back as its structure, not its text.** Asking to read a
 1,700-line file whole costs its full length on that request and on every request
@@ -291,23 +312,40 @@ Sessions, cross-session memory and approved plans now write the same careful way
 
 ## Your rules stay in force
 
-Rules you set are meant to be standing instructions, and there were two ways one could
+Rules you set are meant to be standing instructions, and there were three ways one could
 stop applying without saying so.
 
-A rule can be scoped to a set of paths, so it switches on once the session is working in
-them. That was decided from the record of which files were currently in view, and
-summarising a long conversation clears that record. So a rule scoped to a folder quietly
-stopped applying the moment the session got long enough to compact, and came back only
-if the same folder was opened again. What is on screen changes when a conversation is
-summarised; what you are working on does not, and those are now tracked separately.
+**A rule you edit by hand now takes effect.** Rules, skills and forbidden lists are
+files, and editing one in your editor is at least as natural as asking Mindweave to
+change it. Until now that edit did nothing until you restarted, silently, with the old
+rule still being enforced and nothing on screen to say so. Mindweave now notices the
+change and picks it up on your next message. Deleting a rule works too, which a check
+that only looked at surviving files would have missed.
 
-The second is about workspaces. `/include` adds another project to a session, but a
-forbidden path was only ever measured against the project you started in. A rule
-refusing to touch a folder did nothing in the folder you added, while still being listed
-and still looking active. Paths are now measured against every folder in the workspace.
+Anything you allowed for the session only stays allowed. Lifting a forbidden path is a
+decision you made about this session and it was never written to your project, so
+re-reading your rules must not quietly take it back.
+
+**A rule scoped to a folder no longer lapses.** A rule can be scoped to a set of paths,
+so it switches on once the session is working in them. That used to be worked out from
+the record of which files were currently in view, and summarising a long conversation
+clears that record, so the rule quietly stopped applying the moment the session got long
+enough to compact. Mindweave now settles the question when it opens the file, and
+remembers the answer. What is on screen changes when a conversation is summarised; what
+you are working on does not.
+
+It costs less, too. Deciding it once per file rather than re-deriving it before every
+message means a scoped rule does not get more expensive the longer you work.
+
+**A workspace rule covers the whole workspace.** `/include` adds another project to a
+session, but a forbidden path was only ever measured against the project you started in.
+A rule refusing to touch a folder did nothing in the folder you added, while still being
+listed and still looking active. Paths are now measured against every folder in the
+workspace.
 
 Folders you add stay workable, and a folder that is not part of your workspace is still
 none of the rule's business.
+
 
 ## Two ways round the file protections, closed
 
