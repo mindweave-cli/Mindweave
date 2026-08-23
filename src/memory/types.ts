@@ -243,11 +243,19 @@ export interface Session {
   projectContext: string;
   /**
    * The per-project governor: standing rules, the skill catalog, and the
-   * forbidden deny-list. Loaded once at session start from this project's state
-   * dir. Rules + skill catalog are rendered into the system prompt; the forbidden
-   * config also rides on `toolContext` for mechanical enforcement.
+   * forbidden deny-list. Loaded at session start from this project's state dir, and
+   * RE-READ when those files change on disk — a person editing a rule in their editor
+   * is at least as likely as the model writing one, and that edit used to do nothing
+   * until restart. Rules + skill catalog are rendered into the system prompt; the
+   * forbidden config also rides on `toolContext` for mechanical enforcement.
    */
   governance: import("../governor/types.js").Governance;
+  /**
+   * Fingerprint of the governance files as of the last load (governor/freshness.ts).
+   * Compared at the start of each turn; a difference triggers a reload. Absent means
+   * "never stamped", which reloads once and then settles.
+   */
+  governanceStamp?: string;
   /**
    * Which model answers and how hard it thinks (`/model` + `/think`). Loaded from
    * the project's saved choice at session start (sticky per project); the engine

@@ -99,4 +99,13 @@ export interface Governance {
    * its own `notices` (see mcp/manager.ts's `takeNotices`); each is shown once.
    */
   notices?: string[];
+  /**
+   * Forbidden patterns the USER lifted for this session (approval.ts), which live only
+   * in memory — the on-disk rule is deliberately left intact.
+   *
+   * Kept because governance is re-read when its files change: a reload rebuilds the
+   * deny-list from disk, and without this list it would silently restore a pattern the
+   * user had just allowed. Re-applied after every reload.
+   */
+  lifted?: string[];
 }

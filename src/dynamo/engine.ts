@@ -25,10 +25,10 @@ import { prefixPrint, diffPrefix } from "./cacheBreak.js";
 import { commandShellLabel } from "../tools/runCommand.js";
 import { isInteractiveServerCommand } from "../tools/backgroundShells.js";
 import { basePrompt } from "./prompt.js";
-import { basename, relative } from "node:path";
+import { basename } from "node:path";
 import { promises as fsp } from "node:fs";
 import { relativize, resolvePath, rootLabel } from "../tools/paths.js";
-import { renderRules, renderSkillCatalog } from "../governor/index.js";
+import { renderRules, renderSkillCatalog, reloadGovernance, governanceStamp, rescope } from "../governor/index.js";
 import type { Session, Entry, ToolCallRecord } from "../memory/types.js";
 import { forkSession, reloadProjectMemory } from "../memory/session.js";
 import { selectActiveFiles } from "../memory/workingSet.js";
@@ -276,24 +276,15 @@ interface GovernancePrompt {
 
 function governancePrompt(session: Session): GovernancePrompt {
   const g = session.governance;
-  // The working set: project-relative POSIX paths the model has touched this
-  // session. Glob-scoped rules fire only when one of these matches their globs.
-  const root = g.forbidden.root;
-  // Union, not just `reads`. A compaction clears the read ledger (the contents it
-  // described are no longer on screen), and scoping used to ride on that alone — so a
-  // rule the user scoped to a folder silently stopped applying the moment the session
-  // was summarised, and only came back if the model happened to re-read a matching
-  // file. What this session has WORKED IN does not change when the transcript is
-  // rewritten, so it is tracked separately and never emptied.
-  const touched = new Set<string>([
-    ...session.toolContext.reads.keys(),
-    ...(session.toolContext.scopePaths ?? []),
-  ]);
-  const workingSet = [...touched].map((abs) => relative(root, abs).split("\\").join("/"));
+  // Which glob-scoped rules have fired is decided when a path is TOUCHED, not here —
+  // see governor/scope.ts. This used to rebuild the whole working set on every model
+  // call and match every scoped rule against all of it, which is O(paths x rules) per
+  // step against a set that only ever grew.
+  const fired = session.toolContext.ruleScope?.matched ?? new Set<string>();
   return {
-    // Rules render into the VOLATILE tail, so glob-scoping them against the working set
-    // is free — the tail is rebuilt every step regardless.
-    rules: renderRules(g.rules, workingSet),
+    // A set lookup per rule. Rules render into the VOLATILE tail, which is rebuilt every
+    // step regardless, so this is now genuinely the free part it always claimed to be.
+    rules: renderRules(g.rules, fired),
     forbidden: g.forbidden.patterns.map((p) => `- ${p}`).join("\n"),
     forbiddenCommands: (g.forbidden.commands ?? []).map((c) => `- ${c}`).join("\n"),
     // The skill catalog renders into the CACHED SYSTEM PROMPT, so it is deliberately
@@ -677,6 +668,45 @@ export function callIsConcurrencySafe(
 }
 
 /**
+ * Re-read the governor if its files changed on disk, or if `force` says to regardless.
+ *
+ * Two triggers, and they cover different failures. The STAT check catches a person
+ * editing a rule in their editor mid-session — the common case, and the one that used
+ * to do nothing at all until restart. The FORCED reload runs after a compaction, which
+ * is where Claude Code drops its own memoized memory files: the prompt is being rebuilt
+ * from scratch anyway, so it is the natural moment to rebuild what the prompt is made
+ * of, and it costs one directory read on an operation that just made a model call.
+ *
+ * Degrade-safe. Governance is a convenience layer over files that may be mid-write, and
+ * an unreadable rules directory must not take the turn down with it — on any failure the
+ * session simply keeps the governance it already had.
+ */
+async function refreshGovernance(session: Session, force = false): Promise<void> {
+  try {
+    const stamp = await governanceStamp(session.toolContext.cwd);
+    // Skipping when the stamp is unchanged is what keeps our OWN writes from causing a
+    // reload storm: a governor tool writes the file and mirrors the change into the live
+    // object, so the next turn sees a new stamp, reloads once, and reads back exactly
+    // what it already had. Cheap and idempotent, but only once.
+    if (!force && stamp === session.governanceStamp) return;
+    const fresh = await reloadGovernance(session.toolContext.cwd, session.governance);
+    session.governance = fresh;
+    session.toolContext.governance = fresh;
+    session.governanceStamp = stamp;
+    // A rule that did not exist when a path was touched never got its chance to fire,
+    // so the remembered paths are re-judged against the new list. Additive — a rule
+    // already fired stays fired, and one deleted from disk stops rendering because
+    // rendering filters by the live rule list.
+    if (session.toolContext.ruleScope) rescope(session.toolContext.ruleScope, fresh.rules);
+    // The MCP deny-list is pushed into the manager rather than read from governance, so
+    // it has to be re-pushed or a tool the user just forbade stays advertised.
+    session.toolContext.mcp?.setForbidden(fresh.forbidden.mcpTools ?? []);
+  } catch {
+    // Keep what we have. See the note above.
+  }
+}
+
+/**
  * Run one turn, and put planning back afterwards if an approved plan left it.
  *
  * The restore is in a `finally` rather than at the end of the turn because approval
@@ -705,6 +735,12 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // every subsequent turn, and it keeps `activeDriver()` safe to call synchronously
   // from here down (including from inside a tool).
   await ensureDriver(session.modelConfig.model);
+
+  // Pick up a governance file the USER edited by hand since the last turn. One stat
+  // pass over a few small directories, taken here because a turn is the only moment
+  // governance is consulted — so it is fresh exactly where it is used, with no watcher
+  // to own, poll or tear down. See refreshGovernance.
+  await refreshGovernance(session);
 
   // Resume an approved plan from disk, once per session (undefined = unchecked).
   // A plan approved last session is still the agreed scope this session — that is
@@ -1900,6 +1936,12 @@ async function finishCompaction(session: Session, options: RespondOptions, befor
 
   await restoreAfterCompaction(session);
 
+  // Re-read the governor unconditionally, the way Claude Code drops its memoized memory
+  // files after a compaction. The prompt is being rebuilt from scratch here, so this is
+  // the natural moment to rebuild what it is made of — and it is the one path that does
+  // not depend on the stat check being right about anything.
+  await refreshGovernance(session, true);
+
   // Report it. Compaction is the one context operation worth showing: it REWRITES the
   // conversation, so a user who is not told will later wonder why the model forgot the
   // middle of it. Reported for the automatic pass as well as `/compact`.
@@ -1942,10 +1984,10 @@ async function restoreAfterCompaction(session: Session): Promise<void> {
   if (!reads || reads.size === 0) return;
 
   const snapshot = new Map(reads);
-  // Remembered before the ledger is emptied, so glob-scoped rules keep applying. The
-  // ledger is about what is on screen; this is about what the session is working on,
-  // and a compaction changes the first without changing the second.
-  ctx.scopePaths = new Set([...(ctx.scopePaths ?? []), ...snapshot.keys()]);
+  // Nothing is carried forward for rule scoping any more. A scoped rule records that it
+  // FIRED at the moment a matching path was touched, and that name is never removed —
+  // so a compaction, which is only about what is on screen, cannot un-apply it. The
+  // earlier fix copied every path forward to re-derive the same answer every step.
   // The correctness half. Unconditional, and before anything that can throw.
   reads.clear();
 

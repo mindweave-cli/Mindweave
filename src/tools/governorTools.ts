@@ -12,6 +12,7 @@
 import type { Tool, ToolResult } from "./types.js";
 import { isMcpToolName } from "../mcp/catalog.js";
 import { writeRule, appendForbidden, appendForbiddenCommand, appendForbiddenMcpTool, deriveRuleName, slugify, writeSkill } from "../governor/write.js";
+import { rescope } from "../governor/scope.js";
 import { parseGlobs } from "../governor/rules.js";
 import { failQuietly } from "./results.js";
 
@@ -46,6 +47,10 @@ async function doRememberRule(args: Record<string, unknown>, ctx: Ctx): Promise<
   if (ctx.governance) {
     const slug = slugify(saved.name);
     ctx.governance.rules = [...ctx.governance.rules.filter((r) => slugify(r.name) !== slug), saved];
+    // A brand-new scoped rule never saw the paths this session already worked in, and
+    // scoping is decided at touch time — so without this it would sit inert until the
+    // model happened to touch a matching file again.
+    if (ctx.ruleScope) rescope(ctx.ruleScope, ctx.governance.rules);
   }
   const scope = globs.length > 0 ? ` (scoped to ${globs.join(", ")})` : "";
   return {

@@ -56,3 +56,38 @@ export async function loadGovernance(cwd: string): Promise<Governance> {
 export { renderRules } from "./rules.js";
 export { renderSkillCatalog } from "./skills.js";
 export type { Governance, Rule, SkillMeta, ForbiddenConfig } from "./types.js";
+
+/**
+ * Re-read governance from disk, keeping everything that exists only in this session.
+ *
+ * Three things do NOT come from disk and must survive a reload:
+ *   - `lifted` — patterns the user allowed for this session only (approval.ts). The
+ *     on-disk rule is intentionally left in place, so a plain reload would restore it
+ *     and re-block a path the user had just permitted.
+ *   - `notices` — one-shot lines the UI has not drained yet. Dropping them loses the
+ *     message rather than delaying it.
+ *   - the fired rule-scope, which is not on `Governance` at all: it lives on the tool
+ *     context and is re-judged against the new rule list by the caller.
+ *
+ * Returns a NEW object rather than mutating: the forbidden matcher caches compiled
+ * patterns in a WeakMap keyed on array identity, so fresh arrays are what make it
+ * recompile instead of enforcing the old list.
+ */
+export async function reloadGovernance(cwd: string, previous: Governance): Promise<Governance> {
+  const fresh = await loadGovernance(cwd);
+  const lifted = previous.lifted ?? [];
+  return {
+    ...fresh,
+    forbidden: {
+      ...fresh.forbidden,
+      patterns: fresh.forbidden.patterns.filter((p) => !lifted.includes(p)),
+      commands: (fresh.forbidden.commands ?? []).filter((c) => !lifted.includes(c)),
+    },
+    ...(lifted.length > 0 ? { lifted } : {}),
+    ...(previous.notices && previous.notices.length > 0 ? { notices: previous.notices } : {}),
+  };
+}
+
+export { governanceStamp } from "./freshness.js";
+export { createRuleScope, noteScopePath, rescope } from "./scope.js";
+export type { RuleScope } from "./scope.js";

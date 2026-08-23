@@ -17,7 +17,8 @@ import { startChassis } from "../alternator/lane.js";
 import { BackgroundShells } from "../tools/backgroundShells.js";
 import { Checkpoints } from "../tools/checkpoints.js";
 import { projectContextText } from "../project/context.js";
-import { loadGovernance } from "../governor/index.js";
+import { loadGovernance, governanceStamp } from "../governor/index.js";
+import { createRuleScope } from "../governor/scope.js";
 import type { Governance } from "../governor/types.js";
 import { loadModelConfig } from "../dynamo/model.js";
 import { ensureMemoryDir, loadMemoryIndex, memoryDir } from "./autoMemory.js";
@@ -165,6 +166,9 @@ function freshToolContext(cwd: string, governance: Governance, roots: string[]):
     // (a new rule, a new forbidden path) are visible to both the tools and the
     // engine's prompt without a reload.
     governance,
+    // Which glob-scoped rules this session has activated. Filled as paths are touched
+    // (governor/scope.ts) rather than re-derived on every model call.
+    ruleScope: createRuleScope(),
   };
 }
 
@@ -242,11 +246,12 @@ export async function createSession(rawCwd: string = process.cwd()): Promise<Ses
   // canonicalRoot. Doing it at the single point of entry is what keeps every root,
   // every recorded cwd, and every relativized path speaking the same form.
   const cwd = await canonicalRoot(rawCwd);
-  const [projectMemory, memoryIndex, projectContext, governance, modelConfig, earlier] = await Promise.all([
+  const [projectMemory, memoryIndex, projectContext, governance, stamp, modelConfig, earlier] = await Promise.all([
     loadProjectMemory(cwd),
     loadMemory(cwd),
     projectContextText(cwd),
     loadGovernance(cwd),
+    governanceStamp(cwd),
     loadModelConfig(cwd),
     listSessions(cwd),
   ]);
@@ -269,6 +274,9 @@ export async function createSession(rawCwd: string = process.cwd()): Promise<Ses
     priorSessions: earlier.length,
     projectContext,
     governance,
+    // Stamped at load so the first turn's freshness check settles instead of reloading
+    // what was just read. See governor/freshness.ts.
+    governanceStamp: stamp,
     modelConfig,
   };
 }
@@ -388,12 +396,13 @@ export async function resumeSession(
   // message, so it must see a group that is already contiguous.
   const transcript = reconcileInterruptedTools(repairToolCallOrder(loaded));
 
-  const [projectMemory, memoryIndex, projectContext, governance, modelConfig, sessionMemory, saved] =
+  const [projectMemory, memoryIndex, projectContext, governance, stamp, modelConfig, sessionMemory, saved] =
     await Promise.all([
       loadProjectMemory(cwd),
       loadMemory(cwd),
       projectContextText(cwd),
       loadGovernance(cwd),
+      governanceStamp(cwd),
       loadModelConfig(cwd),
       loadSessionNotes(cwd, meta.id),
       listSessions(cwd),
@@ -422,6 +431,9 @@ export async function resumeSession(
     priorSessions: Math.max(0, saved.filter((m) => m.id !== meta.id).length),
     projectContext,
     governance,
+    // Stamped at load so the first turn's freshness check settles instead of reloading
+    // what was just read. See governor/freshness.ts.
+    governanceStamp: stamp,
     modelConfig,
     // The maintained session notes survive a resume, so a continued session keeps its
     // crisp running state. The watermark starts fresh; it'll refresh as it grows again.
