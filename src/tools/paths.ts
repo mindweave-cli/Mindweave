@@ -30,6 +30,7 @@ import type { ToolContext } from "./types.js";
  */
 const realpathNative = promisify(realpathCb.native);
 import { addFocus } from "./focus.js";
+import { noteScopePath } from "../governor/scope.js";
 
 /**
  * Resolve a directory to its PHYSICAL path, following symlinks.
@@ -179,6 +180,25 @@ export function searchUnits(ctx: ToolContext, rawPath: string | undefined): Sear
   return [{ root: ctx.cwd, sub: "" }];
 }
 
+/**
+ * Tell the governor this session has worked in `absPath`, firing any glob-scoped rule
+ * that matches it.
+ *
+ * Called wherever a file enters the read ledger, which is the definition of "the
+ * session touched this". Deliberately separate from `ctx.reads` itself: the ledger is
+ * cleared at a compaction and this must not be, so the two are written together and
+ * forgotten apart.
+ *
+ * A no-op when the session has no governance or no scope (a sub-agent, a test), and
+ * cheap when it has no glob-scoped rules — see scope.ts.
+ */
+export function markScope(ctx: ToolContext, absPath: string): void {
+  const scope = ctx.ruleScope;
+  const rules = ctx.governance?.rules;
+  if (!scope || !rules || rules.length === 0) return;
+  noteScopePath(scope, rules, ctx.governance!.forbidden.root, absPath);
+}
+
 /** Monotonic clock for read/edit recency (drives the working set's LRU ordering). */
 let touchClock = 0;
 export function nextTouch(): number {
@@ -208,6 +228,7 @@ export async function recordWrite(
   focus?: { start: number; end: number },
 ): Promise<void> {
   const prev = ctx.reads.get(absPath);
+  markScope(ctx, absPath);
   const base = { full: false, touchedAt: nextTouch(), focus: addFocus(prev?.focus, focus) };
   try {
     const st = await fs.stat(absPath);

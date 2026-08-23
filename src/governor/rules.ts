@@ -14,7 +14,6 @@
 import { promises as fs } from "node:fs";
 import { basename, join } from "node:path";
 import { parseFrontmatter } from "./frontmatter.js";
-import { anyPathMatches } from "./glob.js";
 import type { Rule } from "./types.js";
 
 /** Parse a frontmatter `globs` field (comma/space/newline separated) into a clean list. */
@@ -58,12 +57,15 @@ export async function loadRules(stateDir: string): Promise<Rule[]> {
 
 /**
  * Pick the rules active for this turn: every always-on rule (no globs) plus any
- * glob-scoped rule whose patterns match a path in the current working set. The
- * working set is the project-relative paths the model has read/touched this
- * session — so a scoped rule fires exactly when the work heads its way.
+ * glob-scoped rule that has already FIRED — see scope.ts, which decides that once, when
+ * a matching path is touched, instead of re-deriving it from the whole working set on
+ * every model call.
+ *
+ * `fired` holds rule NAMES. Filtering by the live rule list rather than by that set is
+ * what makes a rule deleted from disk stop rendering even though its name is remembered.
  */
-export function activeRules(rules: Rule[], workingSet: string[] = []): Rule[] {
-  return rules.filter((r) => !r.globs || r.globs.length === 0 || anyPathMatches(workingSet, r.globs));
+export function activeRules(rules: Rule[], fired: ReadonlySet<string> = new Set()): Rule[] {
+  return rules.filter((r) => !r.globs || r.globs.length === 0 || fired.has(r.name));
 }
 
 /**
@@ -71,8 +73,8 @@ export function activeRules(rules: Rule[], workingSet: string[] = []): Rule[] {
  * none apply (the engine then omits the block). Content only — the engine wraps
  * it in its `<rules>` framing, matching how the task list is done.
  */
-export function renderRules(rules: Rule[], workingSet: string[] = []): string {
-  const active = activeRules(rules, workingSet);
+export function renderRules(rules: Rule[], fired: ReadonlySet<string> = new Set()): string {
+  const active = activeRules(rules, fired);
   if (active.length === 0) return "";
   return active.map((r) => `- ${r.body}`).join("\n");
 }

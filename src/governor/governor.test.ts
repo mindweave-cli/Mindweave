@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import { parseFrontmatter } from "./frontmatter.js";
 import { loadRules, renderRules, parseGlobs } from "./rules.js";
+import { createRuleScope, noteScopePath, rescope } from "./scope.js";
 import { loadSkillCatalog, loadSkillBody, findSkill, renderSkillCatalog, activeSkills, substituteSkillArgs } from "./skills.js";
 import { parseForbidden, forbiddenPathReason, forbiddenCommandReason, parseForbiddenCommands, forbiddenCommandPatternReason } from "./forbidden.js";
 
@@ -57,7 +58,7 @@ test("parseGlobs splits comma/space and normalizes leading ./ and trailing /", (
   assert.deepEqual(parseGlobs(undefined), []);
 });
 
-test("glob-scoped rules fire only when the working set matches; always-on always fire", async () => {
+test("glob-scoped rules fire once a matching path is touched; always-on always fire", async () => {
   const dir = await tempDir();
   await fs.mkdir(join(dir, "rules"), { recursive: true });
   await fs.writeFile(join(dir, "rules", "global.md"), "---\nname: pm\n---\nUse pnpm.");
@@ -65,14 +66,25 @@ test("glob-scoped rules fire only when the working set matches; always-on always
   const rules = await loadRules(dir);
   assert.equal(rules.find((r) => r.name === "api")?.globs?.[0], "src/api/**");
 
-  // No working set → only the always-on rule.
-  assert.equal(renderRules(rules, []), "- Use pnpm.");
-  // Working set touches src/api → both rules fire.
-  const both = renderRules(rules, ["src/api/users.ts"]);
-  assert.match(both, /Use pnpm\./);
+  const root = process.platform === "win32" ? "D:\proj" : "/proj";
+  const scope = createRuleScope();
+  // Nothing touched yet, so only the always-on rule.
+  assert.equal(renderRules(rules, scope.matched), "- Use pnpm.");
+
+  // A path elsewhere leaves the scoped rule out.
+  noteScopePath(scope, rules, root, join(root, "src", "web", "app.ts"));
+  assert.equal(renderRules(rules, scope.matched), "- Use pnpm.");
+
+  // A path under src/api fires it.
+  noteScopePath(scope, rules, root, join(root, "src", "api", "users.ts"));
+  const both = renderRules(rules, scope.matched);
+  assert.match(both, /Use pnpm/);
   assert.match(both, /kebab-case/);
-  // Working set elsewhere → scoped rule stays out.
-  assert.equal(renderRules(rules, ["src/web/app.ts"]), "- Use pnpm.");
+
+  // And it STAYS fired: the match is remembered, not re-derived from the paths, so
+  // later work elsewhere cannot un-apply a rule that already became relevant.
+  noteScopePath(scope, rules, root, join(root, "docs", "readme.md"));
+  assert.match(renderRules(rules, scope.matched), /kebab-case/);
 });
 
 test("skills: catalog is metadata only; body loads on demand", async () => {

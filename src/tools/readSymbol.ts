@@ -13,7 +13,7 @@
  */
 import { promises as fs } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
-import { relativize, resolvePath, nextTouch } from "./paths.js";
+import { relativize, resolvePath, nextTouch, markScope } from "./paths.js";
 import { addFocus, coversSpan } from "./focus.js";
 import { allChassis, symbolSpans } from "./chassisMux.js";
 import { sliceBody } from "./spanCore.js";
@@ -117,6 +117,7 @@ export const readSymbolTool: Tool = {
     // with recency + the symbol's span as focus (for working-set localization).
     const prior = ctx.reads.get(abs);
     const unchanged = prior?.mtimeMs === stat.mtimeMs && prior?.size === stat.size;
+    markScope(ctx, abs);
     ctx.reads.set(abs, {
       mtimeMs: stat.mtimeMs,
       size: stat.size,

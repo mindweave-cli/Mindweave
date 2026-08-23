@@ -14,7 +14,7 @@ import { promises as fs } from "node:fs";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { requestAgentDataAccess } from "./approval.js";
-import { relativize, resolvePath, nextTouch, touch } from "./paths.js";
+import { relativize, resolvePath, nextTouch, touch, markScope } from "./paths.js";
 import { addFocus, coversSpan } from "./focus.js";
 import { chassisForPath } from "./chassisMux.js";
 import { renderOutlineEntries } from "./codeIntel.js";
@@ -345,6 +345,7 @@ async function readOne(
   // Record the read so edit / write_file know this file has been seen, so a
   // later identical read can be deduped, and so it enters the working set (recency +
   // the focused range for a partial read, used to localize a large file).
+  markScope(ctx, filePath);
   ctx.reads.set(filePath, {
     mtimeMs: stat.mtimeMs,
     size: stat.size,

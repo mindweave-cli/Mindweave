@@ -17,7 +17,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { Tool, ToolContext, ToolResult } from "./types.js";
-import { isMultiRoot, nextTouch, relativize, resolvePath, rootLabel, rootsOf, searchUnits, type SearchUnit } from "./paths.js";
+import { isMultiRoot, nextTouch, relativize, resolvePath, rootLabel, rootsOf, searchUnits, type SearchUnit, markScope } from "./paths.js";
 import { addFocus } from "./focus.js";
 import { DEFAULT_IGNORES, globToRegExp, walkFiles } from "./walk.js";
 import { SEARCH_EXCLUDE_GLOBS, excludedFromSearch } from "./guard.js";
@@ -227,6 +227,7 @@ async function recordSearchHits(ctx: ToolContext, lines: readonly string[]): Pro
     try {
       const st = await fs.stat(abs);
       if (!st.isFile()) continue;
+      markScope(ctx, abs);
       ctx.reads.set(abs, {
         mtimeMs: st.mtimeMs,
         size: st.size,

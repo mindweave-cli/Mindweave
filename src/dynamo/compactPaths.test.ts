@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 import { compactNow, toolFailureResult } from "./engine.js";
 import { estimateEntriesTokens } from "../memory/compaction.js";
 import type { Entry, Session } from "../memory/types.js";
+import { createRuleScope, noteScopePath } from "../governor/scope.js";
+import { renderRules } from "../governor/rules.js";
 
 const NOTES = "# Session Title\nWiring the parser\n\n# Current State\nHalfway through lexer.ts, nested quotes still failing.";
 
@@ -303,27 +305,62 @@ test("a glob-scoped rule keeps applying after a compaction", async () => {
   // a folder silently stopped applying the moment the session was summarised, and only
   // returned if the model happened to re-read a matching file. A standing instruction
   // must not evaporate because the transcript was rewritten.
+  //
+  // Asserted on the RENDERED rules rather than on whatever structure carries them, so
+  // this keeps holding if the mechanism changes again — which it has once already.
   const dir = await fs.mkdtemp(join(tmpdir(), "mw-scope-"));
   try {
     const worked = join(dir, "src", "api", "users.ts");
     await fs.mkdir(join(dir, "src", "api"), { recursive: true });
     await fs.writeFile(worked, "export const users = 1;\n");
 
+    const rules = [
+      { name: "pm", description: "", body: "Use pnpm." },
+      { name: "api", description: "", body: "Kebab-case routes.", globs: ["src/api/**"] },
+    ];
+    const scope = createRuleScope();
     const reads = new Map([[worked, { mtimeMs: 1, size: 10, full: true, touchedAt: 1 }]]);
-    const s = session({ toolContext: { cwd: dir, reads, roots: [dir] } as never });
+    const s = session({
+      toolContext: {
+        cwd: dir,
+        reads,
+        roots: [dir],
+        ruleScope: scope,
+        governance: { rules, skills: [], forbidden: { patterns: [], root: dir } },
+      } as never,
+      governance: { rules, skills: [], forbidden: { patterns: [], root: dir } } as never,
+    });
+
+    // The session works in src/api, which is what fires the scoped rule.
+    noteScopePath(scope, rules, dir, worked);
+    assert.match(renderRules(rules, scope.matched), /Kebab-case/, "the rule never fired");
+
     await compactNow(s);
 
-    const ctx = s.toolContext as { reads: Map<string, unknown>; scopePaths?: Set<string> };
-    assert.ok(ctx.scopePaths?.has(worked), "the path this session worked in is remembered");
-    // And the ledger is still cleared, which is the property the restoration relies on.
-    assert.ok(!ctx.reads.has(worked) || ctx.scopePaths?.has(worked), "scoping survives independently");
+    // The ledger is deliberately not asserted on here: compaction clears it and then
+    // RESTORES files into it, so its contents are a fact about that pass, not about
+    // scoping. Scoping is the thing under test and it must hold either way.
+    assert.match(
+      renderRules(rules, scope.matched),
+      /Kebab-case/,
+      "the scoped rule stopped applying because the transcript was summarised",
+    );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
 
-test("rule scoping reads the union, not just the live ledger", () => {
-  const body = engineSource.match(/function governancePrompt\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
-  assert.ok(body, "governancePrompt not found — did it get renamed?");
-  assert.match(body, /scopePaths/, "scoping must not depend on the ledger alone");
+test("rule scoping does not depend on the read ledger at all", () => {
+  // Previously asserted by grepping the engine source for a variable name, which passes
+  // for a rename and fails for nothing that matters. The real property is that a rule
+  // which has fired renders with an EMPTY ledger — the state a compaction leaves behind.
+  const rules = [
+    { name: "pm", description: "", body: "Use pnpm." },
+    { name: "api", description: "", body: "Kebab-case routes.", globs: ["src/api/**"] },
+  ];
+  const scope = createRuleScope();
+  const root = process.platform === "win32" ? "D:\proj" : "/proj";
+  noteScopePath(scope, rules, root, join(root, "src", "api", "users.ts"));
+  // No ledger is consulted here because there is nothing to consult.
+  assert.match(renderRules(rules, scope.matched), /Kebab-case/);
 });
