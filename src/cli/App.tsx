@@ -65,6 +65,7 @@ import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig,
 import { mapPromptArguments, parsePromptCommand, promptCommand, promptUsage } from "../mcp/prompts.js";
 import type { Entry, Session, SessionMeta } from "../memory/types.js";
 import { DEFAULT_MODE, modeById, modeFromFlags, nextMode, type ModeId } from "./modes.js";
+import { ApprovalChannel } from "./approvalChannel.js";
 
 const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
 
@@ -269,6 +270,13 @@ export function App() {
   // erasing correctly and the screen tears (see the frameHeight comment below). The
   // transcript is the part of the UI already built to hold arbitrary length — it is
   // clipped and scrollable — so long context goes there and the prompt stays one line.
+  // Approvals WAIT FOR EACH OTHER rather than replacing each other. The rules and the
+  // reasons live in approvalChannel.ts, where they can be tested directly; this holds
+  // one instance for the session and keeps the visible slot in sync with it.
+  const approvals = useRef(new ApprovalChannel<Overlay>());
+  const showNextApproval = useRef(() => {
+    setOverlay((current) => current ?? approvals.current.current);
+  });
   const askApproval = useRef((
     question: string,
     options: string[],
@@ -282,9 +290,17 @@ export function App() {
       // reinterpreted as markdown). Untitled → prose, because it is a document to read.
       dispatch(detailTitle ? { type: "notice", title: detailTitle, body } : { type: "say", text: body });
     }
-    return new Promise<string>((resolve) =>
-      setOverlay({ kind: "approval", question, options, resolve, ...(freeText ? { freeText } : {}) }),
-    );
+    const answer = approvals.current.ask({
+      kind: "approval",
+      question,
+      options,
+      // Answered through the channel, never by calling this directly — that is what
+      // keeps "exactly once" and the queue order in one place.
+      resolve: () => {},
+      ...(freeText ? { freeText } : {}),
+    } as Overlay);
+    showNextApproval.current();
+    return answer;
   });
   // Bumped whenever a background shell starts/finishes, to re-render the indicator.
   const [bgTick, setBgTick] = useState(0);
@@ -560,6 +576,10 @@ export function App() {
     (_input, key) => {
       if (key.escape) {
         abortRef.current?.abort();
+        // Anything still waiting to be asked is answered as declined. A queued approval
+        // has no overlay to press Esc on, so without this the tool holding it would wait
+        // for the rest of the session on a question the user has already stopped.
+        approvals.current.dismissWaiting(APPROVAL_DISMISSED);
         // Esc means STOP — including anything running in the background (a starting app,
         // a dev server). Aborting the turn alone left those alive, so the app still opened.
         const mgr = session.current?.toolContext.backgroundShells;
@@ -1229,19 +1249,28 @@ export function App() {
     } else if (o.kind === "mcp") {
       const server = o.items[index];
       if (server && server.state !== "disabled") void mcpAction(server.name);
-    } else if (o.kind === "approval") o.resolve(o.options[index] ?? o.options[0]!);
+    } else if (o.kind === "approval") {
+      approvals.current.answer(o.options[index] ?? o.options[0]!);
+      showNextApproval.current();
+    }
   }
   /** A typed answer, carried back with a marker so the caller can tell it from a choice. */
   function onOverlaySubmitText(text: string) {
     const o = overlay;
     setOverlay(null);
-    if (o?.kind === "approval") o.resolve(APPROVAL_TEXT + text);
+    if (o?.kind === "approval") {
+      approvals.current.answer(APPROVAL_TEXT + text);
+      showNextApproval.current();
+    }
   }
   function onOverlayCancel() {
     const o = overlay;
     setOverlay(null);
     // Esc = declined to answer. NOT "chose option 2" — see APPROVAL_DISMISSED.
-    if (o?.kind === "approval") o.resolve(APPROVAL_DISMISSED);
+    if (o?.kind === "approval") {
+      approvals.current.answer(APPROVAL_DISMISSED);
+      showNextApproval.current();
+    }
   }
 
   // Hand a free-text directive to the model with an instruction wrapper, as its own
