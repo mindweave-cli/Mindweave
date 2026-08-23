@@ -94,7 +94,7 @@ test("an image well before the live round still evicts", () => {
 
 // ── B1: a sub-agent does not inherit "allow all" ─────────────────────────────
 
-function parentSession(guardAllowAll: boolean): Session {
+function parentSession(granted: string[]): Session {
   return {
     id: "parent-id",
     cwd: process.cwd(),
@@ -105,25 +105,25 @@ function parentSession(guardAllowAll: boolean): Session {
       reads: new Map(),
       todos: [],
       guarded: true,
-      guardAllowAll,
+      guardAllowed: new Set(granted),
       sessionId: "parent-id",
       requestApproval: async () => "Yes",
     },
   } as unknown as Session;
 }
 
-test("a forked sub-agent never inherits a blanket approval", () => {
-  // The engine gate is `guarded && !guardAllowAll`, so an inherited `true` skipped
-  // the approval check entirely — and the child has no channel to ask through, so
-  // nobody would have been asked at all.
-  const child = forkSession(parentSession(true), "do the thing");
-  assert.equal(child.toolContext.guardAllowAll, false);
+test("a forked sub-agent never inherits a session grant", () => {
+  // The engine gate skips the prompt for any tool the user has already granted, so an
+  // inherited grant meant the check was skipped for work the user never saw — and the
+  // child has no channel to ask through, so nobody would have been asked at all.
+  const child = forkSession(parentSession(["edit", "run_command"]), "do the thing");
+  assert.ok(!child.toolContext.guardAllowed || child.toolContext.guardAllowed.size === 0);
   assert.equal(child.toolContext.guarded, true, "it is still guarded, just not pre-approved");
   assert.equal(child.toolContext.requestApproval, undefined, "and it cannot reach the user");
 });
 
 test("a forked sub-agent gets its own session id", () => {
-  const child = forkSession(parentSession(false), "task");
+  const child = forkSession(parentSession([]), "task");
   assert.notEqual(child.toolContext.sessionId, "parent-id");
   assert.equal(child.toolContext.sessionId, child.id, "the context and the session must agree");
 });

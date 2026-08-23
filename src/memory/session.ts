@@ -206,7 +206,7 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
     readOnlyTools: opts.readOnly === true ? true : p.readOnlyTools,
     // CLEARED, not inherited. This line used to copy the parent's value under a
     // comment claiming it cleared it, and the engine's gate is
-    // `guarded && !guardAllowAll` — so an inherited `true` skipped the approval check
+    // `guarded && !guardAllowed.has(tool)` — so an inherited grant skipped the check
     // outright. Combined with the missing approval channel below, a sub-agent the user
     // never saw start could edit files with no prompt at all, while SECURITY.md
     // promised Sentinel "covers every tool including sub-agent edits".
@@ -215,7 +215,7 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
     // transfer to an agent they did not know would run. A guarded child has no channel
     // to ask through, so its mutating tools are refused and it reports back instead —
     // which is the failing direction to pick.
-    guardAllowAll: false,
+    guardAllowed: undefined,
     // A child CANNOT reach the user. The spread above inherited the parent's approval
     // channel, so `ask_user` (which is read-only, and therefore offered even to a
     // read-only child) put a question on screen from an agent the user never saw start

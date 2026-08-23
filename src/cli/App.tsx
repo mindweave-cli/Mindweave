@@ -416,7 +416,7 @@ export function App() {
     const m = modeById(modeRef.current);
     s.toolContext.planMode = m.readOnly;
     s.toolContext.guarded = m.guarded;
-    s.toolContext.guardAllowAll = false;
+    s.toolContext.guardAllowed = undefined;
     // exit_plan moves these flags mid-turn when a plan is approved, and the engine
     // moves them back when the turn ends. The indicator has to follow, or it would
     // claim the session is still planning while it is carrying the plan out. Modes
@@ -440,8 +440,8 @@ export function App() {
     if (s) {
       s.toolContext.planMode = m.readOnly;
       s.toolContext.guarded = m.guarded;
-      // Entering Sentinel restores fresh vigilance — a prior "allow all" is cleared.
-      if (m.guarded) s.toolContext.guardAllowAll = false;
+      // Entering Sentinel restores fresh vigilance — earlier grants are cleared.
+      if (m.guarded) s.toolContext.guardAllowed = undefined;
     }
     // No scrollback line on a mode switch — the ModeBar under the chat already shows
     // the current mode and updates in place, so cycling doesn't flood the transcript.

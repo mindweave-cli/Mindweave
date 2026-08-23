@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  GUARD_OPTIONS,
+  guardOptions,
   GUARD_REFUSAL,
+  GUARD_REFUSAL_INPUT,
+  guardRefusalWith,
   describeCall,
   guardQuestion,
   guardDetail,
@@ -10,15 +12,37 @@ import {
 } from "./guard.js";
 
 test("interpretGuardChoice maps each option to its action", () => {
-  assert.equal(interpretGuardChoice(GUARD_OPTIONS[0]), "proceed");
-  assert.equal(interpretGuardChoice(GUARD_OPTIONS[1]), "allow-all");
-  assert.equal(interpretGuardChoice(GUARD_OPTIONS[2]), "refuse");
+  const opts = guardOptions("run_command");
+  assert.equal(interpretGuardChoice(opts[0], "run_command"), "proceed");
+  assert.equal(interpretGuardChoice(opts[1], "run_command"), "allow-kind");
+});
+
+test("a session grant names the KIND of action, so it cannot be read as a blanket yes", () => {
+  // It used to say "Yes, and stop asking this session" and mean it: approving one file
+  // edit turned the gate off for shell commands too. The label now says what is being
+  // granted, and the engine only ever grants that one tool.
+  const edit = guardOptions("edit")[1]!;
+  const shell = guardOptions("run_command")[1]!;
+  assert.notEqual(edit, shell, "two different actions offer the same grant");
+  assert.match(edit, /File edit/);
+  assert.match(shell, /Shell execution/);
+  assert.doesNotMatch(edit, /stop asking this session$/, "the blanket wording is back");
+  // And an answer given for one action does not read as a grant for another.
+  assert.equal(interpretGuardChoice(shell, "edit"), "refuse", "a grant leaked across actions");
+});
+
+test("a refusal can carry what the user wants instead", () => {
+  assert.ok(GUARD_REFUSAL_INPUT.label.length > 0);
+  const text = guardRefusalWith("use pnpm, not npm");
+  assert.match(text, /use pnpm, not npm/);
+  assert.match(text, /declined/i);
+  assert.match(text, /do not retry/i, "the declined action must not be attempted again");
 });
 
 test("interpretGuardChoice fails safe on cancel / unknown answers", () => {
-  assert.equal(interpretGuardChoice(undefined), "refuse"); // Esc / no channel
-  assert.equal(interpretGuardChoice(""), "refuse");
-  assert.equal(interpretGuardChoice("whatever"), "refuse");
+  assert.equal(interpretGuardChoice(undefined, "edit"), "refuse"); // Esc / no channel
+  assert.equal(interpretGuardChoice("", "edit"), "refuse");
+  assert.equal(interpretGuardChoice("whatever", "edit"), "refuse");
 });
 
 test("describeCall names the file for edit/write tools", () => {
@@ -49,7 +73,8 @@ test("the question is one line and there are exactly 3 options", () => {
   const q = guardQuestion();
   assert.match(q, /Sentinel/);
   assert.equal(q.split("\n").length, 1);
-  assert.equal(GUARD_OPTIONS.length, 3);
+  // Two choices plus the typed refusal row — ApprovalBox renders at most six.
+  assert.equal(guardOptions("edit").length, 2);
   assert.ok(GUARD_REFUSAL.length > 0);
 });
 

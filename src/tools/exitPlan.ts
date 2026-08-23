@@ -197,7 +197,7 @@ ${feedback}
     ctx.guarded = verdict === "sentinel";
     // A fresh Sentinel pass starts vigilant: an "allow all" from some earlier point in
     // the session must not silently cover work the user has only just agreed to.
-    if (ctx.guarded) ctx.guardAllowAll = false;
+    if (ctx.guarded) ctx.guardAllowed = undefined;
     ctx.onModeChange?.();
 
     return {

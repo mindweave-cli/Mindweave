@@ -18,7 +18,8 @@ import type { ChatMessage, ImagePart, ModelRequest, StopReason, StreamResult, Us
 import { summarizeTask, taskLimitReason, type TaskLimits } from "./pricing.js";
 import { addTurn, emptySpend } from "./spend.js";
 import { mutationNeedsVerification, isVerification, reScopeCheck, isBackgroundPollStep, stepFailureSignature, repeatFailureStep, repeatFailureNudge, failedActionLabel, firstErrorLine, sameFileEditCounts, overusedSingleEdits, batchEditNudge, narrationFault, narrationNudge, unknownToolError, replyFault, replyRewrite, VERIFY_NUDGE } from "./verify.js";
-import { GUARD_OPTIONS, GUARD_REFUSAL, guardQuestion, guardDetail, interpretGuardChoice } from "./guard.js";
+import { guardOptions, GUARD_REFUSAL, GUARD_REFUSAL_INPUT, guardRefusalWith, guardQuestion, guardDetail, interpretGuardChoice } from "./guard.js";
+import { readFreeText } from "../tools/approval.js";
 import { findTool, toolSchemas, TOOLS } from "../tools/registry.js";
 import { deferredToolsIndex } from "../tools/deferredNative.js";
 import { prefixPrint, diffPrefix } from "./cacheBreak.js";
@@ -1272,19 +1273,38 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       // uniformly — including subagent edits. Fails safe: no approval channel, or an
       // unclear answer, refuses rather than runs.
       const ctx = session.toolContext;
-      if (!tool.readOnly && ctx.guarded && !ctx.guardAllowAll) {
+      if (!tool.readOnly && ctx.guarded && !ctx.guardAllowed?.has(call.name)) {
         const args = parseArgs(call.arguments);
         // The question is one line; WHAT is about to happen rides as detail, which the
         // CLI prints into the transcript. A gate the user cannot read is a gate they
         // learn to wave through.
         const choice = ctx.requestApproval
-          ? await ctx.requestApproval(guardQuestion(), [...GUARD_OPTIONS], guardDetail(call.name, args), "Permission Request")
+          ? await ctx.requestApproval(
+              guardQuestion(),
+              guardOptions(call.name),
+              guardDetail(call.name, args),
+              "Permission Request",
+              GUARD_REFUSAL_INPUT,
+            )
           : undefined;
-        const decision = interpretGuardChoice(choice);
+        const decision = interpretGuardChoice(choice, call.name);
         if (decision === "refuse") {
-          return { call, output: GUARD_REFUSAL, summary: `declined ${call.name}`, isError: true, detail: undefined as string | undefined };
+          // A refusal that carries the user's own direction is worth far more than a
+          // bare no: it turns a dead end into the next instruction, without costing a
+          // round trip to ask what they meant.
+          const said = choice ? readFreeText(choice) : null;
+          return {
+            call,
+            output: said ? guardRefusalWith(said) : GUARD_REFUSAL,
+            summary: `declined ${call.name}`,
+            isError: true,
+            detail: undefined as string | undefined,
+          };
         }
-        if (decision === "allow-all") ctx.guardAllowAll = true;
+        // Scoped to this KIND of action, never to everything. See guardOptions.
+        if (decision === "allow-kind") {
+          ctx.guardAllowed = new Set([...(ctx.guardAllowed ?? []), call.name]);
+        }
       }
       // A tool must never be able to unwind the turn by throwing, and this is the only
       // place that can guarantee it.

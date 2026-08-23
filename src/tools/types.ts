@@ -324,11 +324,28 @@ export interface ToolContext {
    */
   guarded?: boolean;
   /**
-   * Session-lived latch for Sentinel's "yes, and stop asking" answer: once the user
-   * allows all, the gate stops prompting for the rest of the session (until they
-   * switch back into Sentinel, which resets it). Mutated in place by the engine.
+   * Kinds of action the user has approved for the rest of the session in Sentinel
+   * mode, by tool name.
+   *
+   * A SET, not a boolean, and that is the point. It used to be one flag meaning "stop
+   * asking about everything", so approving a single file edit silently authorised every
+   * shell command that followed. Someone agreeing to an edit has agreed to an edit.
+   * Turning the gate off wholesale is a mode change, and shift-tab is where those are
+   * made — visibly, and by the user rather than by a prompt they were already answering.
+   *
+   * Never inherited by a sub-agent: a grant is the user's answer about work they were
+   * watching, and a child agent's actions are not that work.
    */
-  guardAllowAll?: boolean;
+  guardAllowed?: Set<string>;
+  /**
+   * Folders OUTSIDE the workspace the user has allowed writing to this session.
+   *
+   * Scoped to a directory rather than granted once for everywhere, so a run that
+   * legitimately writes next door asks once instead of per file — and a later write
+   * somewhere else entirely still asks. Same shape Claude Code uses for the equivalent
+   * grant. Never inherited by a sub-agent, for the same reason a Sentinel grant is not.
+   */
+  allowedOutsideDirs?: Set<string>;
   /**
    * How deep in a sub-agent chain this context is (0 = the main agent, 1 = a
    * sub-agent it spawned). `spawn_subagent` refuses once at the cap, so sub-agents

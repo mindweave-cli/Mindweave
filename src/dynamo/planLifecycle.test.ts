@@ -21,6 +21,7 @@ import { respond } from "./engine.js";
 import { savePlanArtifact, loadPlanArtifact } from "./planArtifact.js";
 import type { Session } from "../memory/types.js";
 import { PLAN_CHOICES } from "../tools/exitPlan.js";
+import { APPROVAL_TEXT } from "../tools/approval.js";
 
 /**
  * A real turn, against a local stand-in provider.
@@ -284,4 +285,84 @@ test("exit_plan outside plan mode is refused, and cannot put the user into plann
   const refusal = s.transcript.find((e) => e.role === "tool");
   assert.ok(refusal, "the call produced no result at all");
   assert.ok(String(refusal!.content).includes("not in plan mode"), "the model was not told why");
+});
+
+
+// ── Sentinel: a grant covers the action it was given for, and nothing else ────
+
+test("SENTINEL: approving one kind of action does not authorise another", async () => {
+  // The defect: the gate consulted a single boolean, so "yes, and stop asking" on a
+  // file edit turned it off for shell commands, sub-agents and writes too, for the rest
+  // of the session. Someone agreeing to an edit has agreed to an edit.
+  const root = tempRoot();
+  const asked: string[] = [];
+  const s = session(root, {
+    id: "abc-123",
+    toolContext: {
+      activePlan: "",
+      guarded: true,
+      requestApproval: async (_q: string, options: string[], detail?: string) => {
+        asked.push(String(detail).split(String.fromCharCode(10))[0]!);
+        return options[1]!; // "…and don't ask again for THIS kind"
+      },
+    } as object,
+  });
+
+  // First: a write. Granted for writes.
+  nextToolCall = { id: "c1", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "a.txt", content: "x" }) } };
+  sendUnadvertised = true;
+  await respond(s);
+  assert.deepEqual([...(s.toolContext.guardAllowed ?? [])], ["write_file"]);
+
+  // Second: a shell command. Must still be asked about.
+  nextToolCall = { id: "c2", type: "function", function: { name: "run_command", arguments: JSON.stringify({ command: "echo hi" }) } };
+  sendUnadvertised = true;
+  await respond(s);
+
+  assert.equal(asked.length, 2, "the shell command ran without being asked about");
+  assert.ok(asked[0]!.includes("File write"));
+  assert.ok(asked[1]!.includes("Shell execution"), "the second prompt was not about the command");
+});
+
+test("SENTINEL: a second call of the SAME kind is not asked about again", async () => {
+  const root = tempRoot();
+  let asks = 0;
+  const s = session(root, {
+    id: "abc-123",
+    toolContext: {
+      activePlan: "",
+      guarded: true,
+      requestApproval: async (_q: string, options: string[]) => {
+        asks++;
+        return options[1]!;
+      },
+    } as object,
+  });
+
+  for (const id of ["c1", "c2"]) {
+    nextToolCall = { id, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: `${id}.txt`, content: "x" }) } };
+    sendUnadvertised = true;
+    await respond(s);
+  }
+  assert.equal(asks, 1, "the grant was not honoured, so the user was asked twice");
+});
+
+test("SENTINEL: a declined action carries the user's own direction back", async () => {
+  const root = tempRoot();
+  const s = session(root, {
+    id: "abc-123",
+    toolContext: {
+      activePlan: "",
+      guarded: true,
+      requestApproval: async () => APPROVAL_TEXT + "use pnpm, not npm",
+    } as object,
+  });
+  nextToolCall = { id: "c1", type: "function", function: { name: "run_command", arguments: JSON.stringify({ command: "npm install" }) } };
+  sendUnadvertised = true;
+
+  await respond(s);
+  const result = s.transcript.find((e) => e.role === "tool");
+  assert.ok(result, "the declined call produced no result");
+  assert.ok(String(result!.content).includes("use pnpm, not npm"), "the user's direction never reached the model");
+  assert.equal(s.toolContext.guardAllowed, undefined, "a refusal must not grant anything");
 });

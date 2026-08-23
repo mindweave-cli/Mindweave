@@ -18,7 +18,7 @@ import { dirname } from "node:path";
 import type { Tool, ToolResult } from "./types.js";
 import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { forbiddenPathReason } from "../governor/forbidden.js";
-import { requestAgentDataAccess, requestForbiddenLift } from "./approval.js";
+import { requestAgentDataAccess, requestForbiddenLift, requestOutsideWorkspaceWrite } from "./approval.js";
 import { recordWrite, relativize, resolvePath } from "./paths.js";
 import { writeDetail, withScope } from "./detail.js";
 import { applyEol, dirEol, fileEol } from "./eol.js";
@@ -93,6 +93,10 @@ export const writeFile: Tool = {
       );
       if (lift) return lift; // refused or deferred; an allow lifts it and falls through
     }
+
+    // The workspace boundary — see requestOutsideWorkspaceWrite.
+    const outside = await requestOutsideWorkspaceWrite(ctx, filePath, `writing ${rawPath}`);
+    if (outside) return outside;
 
     let existed = false;
     try {

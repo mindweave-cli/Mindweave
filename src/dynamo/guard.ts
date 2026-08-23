@@ -9,24 +9,62 @@
  * mode-agnostic (it acts on the decision, never on a mode name).
  */
 
-/** The three answers a Sentinel prompt offers, in order. */
-export const GUARD_OPTIONS = [
-  "Yes, do it",
-  "Yes, and stop asking this session",
-  "No — let me tell you what to do",
-] as const;
+/**
+ * The answers a Sentinel prompt offers, in order.
+ *
+ * The middle one is SCOPED TO THE KIND OF ACTION, and that is the whole point of it.
+ * It used to read "Yes, and stop asking this session" and did exactly that: approving
+ * one file edit turned the gate off for shell commands, sub-agents and writes as well,
+ * for the rest of the session. Someone agreeing to an edit has agreed to an edit.
+ *
+ * Claude Code scopes the same option the same way — "don't ask again for {tool}
+ * commands in {directory}" — and offers no blanket off-switch in the dialog at all.
+ * Neither do we now: turning the gate off entirely is a mode change, and shift-tab is
+ * where modes are chosen, deliberately and visibly.
+ */
+export function guardOptions(name: string): string[] {
+  return ["Yes, do it", `Yes, and don't ask again for ${actionLabel(name)} this session`];
+}
 
-export type GuardDecision = "proceed" | "allow-all" | "refuse";
+/** The refusal, offered as a typed answer so the user can say what to do instead. */
+export const GUARD_REFUSAL_INPUT = {
+  label: "No",
+  placeholder: "and tell it what to do instead",
+};
+
+export type GuardDecision = "proceed" | "allow-kind" | "refuse";
 
 /**
  * Map the user's chosen option to an action. Anything unrecognized — including a
  * cancel/Esc (the overlay resolves those to a decline) — is treated as `refuse`, so
  * the gate fails safe: an unclear answer never runs the action.
+ *
+ * Matched on the STABLE prefix rather than the whole string, because the second
+ * option now names the action it covers and so differs from call to call.
  */
-export function interpretGuardChoice(choice: string | undefined): GuardDecision {
-  if (choice === GUARD_OPTIONS[0]) return "proceed";
-  if (choice === GUARD_OPTIONS[1]) return "allow-all";
+export function interpretGuardChoice(choice: string | undefined, name = ""): GuardDecision {
+  const options = guardOptions(name);
+  if (choice === options[0]) return "proceed";
+  if (choice === options[1]) return "allow-kind";
   return "refuse";
+}
+
+/** What each kind of call is called in the user's terms. Shared by the prompt and
+ *  the permission block so a grant reads the same as the thing it was granted for. */
+function actionLabel(name: string): string {
+  return ACTION_LABEL[name] ?? name;
+}
+
+/** What the model is told when the user declines and says what they want instead. */
+export function guardRefusalWith(feedback: string): string {
+  return (
+    "Stopped: the user declined this action in Sentinel mode and said what they want " +
+    `instead:
+
+${feedback}
+
+Follow that. Do not retry the action they declined.`
+  );
 }
 
 /** What the model is told when the user declines an action in Sentinel mode. */

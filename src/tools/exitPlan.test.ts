@@ -123,12 +123,12 @@ test("approving into Lightning ENDS planning, it does not lift it for one turn",
 });
 
 test("approving into Sentinel lifts planning but keeps each action gated", async () => {
-  const c = ctx(PLAN_CHOICES[2], { guardAllowAll: true });
+  const c = ctx(PLAN_CHOICES[2], { guardAllowed: new Set(["edit"]) });
   await exitPlan.execute({ plan: PLAN }, c);
   assert.equal(c.planMode, false);
   assert.equal(c.guarded, true);
   // A stale "allow all" from earlier must not silently cover newly approved work.
-  assert.equal(c.guardAllowAll, false);
+  assert.equal(c.guardAllowed, undefined);
 });
 
 test("approval tells the UI its mode flags moved", async () => {

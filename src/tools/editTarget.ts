@@ -12,7 +12,7 @@ import { promises as fs } from "node:fs";
 import type { ToolContext, ToolResult } from "./types.js";
 import { foreignAgentReason, protectedPathReason } from "./guard.js";
 import { forbiddenPathReason } from "../governor/forbidden.js";
-import { requestAgentDataAccess, requestForbiddenLift } from "./approval.js";
+import { requestAgentDataAccess, requestForbiddenLift, requestOutsideWorkspaceWrite } from "./approval.js";
 import { resolvePath } from "./paths.js";
 import { detectEol } from "./eol.js";
 import { fail, failQuietly } from "./results.js";
@@ -70,6 +70,11 @@ export async function prepareEditTarget(
     );
     if (lift) return { ok: false, error: lift }; // refused/deferred; an allow returns null → falls through
   }
+
+  // The workspace boundary. Everything above is about WHICH file; this is about whether
+  // the agent should be writing there at all.
+  const outside = await requestOutsideWorkspaceWrite(ctx, filePath, `${verb} ${rawPath}`);
+  if (outside) return { ok: false, error: outside };
 
   let stat;
   try {
