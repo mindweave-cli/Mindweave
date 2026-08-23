@@ -196,6 +196,16 @@ export interface ToolContext {
   /** ISO timestamp of the active plan's approval — rendered with the block. */
   activePlanApprovedAt?: string;
   /**
+   * Set by exit_plan when the user approved with a FRESH CONTEXT: the engine replaces
+   * the conversation with the plan as its opening instruction and clears it.
+   *
+   * A request rather than an action, because the tool is running inside the very turn
+   * whose transcript is about to be replaced. The engine does it at the one point where
+   * the call and its result can be discarded together, which is what keeps the provider
+   * from ever seeing a tool_call with no answer.
+   */
+  planFreshStart?: string;
+  /**
    * The session's roots, primary first (`/include` adds more — e.g. a backend and a
    * frontend). When more than one is present, file tools express every path as
    * `label/relative` so the two never collide, and search spans them all. Absent or
@@ -263,6 +273,18 @@ export interface ToolContext {
      *  rendering it as prose. Use it when the detail is literal commands and paths the
      *  user must read exactly; omit it when the detail is a document, like a plan. */
     detailTitle?: string,
+    /**
+     * Offer an extra answer the user TYPES, as one more row in the same list.
+     *
+     * The channel resolves with the option string verbatim, so a typed answer comes
+     * back prefixed with APPROVAL_TEXT so a caller can tell the two apart. The prefix
+     * starts with a space for the same reason APPROVAL_DISMISSED does: no real option
+     * can collide with it.
+     *
+     * Opt-in. Most callers want a straight choice, and a text row on those would only
+     * be a way to collect an answer nothing reads.
+     */
+    freeText?: { label: string; placeholder: string },
   ) => Promise<string>;
   /**
    * Other coding tools whose data the user has allowed this session, by name
@@ -411,15 +433,6 @@ export interface ToolContext {
    */
   onModeChange?: () => void;
 
-  /**
-   * Planning was left to carry out an approved plan, and should be returned to when
-   * the turn ends.
-   *
-   * Approval buys ONE turn of doing, not a permanent change of mode. Without this
-   * the session would quietly sit in Lightning afterwards, having been put there by
-   * a tool call rather than by the user, and the next request would run unplanned.
-   */
-  planResume?: boolean;
 }
 
 export interface Tool {

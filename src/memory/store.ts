@@ -63,7 +63,9 @@ export function sessionDir(projectCwd: string): string {
   return projectDir(projectCwd);
 }
 
-function transcriptPath(projectCwd: string, id: string): string {
+/** Where a session's transcript lives. Exported so a cleared session can tell the
+ *  model where the conversation it just lost can still be read. */
+export function transcriptPath(projectCwd: string, id: string): string {
   return join(sessionDir(projectCwd), `${id}.jsonl`);
 }
 

@@ -33,7 +33,7 @@ import { appendForbidden, appendForbiddenCommand } from "../governor/write.js";
 import { addRoot, removeRoot } from "../tools/workspace.js";
 import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
 import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
-import { APPROVAL_DISMISSED } from "../tools/approval.js";
+import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "../tools/approval.js";
 import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
 import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProvider, providerOf, usableFallback, withModel, saveModelConfig, refreshModels, type ModelConfig } from "../dynamo/model.js";
 import { allProviders, manifestForModel, modelsOf } from "../drivers/registry.js";
@@ -107,7 +107,13 @@ type Overlay =
   | { kind: "think" }
   | { kind: "shells"; items: ShellInfo[] }
   | { kind: "mcp"; items: McpStatus[] }
-  | { kind: "approval"; question: string; options: string[]; resolve: (choice: string) => void };
+  | {
+      kind: "approval";
+      question: string;
+      options: string[];
+      freeText?: { label: string; placeholder: string };
+      resolve: (choice: string) => void;
+    };
 
 // After you pick a session in /continue, the three ways to resume it.
 const RESUME_MODES = [
@@ -263,14 +269,22 @@ export function App() {
   // erasing correctly and the screen tears (see the frameHeight comment below). The
   // transcript is the part of the UI already built to hold arbitrary length — it is
   // clipped and scrollable — so long context goes there and the prompt stays one line.
-  const askApproval = useRef((question: string, options: string[], detail?: string, detailTitle?: string) => {
+  const askApproval = useRef((
+    question: string,
+    options: string[],
+    detail?: string,
+    detailTitle?: string,
+    freeText?: { label: string; placeholder: string },
+  ) => {
     const body = detail?.trim();
     if (body) {
       // Titled → a facts block on a rail, rendered verbatim (a command must not be
       // reinterpreted as markdown). Untitled → prose, because it is a document to read.
       dispatch(detailTitle ? { type: "notice", title: detailTitle, body } : { type: "say", text: body });
     }
-    return new Promise<string>((resolve) => setOverlay({ kind: "approval", question, options, resolve }));
+    return new Promise<string>((resolve) =>
+      setOverlay({ kind: "approval", question, options, resolve, ...(freeText ? { freeText } : {}) }),
+    );
   });
   // Bumped whenever a background shell starts/finishes, to re-render the indicator.
   const [bgTick, setBgTick] = useState(0);
@@ -1217,6 +1231,12 @@ export function App() {
       if (server && server.state !== "disabled") void mcpAction(server.name);
     } else if (o.kind === "approval") o.resolve(o.options[index] ?? o.options[0]!);
   }
+  /** A typed answer, carried back with a marker so the caller can tell it from a choice. */
+  function onOverlaySubmitText(text: string) {
+    const o = overlay;
+    setOverlay(null);
+    if (o?.kind === "approval") o.resolve(APPROVAL_TEXT + text);
+  }
   function onOverlayCancel() {
     const o = overlay;
     setOverlay(null);
@@ -1884,6 +1904,8 @@ export function App() {
         width={width}
         onSelect={onOverlaySelect}
         onCancel={onOverlayCancel}
+        {...(overlay.freeText ? { freeText: overlay.freeText } : {})}
+        onSubmitText={onOverlaySubmitText}
       />
     );
   }

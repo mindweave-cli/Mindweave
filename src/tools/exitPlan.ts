@@ -16,23 +16,47 @@
  *  2. **The model says when it is done.** Pausing to think mid-research is not a
  *     finished plan, and no heuristic over an idle turn can tell those apart.
  *
- * Approval buys ONE turn of doing. The session returns to planning when the work
- * ends, because the mode was left by a tool call, not by the user.
+ * Approving ENDS the planning session and leaves the user in the mode they picked at
+ * the prompt. It used to lift planning for a single turn and force it back afterwards,
+ * which meant work that ran past one turn returned with the editing tools withheld and
+ * the plan no longer in context, needing a second approval for the same agreement.
  */
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { savePlanArtifact } from "../dynamo/planArtifact.js";
 import { fail, failQuietly } from "./results.js";
+import { readFreeText } from "./approval.js";
 
-/** What the user chose at the approval prompt. Order is the display order. */
+/**
+ * What the user chose at the approval prompt. Order is the display order.
+ *
+ * The "fresh context" pair is the one worth explaining. Planning spends a lot of the
+ * window on exploration — files opened to understand the shape of the problem, searches
+ * that led nowhere — and none of that is needed to CARRY OUT the plan. Choosing fresh
+ * starts the work with the plan as the instruction and nothing else, which is both
+ * cheaper and cleaner than implementing underneath a transcript of the investigation.
+ * Nothing is lost: the session file is still on disk and the model is told where.
+ */
 export const PLAN_CHOICES = [
   "Approve — Lightning (auto-accept)",
+  "Approve — Lightning, fresh context",
   "Approve — Sentinel (ask each action)",
+  "Approve — Sentinel, fresh context",
   "Reject",
-  "Change something",
 ] as const;
+
+/** The typed answer offered alongside them, for saying what to change. */
+export const PLAN_FEEDBACK = { label: "Change something", placeholder: "say what to change" };
 
 /** The decision, separated from its wording so the engine never matches on prose. */
 export type PlanVerdict = "lightning" | "sentinel" | "reject" | "revise";
+
+/** An approval, and whether it asked to start from a clean slate. */
+export interface PlanDecision {
+  verdict: PlanVerdict;
+  fresh: boolean;
+  /** What the user typed, when they typed instead of choosing. */
+  feedback?: string;
+}
 
 /**
  * Read a verdict out of the chosen option (pure).
@@ -43,12 +67,26 @@ export type PlanVerdict = "lightning" | "sentinel" | "reject" | "revise";
  * failure that matters here is acting when nobody said yes.
  */
 export function readVerdict(choice: string): PlanVerdict {
+  return readDecision(choice).verdict;
+}
+
+/**
+ * The full decision behind an answer (pure).
+ *
+ * A TYPED answer is always a revision request carrying its text — the user telling the
+ * agent what to change is the one thing the old four-option prompt could not express,
+ * so "Change something" meant "stop and wait for them to say it in a new message",
+ * which cost a whole round trip to learn one sentence.
+ */
+export function readDecision(choice: string): PlanDecision {
+  const typed = readFreeText(choice);
+  if (typed !== null) return { verdict: "revise", fresh: false, feedback: typed.trim() };
   const c = choice.trim().toLowerCase();
   if (c.startsWith("approve")) {
-    return c.includes("sentinel") ? "sentinel" : "lightning";
+    return { verdict: c.includes("sentinel") ? "sentinel" : "lightning", fresh: c.includes("fresh") };
   }
-  if (c.startsWith("change")) return "revise";
-  return "reject";
+  if (c.startsWith("change")) return { verdict: "revise", fresh: false };
+  return { verdict: "reject", fresh: false };
 }
 
 export const exitPlan: Tool = {
@@ -96,8 +134,8 @@ export const exitPlan: Tool = {
     // terminal — the screen tore and the app looked hung with no way to answer. As
     // detail it prints into the transcript, which scrolls, and the prompt stays one
     // line. Nothing is summarised: the user still reads the whole plan.
-    const choice = await ctx.requestApproval(PLAN_QUESTION, [...PLAN_CHOICES], plan);
-    const verdict = readVerdict(choice);
+    const choice = await ctx.requestApproval(PLAN_QUESTION, [...PLAN_CHOICES], plan, undefined, PLAN_FEEDBACK);
+    const { verdict, fresh, feedback } = readDecision(choice);
 
     if (verdict === "reject") {
       return {
@@ -108,12 +146,27 @@ export const exitPlan: Tool = {
       };
     }
     if (verdict === "revise") {
-      return {
-        output:
-          "The user wants the plan changed but has not said how yet. Stop and wait for " +
-          "them to tell you. Do not guess at a revision or start any part of the plan.",
-        summary: "plan sent back",
-      };
+      // With their words, this is a working instruction and the model can revise now.
+      // Without them it is still a full stop, because guessing at what someone meant by
+      // "change something" is how an agent produces a second plan nobody asked for.
+      return feedback
+        ? {
+            output:
+              `The user did not approve the plan. They want this changed:
+
+${feedback}
+
+` +
+              "Revise the plan accordingly and present it again with exit_plan. Do not " +
+              "start any of the work yet.",
+            summary: "plan sent back with notes",
+          }
+        : {
+            output:
+              "The user wants the plan changed but has not said how yet. Stop and wait for " +
+              "them to tell you. Do not guess at a revision or start any part of the plan.",
+            summary: "plan sent back",
+          };
     }
 
     // Approved. The plan is now the agreed scope of the work, so it becomes a
@@ -129,24 +182,37 @@ export const exitPlan: Tool = {
     } catch {
       // Read-only filesystem or similar: session-local plan still applies.
     }
-    // Leave planning for the rest of this turn only — `planResume` is the
-    // engine's instruction to put it back when the work ends.
+    // Approving ENDS the planning session, and the mode the user picked at the prompt
+    // is the mode they are now in. It used to be lifted for one turn and then forced
+    // back to planning, which had two costs: work that did not finish in a single turn
+    // came back with the editing tools withheld AND the plan no longer in context, so
+    // it needed approving again; and a user who had been in Sentinel before planning
+    // was silently returned to a different mode from the one they chose here.
     ctx.planMode = false;
+    // Asked for, not done here. Replacing the conversation from inside a tool would
+    // strand the call that is still running: the provider requires every tool_call to
+    // be answered, so the engine performs it once this result has been recorded, and
+    // drops the call and its answer together.
+    if (fresh) ctx.planFreshStart = plan;
     ctx.guarded = verdict === "sentinel";
     // A fresh Sentinel pass starts vigilant: an "allow all" from some earlier point in
     // the session must not silently cover work the user has only just agreed to.
     if (ctx.guarded) ctx.guardAllowAll = false;
-    ctx.planResume = true;
     ctx.onModeChange?.();
 
     return {
       output:
         `The user approved the plan${verdict === "sentinel" ? " and asked to confirm each action" : ""}. ` +
         `Start now, in this turn, and follow the plan you just presented. ` +
+        `Begin by putting its steps on your task list if there is more than one. ` +
+        (fresh
+          ? "The conversation from planning has been cleared, so work from the plan itself. " +
+            "It is repeated in full above. "
+          : "") +
         (verdict === "sentinel"
           ? "Each change is confirmed with them before it happens, so work in small clear steps. "
           : "") +
-        `Do not restate the plan — they have read it. Planning resumes automatically once you finish.`,
+        `Do not restate the plan — they have read it.`,
       summary: verdict === "sentinel" ? "plan approved (Sentinel)" : "plan approved (Lightning)",
     };
   },

@@ -96,7 +96,10 @@ test("the divergence interrupt names the failing step and orders a stop, not a w
   assert.ok(text.includes("`npm run build`"));
   assert.ok(/approved/i.test(text), "the interrupt cites the approval");
   assert.ok(/do not improvise|not.*improvise/i.test(text));
-  assert.ok(/planning/.test(text), "it points back to planning, the agreed path");
+  // It must NOT promise a return to planning: approving ends the planning session, so
+  // a stop hands the decision to the user rather than resuming a mode by itself.
+  assert.ok(/replan|decide/i.test(text), "the interrupt does not say who decides what happens next");
+  assert.ok(!/back in planning mode/i.test(text), "the interrupt promises a mode change that no longer happens");
 });
 
 test("exit_plan approval writes the artifact and arms the session", async () => {

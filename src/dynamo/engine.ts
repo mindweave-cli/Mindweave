@@ -55,7 +55,7 @@ import {
   spliceSummary,
   usableSummary,
 } from "../memory/compaction.js";
-import { loadPlanArtifact, renderPlanBlock, planDivergenceStop } from "./planArtifact.js";
+import { loadPlanArtifact, completePlanArtifact, renderPlanBlock, planDivergenceStop } from "./planArtifact.js";
 import {
   autoCompactThreshold,
   warnBarFor,
@@ -70,6 +70,7 @@ import { renderSessionMemory, shouldUpdateSessionMemory, updateSessionMemory } f
 import { compactFromSessionMemory } from "../memory/sessionMemoryCompact.js";
 import { isContextOverflowError } from "../drivers/contextOverflow.js";
 import { detailOf, providerMessage } from "../drivers/providerError.js";
+import { transcriptPath } from "../memory/store.js";
 
 /** Stop retrying autocompact after this many consecutive failures in a session, so a
  *  transcript that's irrecoverably over the limit can't hammer the summarizer each turn
@@ -716,16 +717,63 @@ async function refreshGovernance(session: Session, force = false): Promise<void>
  * would run unplanned.
  */
 export async function respond(session: Session, options: RespondOptions = {}): Promise<string> {
+  const finished = await respondTurn(session, options);
+  // An approved plan ends when the turn that was carrying it out ends of its own
+  // accord — which covers both ways the agreement can finish. Either every step is
+  // done, or the model hit something the plan did not survive and stopped to say so,
+  // exactly as the plan contract tells it to. In both cases the agreement is spent,
+  // and leaving it active is what made a plan approved once bind every later session.
+  //
+  // An INTERRUPTED turn is the one case that keeps it: the work was cut off rather
+  // than concluded, so the next turn should pick it up where it stopped.
+  await settlePlanIfFinished(session, options);
+  return finished;
+}
+
+/**
+ * The one message a freshly-cleared session starts from.
+ *
+ * The plan is repeated in full because it is now the ONLY instruction: the discussion
+ * that produced it is gone. The session file is named alongside it so nothing is
+ * actually lost — a model that needs an exact snippet or an error string from the
+ * planning phase can go and read it, which is cheaper than having carried the whole
+ * investigation forward on every request just in case.
+ */
+function implementFromScratch(session: Session, plan: string): string {
+  const path = session.id ? transcriptPath(session.cwd, session.id) : "";
+  const where = path
+    ? `
+
+If you need something exact from the planning that produced this — a snippet, an ` +
+      `error message, a path — the full conversation is at: ${path}`
+    : "";
+  return `Implement the following plan:
+
+${plan}${where}`;
+}
+
+/**
+ * Mark an approved plan complete once its work turn has ended.
+ *
+ * Nothing used to do this. `completePlanArtifact` existed, worked and was tested, and
+ * had no caller outside its own test — so `.mindweave/plan.md` stayed active forever,
+ * every later session loaded it, and its binding block was injected into every request
+ * of unrelated work months later. The suite stayed green because the test proved the
+ * function worked, never that anything called it.
+ *
+ * Degrade-safe: a plan that cannot be marked done is left alone rather than dropped
+ * from memory, because the in-memory copy is what governs the current work.
+ */
+async function settlePlanIfFinished(session: Session, options: RespondOptions): Promise<void> {
+  if (!session.toolContext.activePlan) return;
+  if (session.toolContext.planMode) return; // still planning: nothing is being carried out
+  if (options.signal?.aborted) return; // cut off, not concluded — the next turn continues it
+  session.toolContext.activePlan = "";
+  session.toolContext.activePlanApprovedAt = undefined;
   try {
-    return await respondTurn(session, options);
-  } finally {
-    if (session.toolContext.planResume) {
-      session.toolContext.planResume = false;
-      session.toolContext.planMode = true;
-      session.toolContext.guarded = false;
-      session.toolContext.guardAllowAll = false;
-      session.toolContext.onModeChange?.();
-    }
+    await completePlanArtifact(session.toolContext.roots?.[0] ?? session.cwd);
+  } catch {
+    // The file stays active; the session no longer injects it either way.
   }
 }
 
@@ -1176,6 +1224,26 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         // near miss for a plain name, so including them would only add noise.
         return { call, output: unknownToolError(call.name, TOOLS.map((t) => t.name)), summary: `unknown tool '${call.name}'`, isError: true, detail: undefined as string | undefined, fullContentOf: undefined as string | undefined };
       }
+      // The mirror of the rule below, for tools that exist BECAUSE planning is
+      // happening. `planOnly` is only a schema FILTER, so nothing stopped a model from
+      // calling one outside plan mode — and exit_plan is read-only, so neither refusal
+      // below caught it either. Approving from there set the session up to return to
+      // planning at the end of the turn, putting the user in a mode they never chose.
+      //
+      // It is a real call to make, not a hypothetical: the tool list the model is
+      // holding was built at the start of the step, so the step right after approval
+      // still has exit_plan in it. Claude Code guards the identical case.
+      if (tool.planOnly && !session.toolContext.planMode) {
+        return {
+          call,
+          output:
+            `Refused: '${call.name}' is only for ending a planning session, and you are not in plan mode. ` +
+            `If your plan was already approved, carry on with the work instead.`,
+          summary: `blocked outside plan mode`,
+          isError: true,
+          detail: undefined as string | undefined,
+        };
+      }
       // Belt-and-suspenders for plan mode: the schema filter already hides mutating
       // tools, but if the model calls one anyway, refuse it instead of running it.
       // Live, not the captured value. Reading the stale one here would refuse the
@@ -1327,6 +1395,37 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       });
     }
     await options.persist?.(); // durable: tool results recorded, transcript well-formed
+
+    // A plan approved with a FRESH CONTEXT. Everything the planning turn accumulated —
+    // the files opened to understand the problem, the searches that went nowhere — has
+    // done its job, and none of it is needed to carry the plan out.
+    //
+    // Done HERE, and nowhere else, because this is the one point where the assistant
+    // message carrying the exit_plan call and its result can be dropped TOGETHER. A
+    // provider requires every tool_call to be answered; cutting the conversation a step
+    // earlier or later leaves one without the other and every later request in the
+    // session is malformed.
+    if (session.toolContext.planFreshStart) {
+      const plan = session.toolContext.planFreshStart;
+      session.toolContext.planFreshStart = undefined;
+      const before = estimateEntriesTokens(session.transcript);
+      session.transcript = [{ role: "user", content: implementFromScratch(session, plan) }];
+      // The ledger describes what is on screen, and nothing is any more. Left alone it
+      // would tell the model it already holds files that are no longer in front of it —
+      // the same lie a compaction used to leave behind.
+      session.toolContext.reads.clear();
+      session.sessionMemory = "";
+      session.sessionMemoryEntries = 0;
+      await options.persist?.();
+      // Reported through the same channel a compaction uses, because to the user it is
+      // the same event: the conversation just got much shorter and they should be told
+      // by how much rather than watching it happen silently.
+      options.onCompaction?.({
+        before,
+        after: estimateEntriesTokens(session.transcript),
+        window: sharpContextWindow(session.modelConfig.model),
+      });
+    }
 
     // Images a tool produced (screenshot) reach the model HERE, as a following user
     // message, rather than inside the tool result. Two reasons, both hard:

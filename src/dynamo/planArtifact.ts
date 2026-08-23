@@ -20,8 +20,8 @@
  * Divergence gets a CONTRACT, in two layers:
  *   - The rendered block binds the model: work must follow the plan, and if
  *     reality makes a step impossible or wrong, the model must STOP and say so —
- *     the turn ends, the session returns to planning (the mode machinery already
- *     guarantees that return), and a revised plan goes back through approval.
+ *     the turn ends, and the agreement ends with it — the user decides whether to
+ *     plan again — and unagreed work never silently replaces the agreed plan.
  *     Improvising past the agreed plan is named as the specific failure to avoid.
  *   - Mechanically: when the repeat-failure breaker trips DURING an approved
  *     plan's execution, the engine's interrupt names the plan and orders the stop
@@ -115,9 +115,9 @@ export function renderPlanBlock(artifact: PlanArtifact): string {
     "). It is the agreed scope of the current work — follow it in order, and do not " +
     "silently do something else. If a step turns out to be impossible, wrong, or " +
     "overtaken by what you find, do NOT improvise past it: STOP, state plainly which " +
-    "step diverged and why, and end your turn — the session returns to planning, where " +
-    "you propose a revised plan for approval. Divergence is normal; unagreed work is " +
-    "not. When every step is genuinely complete, say so in your final reply.\n" +
+    "step diverged and why, and end your turn. The agreement ends there, and the user " +
+    "decides what happens next. Divergence is normal; unagreed work is not. " +
+    "When every step is genuinely complete, say so in your final reply.\n" +
     "<approved_plan>\n" +
     artifact.plan.trim() +
     "\n</approved_plan>"
@@ -135,7 +135,6 @@ export function planDivergenceStop(failedLabel: string): string {
     "repeatedly — the plan's current step is not working as agreed. Do not keep " +
     "retrying it, and do not improvise around it: that would replace the agreed plan " +
     "with unagreed work. Stop here, state which step diverged and what you found, and " +
-    "end your turn. You will be back in planning mode, where you revise the plan and " +
-    "put it through approval again."
+    "end your turn so the user can decide whether to replan."
   );
 }
