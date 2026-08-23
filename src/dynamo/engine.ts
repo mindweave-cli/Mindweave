@@ -510,7 +510,19 @@ function workspaceText(session: Session): string {
  * A file that has since been deleted or become unreadable is simply absent from the
  * map; `buildRequest` turns that into a line the model can read, never a crash.
  */
+/** Can the model currently selected actually look at a picture? A manifest FACT, asked
+ *  in one place — the same rule the screenshot path already follows. */
+function modelSeesImages(session: Session): boolean {
+  return manifestForModel(session.modelConfig.model).acceptsImages?.(session.modelConfig.model) ?? false;
+}
+
 async function loadImagePayloads(session: Session): Promise<Map<string, string>> {
+  // Nothing to load for a model that cannot look at one. This is the /provider switch
+  // case: a picture attached while a vision model was running stays in the transcript,
+  // and without this it was re-encoded and re-sent on every request to a text-only model
+  // that will not read it — measured, and it goes out as an `image_url` part that a
+  // text-only endpoint is entitled to reject outright.
+  if (!modelSeesImages(session)) return new Map();
   const paths = new Set<string>();
   for (const e of session.transcript) {
     if (e.role === "user" && e.images) for (const img of e.images) paths.add(img.path);
@@ -534,6 +546,7 @@ function buildRequest(
   tools: ReturnType<typeof toolSchemas>,
   imagePayloads: Map<string, string> = new Map(),
 ): ModelRequest {
+  const canSeeImages = modelSeesImages(session);
   const messages: ChatMessage[] = [];
   for (const e of session.transcript) {
     if (e.role === "user" || e.role === "summary") {
@@ -545,13 +558,28 @@ function buildRequest(
       if (refs && refs.length > 0) {
         const images: ImagePart[] = [];
         const missing: string[] = [];
+        const unseen: string[] = [];
         for (const ref of refs) {
+          // Told, never silently dropped. A message that mentions a screenshot and
+          // carries nothing reads to the model as a picture it failed to notice; the
+          // reason it cannot see it is the one thing that makes the message sensible.
+          if (!canSeeImages) {
+            unseen.push(basename(ref.path));
+            continue;
+          }
           const data = imagePayloads.get(ref.path);
           if (data) images.push({ path: ref.path, mediaType: ref.mediaType, data });
           else missing.push(basename(ref.path));
         }
-        const content =
-          missing.length > 0 ? `${e.content}\n\n[${missing.join(", ")} could not be read from disk]` : e.content;
+        const notes = [
+          ...(unseen.length > 0
+            ? [`${unseen.join(", ")} was attached, but the model now running cannot see images`]
+            : []),
+          ...(missing.length > 0 ? [`${missing.join(", ")} could not be read from disk`] : []),
+        ];
+        const content = notes.length > 0 ? `${e.content}
+
+[${notes.join("; ")}]` : e.content;
         messages.push({ role: "user", content, ...(images.length > 0 ? { images } : {}) });
         continue;
       }

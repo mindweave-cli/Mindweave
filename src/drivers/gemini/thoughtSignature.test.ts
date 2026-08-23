@@ -108,7 +108,10 @@ test("a streamed tool call keeps the signature that arrived with it", async () =
     () => {},
   );
   assert.equal(result.toolCalls.length, 1);
-  assert.deepEqual(result.toolCalls[0]!.meta, { extra_content: SIG }, "the signature must survive assembly");
+  assert.deepEqual(result.toolCalls[0]!.meta?.extra_content, SIG, "the signature must survive assembly");
+  // Tagged with the provider that produced it, so a /provider switch mid-session cannot
+  // replay Google's blob to somebody else. See drivers/providerSwitch.test.ts.
+  assert.equal(result.toolCalls[0]!.meta?.provider, "Gemini", "the signature is not attributed");
 });
 
 test("the signature is kept when it arrives on a LATER fragment", async () => {
@@ -124,7 +127,8 @@ test("the signature is kept when it arrives on a LATER fragment", async () => {
     ]),
     () => {},
   );
-  assert.deepEqual(result.toolCalls[0]!.meta, { extra_content: SIG });
+  assert.deepEqual(result.toolCalls[0]!.meta?.extra_content, SIG);
+  assert.equal(result.toolCalls[0]!.meta?.provider, "Gemini");
 });
 
 test("a tool call with no signature carries no meta at all", async () => {

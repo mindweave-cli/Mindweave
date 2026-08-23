@@ -198,8 +198,24 @@ function repair(
  * OpenAI-compatible client that drops unknown fields can make exactly one tool call per
  * conversation and then breaks. Passing it through unread is the whole fix.
  */
-function wireToolCall(c: NonNullable<ChatMessage["tool_calls"]>[number]): Record<string, unknown> {
-  const extra = c.meta?.extra_content;
+function wireToolCall(
+  c: NonNullable<ChatMessage["tool_calls"]>[number],
+  provider: string,
+): Record<string, unknown> {
+  // Only back to the provider that produced it.
+  //
+  // The blob is opaque and provider-specific: Gemini's is a thought_signature, and
+  // sending it to DeepSeek or Qwen after a mid-session /provider switch hands one
+  // vendor's internal data to another under a key they never defined. Measured before
+  // this check existed — the signature went straight through.
+  //
+  // An UNTAGGED blob is replayed, because it can only have come from a session recorded
+  // before this tag existed and the alternative is worse: Gemini returns 400 on the next
+  // request when a call loses its signature, so dropping it would break exactly the
+  // resumed sessions that still carry one.
+  const from = c.meta?.provider;
+  const mine = from === undefined || from === provider;
+  const extra = mine ? c.meta?.extra_content : undefined;
   return {
     id: c.id,
     type: c.type,
@@ -240,7 +256,7 @@ function toWireContent(m: ChatMessage): string | Record<string, unknown>[] {
   ];
 }
 
-export function toWireMessages(messages: ChatMessage[]): Record<string, unknown>[] {
+export function toWireMessages(messages: ChatMessage[], provider = ""): Record<string, unknown>[] {
   return messages.map((m) => {
     // `images` is OUR field, not a wire field. It was previously spread onto the
     // request untouched, so a provider saw an unknown key and the picture itself
@@ -248,7 +264,7 @@ export function toWireMessages(messages: ChatMessage[]): Record<string, unknown>
     const { tool_calls: calls, images: _ours, ...rest } = m;
     const base = { ...rest, content: toWireContent(m) };
     if (!calls || calls.length === 0) return base;
-    return { ...base, tool_calls: calls.map(wireToolCall) };
+    return { ...base, tool_calls: calls.map((c) => wireToolCall(c, provider)) };
   });
 }
 
@@ -278,7 +294,7 @@ export function buildBody(
   const tools = req.tools ?? [];
   const body: Record<string, unknown> = {
     model: req.model?.model ?? provider.defaultModel,
-    messages: toWireMessages(renderMessages(req)),
+    messages: toWireMessages(renderMessages(req), provider.label),
     ...provider.reasoningFields(req.model),
     ...(provider.sampling?.(req.model) ?? {}),
   };
@@ -418,7 +434,7 @@ export async function consumeStream(
       id: t.id,
       name: t.name,
       arguments: t.args || "{}",
-      ...(t.extra ? { meta: { extra_content: t.extra } } : {}),
+      ...(t.extra ? { meta: { extra_content: t.extra, provider: provider.label } } : {}),
     }));
 
   const repaired = repair(provider, content, assembled);
@@ -470,7 +486,7 @@ export function toTurn(provider: CompatProvider, data: unknown): Turn {
     id: tc.id,
     name: tc.function.name,
     arguments: tc.function.arguments || "{}",
-    ...(tc.extra_content ? { meta: { extra_content: tc.extra_content } } : {}),
+    ...(tc.extra_content ? { meta: { extra_content: tc.extra_content, provider: provider.label } } : {}),
   }));
   const repaired = repair(provider, content, toolCalls);
   return {
