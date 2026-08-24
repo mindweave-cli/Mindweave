@@ -1,40 +1,72 @@
 # Choosing your model
 
-Mindweave is **bring-your-own-key (BYOK)**: you pick a model, you use your own API
-key for it, and everything runs on your machine. Nothing is sent to a Mindweave
-server.
+Mindweave is **bring-your-own-key (BYOK)**: you pick a model, you use your own API key
+for it, and everything runs on your machine. Nothing is sent to a Mindweave server.
 
-Each model has a **driver** that tunes Mindweave to run that model at its best. Only
-the driver for the model you're using is ever active — so your setup stays fast and
-lean no matter how many providers exist.
+Each provider has a **driver** that tunes Mindweave to run its models at their best —
+how that provider expresses reasoning effort, how it reports cached tokens, the repairs
+its models need. Only the driver for the model you are using is ever loaded, so the
+lineup below costs nothing until you pick from it.
 
 ## Available now
 
-| Provider | Models | Key | Notes |
-| --- | --- | --- | --- |
-| **DeepSeek** | `deepseek-v4-flash`, `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | The default. Flash is fast and cheap; Pro is stronger for harder work. |
-| **Anthropic** | `claude-sonnet-5`, `claude-opus-5` | `ANTHROPIC_API_KEY` | Sonnet 5 is fast and strong at code; Opus 5 is the most capable. Four reasoning levels each. |
+13 providers, 45 models. `/provider` moves between them and `/model`
+lists what the one you are on offers, so there is nothing here you need to memorise.
 
-More providers (OpenAI, Qwen, Ollama, …) are on the way — each added as a
-community-built driver. See the roadmap in the repo.
+| Provider | Models | Key |
+| --- | --- | --- |
+| **DeepSeek** | 3 | `DEEPSEEK_API_KEY` |
+| **Anthropic** | 5 | `ANTHROPIC_API_KEY` |
+| **OpenAI** | 3 | `OPENAI_API_KEY` |
+| **Gemini** | 6 | `GEMINI_API_KEY` |
+| **Qwen** | 4 | `DASHSCOPE_API_KEY` |
+| **Kimi** | 4 | `MOONSHOT_API_KEY` |
+| **GLM** | 4 | `ZAI_API_KEY` |
+| **xAI** | 3 | `XAI_API_KEY` |
+| **Mistral** | 4 | `MISTRAL_API_KEY` |
+| **Groq** | 2 | `GROQ_API_KEY` |
+| **Cerebras** | 2 | `CEREBRAS_API_KEY` |
+| **MiniMax** | 3 | `MINIMAX_API_KEY` |
+| **Meta** | 2 | `MODEL_API_KEY` |
+
+DeepSeek is the default, and DeepSeek V4 Flash is what a fresh project opens with.
+
+Two things worth knowing before you choose. **Meta's Muse Spark** is offered in two
+tiers, and the cheaper one is cheaper because Meta may train on your prompts and
+completions — Mindweave never picks that one for you. **DeepSeek V4 Flash Vision** is the
+one DeepSeek model that can read an image; the others are text-only, and Mindweave tells
+the model plainly when a picture it was handed cannot be seen rather than pretending
+otherwise.
 
 ## Picking a model
 
-- `/model` — choose which model answers.
-- `/think` — choose how hard it reasons (higher = deeper, slower, costs more).
+- `/provider` — choose which company answers.
+- `/model` — choose which of its models.
+- `/think` — choose how hard it reasons. The levels offered are the ones that model
+  actually has, not a fixed ladder pasted across every provider.
 
-Your choice is remembered per project.
+Your choice is remembered per project. Switching mid-conversation is safe: the reasoning
+level is clamped to what the new model accepts, and anything in the conversation that
+belonged to the previous provider is left behind rather than replayed to the new one.
 
 ## Setting your key
 
-Set the provider's key as an environment variable, or put it in your config `.env`
-so it works in every project:
+Mindweave asks for a key the first time it needs one and writes it to
+`~/.mindweave/.env`, which applies to every project. You can also put one in a project's
+own `.env`, or export it in your shell — the shell wins, then the project file, then the
+global one.
 
 ```
 DEEPSEEK_API_KEY=your-key-here
-ANTHROPIC_API_KEY=your-key-here
 ```
 
-You only need a key for the provider whose models you actually use. Set both and
-you can switch between them with `/model` in the same project. Keys stay on your
-machine — they're never uploaded anywhere.
+You only need a key for the provider you actually use. See `.env.example` for the full
+list. Keys stay on your machine and are never uploaded anywhere.
+
+## Adding a provider
+
+Drivers are the intended contribution. A provider is a manifest (what it offers, what it
+costs, what it can do) plus a wire layer, and most providers need only the manifest
+because they speak the OpenAI-compatible shape the shared transport already handles.
+`src/drivers/deepseek/` is the reference to copy. `src/drivers/ollama/` is an unclaimed
+stub for local models if you want it.
