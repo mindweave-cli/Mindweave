@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { respond } from "./engine.js";
 import { savePlanArtifact, loadPlanArtifact } from "./planArtifact.js";
+import { saveSession, transcriptPath } from "../memory/store.js";
 import type { Session } from "../memory/types.js";
 import { PLAN_CHOICES } from "../tools/exitPlan.js";
 import { APPROVAL_TEXT } from "../tools/approval.js";
@@ -195,6 +196,39 @@ test("a fresh start replaces the conversation with the plan, and says where the 
   // Nothing is truly lost: the model is told where to read the rest.
   assert.ok(opening.content.includes("abc-123.jsonl"), "the model cannot find the conversation it lost");
   assert.equal(s.toolContext.planFreshStart, undefined, "the request must be consumed exactly once");
+  // The work continues under a NEW id, so the planning conversation is not overwritten
+  // by the next save — a session file is rewritten whole every time.
+  assert.notEqual(s.id, "abc-123", "the new conversation kept the old id and will overwrite it");
+  assert.equal(s.toolContext.sessionId, s.id, "the tool context still points at the old session");
+});
+
+test("the planning conversation SURVIVES on disk, so the pointer is not a lie", async () => {
+  // The pointer names a file. Without a new id the next persist writes the replacement
+  // message over that same file, and the model following the pointer finds only itself.
+  const root = tempRoot();
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "mw-ptrhome-")));
+  process.env.MINDWEAVE_HOME = home;
+
+  const s = session(root, {
+    id: "planning-session",
+    transcript: [{ role: "user", content: "the planning discussion, nine files deep" }] as object,
+    toolContext: {
+      activePlan: "",
+      planMode: true,
+      requestApproval: async () => PLAN_CHOICES[1],
+    } as object,
+  });
+  nextToolCall = planCall("1. Do the thing");
+
+  await respond(s, { persist: async () => void (await saveSession(s)) });
+
+  const priorPath = transcriptPath(root, "planning-session");
+  const kept = await fs.readFile(priorPath, "utf8");
+  assert.ok(kept.includes("nine files deep"), "the planning conversation was overwritten");
+  assert.ok(
+    String(s.transcript[0]!.content).includes("planning-session.jsonl"),
+    "the message points somewhere other than the conversation it kept",
+  );
 });
 
 test("a fresh start clears the read ledger, so the model is not told it holds files it cannot see", async () => {
@@ -365,4 +399,35 @@ test("SENTINEL: a declined action carries the user's own direction back", async 
   assert.ok(result, "the declined call produced no result");
   assert.ok(String(result!.content).includes("use pnpm, not npm"), "the user's direction never reached the model");
   assert.equal(s.toolContext.guardAllowed, undefined, "a refusal must not grant anything");
+});
+
+
+test("a fresh start leaves the session notes able to restart, not stalled", async () => {
+  // "Should the notes update" asks how far the transcript has grown SINCE the last
+  // update. Clearing the notes without rebasing that measurement leaves the difference
+  // negative, so they would never update again until the new work exceeded the old
+  // conversation it replaced. A compaction rebases for the same reason.
+  const root = tempRoot();
+  const s = session(root, {
+    id: "abc-123",
+    transcript: Array.from({ length: 40 }, () => ({ role: "user", content: "x".repeat(400) })) as object,
+    sessionMemory: "notes about the planning research",
+    sessionMemoryTokens: 50_000,
+    sessionMemoryInit: true,
+    toolContext: {
+      activePlan: "",
+      planMode: true,
+      requestApproval: async () => PLAN_CHOICES[1],
+    } as object,
+  });
+  nextToolCall = planCall("1. Do the thing");
+
+  await respond(s);
+
+  assert.equal(s.sessionMemory, "", "notes describing a conversation that is gone were kept");
+  assert.equal(s.sessionMemoryInit, false, "the notes cannot restart from scratch");
+  assert.ok(
+    (s.sessionMemoryTokens ?? 0) < 5_000,
+    `the baseline still measures the old conversation (${s.sessionMemoryTokens})`,
+  );
 });

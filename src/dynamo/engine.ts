@@ -27,6 +27,7 @@ import { commandShellLabel } from "../tools/runCommand.js";
 import { isInteractiveServerCommand } from "../tools/backgroundShells.js";
 import { basePrompt } from "./prompt.js";
 import { basename } from "node:path";
+import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { relativize, resolvePath, rootLabel } from "../tools/paths.js";
 import { renderRules, renderSkillCatalog, reloadGovernance, governanceStamp, rescope } from "../governor/index.js";
@@ -768,8 +769,8 @@ export async function respond(session: Session, options: RespondOptions = {}): P
  * planning phase can go and read it, which is cheaper than having carried the whole
  * investigation forward on every request just in case.
  */
-function implementFromScratch(session: Session, plan: string): string {
-  const path = session.id ? transcriptPath(session.cwd, session.id) : "";
+function implementFromScratch(priorPath: string, plan: string): string {
+  const path = priorPath;
   const where = path
     ? `
 
@@ -1457,13 +1458,34 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       const plan = session.toolContext.planFreshStart;
       session.toolContext.planFreshStart = undefined;
       const before = estimateEntriesTokens(session.transcript);
-      session.transcript = [{ role: "user", content: implementFromScratch(session, plan) }];
+      // The planning conversation is KEPT, under the id it was written with, and the
+      // work continues as a new session.
+      //
+      // A session file is rewritten whole on every persist, so without this the very
+      // next save would overwrite the planning transcript with the one message that
+      // replaced it — and the pointer in that message would name a file holding nothing
+      // but the pointer. Claude Code regenerates its session id at the same moment and
+      // for the same reason; it captures the old path BEFORE the change precisely
+      // because the id is about to move.
+      const priorPath = transcriptPath(session.cwd, session.id);
+      session.id = randomUUID();
+      session.toolContext.sessionId = session.id;
+      session.transcript = [{ role: "user", content: implementFromScratch(priorPath, plan) }];
       // The ledger describes what is on screen, and nothing is any more. Left alone it
       // would tell the model it already holds files that are no longer in front of it —
       // the same lie a compaction used to leave behind.
       session.toolContext.reads.clear();
+      // The notes describe a conversation that no longer exists, so they go with it and
+      // start again from nothing. REBASED as well as cleared: "should I update the
+      // notes" asks how far the transcript has grown SINCE the last update, and leaving
+      // that measured against the old long conversation means the difference stays
+      // negative and the notes never update again until the new work exceeds the old
+      // one. A compaction rebases here for exactly the same reason; it keeps its notes
+      // because a summary still describes the work, and this does not.
       session.sessionMemory = "";
       session.sessionMemoryEntries = 0;
+      session.sessionMemoryTokens = estimateEntriesTokens(session.transcript);
+      session.sessionMemoryInit = false;
       await options.persist?.();
       // Reported through the same channel a compaction uses, because to the user it is
       // the same event: the conversation just got much shorter and they should be told
