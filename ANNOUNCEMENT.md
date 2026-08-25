@@ -15,6 +15,24 @@ best of them, especially on prompt caching, tool surface, and how a search tool
 should behave. Every line here is our own, and several of the choices below go
 the other way on purpose. Where we found a better answer, we took it.
 
+## Starting up
+
+Mindweave asks once, the first time it opens a folder, before it can read or change
+anything in it. A drive root or your home directory says plainly how wide that is and is
+never remembered, because agreeing once to work in everything you own should not make it
+a trusted workspace forever.
+
+Then it shows every provider it speaks to and you add a key for whichever one you already
+use. One is enough. It used to ask for the default provider's key and nothing else, so
+anyone arriving with a key for one of the other twelve was shown a setup screen for a
+provider they had not chosen, with no way past it.
+
+A key you got wrong can be fixed from inside Mindweave. `/key` lists what you have, and a
+provider can hold several: a work key and a personal one, or a free key and a paid one.
+Any of them can be shown, made the active one, edited or removed, and a request rejected
+for the key says so and points at `/key` rather than sending you to a billing page over a
+mistyped character.
+
 ## A real terminal interface
 
 Mindweave runs on its own screen instead of scrolling your terminal history
