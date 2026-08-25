@@ -13,6 +13,11 @@ import { render } from "ink";
 import { KeySetup } from "./components/KeySetup.js";
 import { setupView } from "./keySetup.js";
 import { allProviders } from "../drivers/registry.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 function frame(node: React.ReactElement): string {
   const out: string[] = [];
@@ -29,9 +34,25 @@ function frame(node: React.ReactElement): string {
   return out.join("");
 }
 
+/** The first-run screen at a given terminal height. */
+const frameAt = (rows: number) =>
+  frame(
+    <KeySetup
+      rows={rows}
+      view={setupView(() => false)}
+      version=" v1.0.0"
+      envPath="~/.mindweave/.env"
+      docsUrl="https://example.invalid/docs"
+      onSaveKey={() => {}}
+      onContinue={() => {}}
+      active={false}
+    />,
+  );
+
 const screen = (hasKey: (v: string) => boolean) =>
   frame(
     <KeySetup
+      rows={30}
       view={setupView(hasKey)}
       version=" v1.0.0"
       envPath="~/.mindweave/.env"
@@ -70,13 +91,17 @@ test("a provider already set up is marked, so adding more is obvious", () => {
   assert.match(out, new RegExp(`Ready: ${first.label}`), "the user is not told WHICH provider is ready");
 });
 
-test("the screen fits a short terminal, and says what is off it", () => {
-  // Thirteen providers plus Continue plus the header does not fit 40 rows of a small
-  // window, and Continue lives at the BOTTOM — clipping it would hide the way out.
-  const out = screen(() => false);
-  const lines = out.split(String.fromCharCode(10));
-  assert.ok(lines.length < 30, `the screen is ${lines.length} rows and will be clipped`);
-  assert.match(out, /more below/, "providers are cut off with nothing saying so");
+test("the screen never exceeds the terminal, and says what is off it", () => {
+  // Thirteen providers plus the welcome, the tips and Continue do not fit a short
+  // window, and Continue lives at the BOTTOM — clipping it would hide the way out. The
+  // list shrinks to the height available instead.
+  for (const rows of [24, 30, 50]) {
+    const out = frameAt(rows);
+    const lines = out.split(String.fromCharCode(10)).length - 1;
+    assert.ok(lines <= rows, `at ${rows} rows the screen rendered ${lines} and will be clipped`);
+    assert.match(out, /Continue/, `Continue is off screen at ${rows} rows`);
+  }
+  assert.match(frameAt(24), /more below/, "providers are cut off with nothing saying so");
 });
 
 test("every provider is reachable by name somewhere in setup", () => {
@@ -107,13 +132,13 @@ test("a first run has no escape; /key does", () => {
   // go back to, so an escape would only reach an app that cannot answer. Reopened
   // deliberately to fix a key, leaving without changing anything is the whole point.
   const firstRun = frame(
-    <KeySetup view={setupView(() => false)} version=" v1" envPath="~/.mindweave/.env"
+    <KeySetup rows={30} view={setupView(() => false)} version=" v1" envPath="~/.mindweave/.env"
       docsUrl="d" onSaveKey={() => {}} onContinue={() => {}} active={false} />,
   );
   assert.doesNotMatch(firstRun, /Esc to leave/, "a first run offers an exit to an app that cannot run");
 
   const reopened = frame(
-    <KeySetup view={setupView(() => true)} version=" v1" envPath="~/.mindweave/.env"
+    <KeySetup rows={30} view={setupView(() => true)} version=" v1" envPath="~/.mindweave/.env"
       docsUrl="d" onSaveKey={() => {}} onContinue={() => {}} onCancel={() => {}} active={false} />,
   );
   assert.match(reopened, /Esc to leave/, "/key traps the user in the setup screen");
@@ -126,10 +151,26 @@ test("a provider that already has a key can still be chosen, to replace it", () 
   assert.ok(view.rows.every((r) => r.ready));
   assert.equal(view.canContinue, true);
   const out = frame(
-    <KeySetup view={view} version=" v1" envPath="~/.mindweave/.env" docsUrl="d"
+    <KeySetup rows={30} view={view} version=" v1" envPath="~/.mindweave/.env" docsUrl="d"
       onSaveKey={() => {}} onContinue={() => {}} onCancel={() => {}} active={false} />,
   );
   // Every row is still listed and selectable — nothing is greyed out just for being set.
   assert.match(out, /key added/);
   assert.match(out, /1\s+DeepSeek/);
+});
+
+
+test("Esc leaves the key field, not just the list", () => {
+  // Choosing a provider and then finding no way back is the trap people hit
+  // immediately. Asserted on the KEY HANDLER rather than the pixels, since what matters
+  // is that escape is reachable while the text field owns the keyboard.
+  const src = readFileSync(join(here, "components/KeySetup.tsx"), "utf8");
+  const handler = src.slice(src.indexOf("useInput("), src.indexOf("{ isActive"));
+  const escAt = handler.indexOf("key.escape");
+  const guardAt = handler.indexOf("if (entering) return");
+  assert.ok(escAt >= 0, "escape is not handled at all");
+  assert.ok(escAt < guardAt || guardAt === -1, "escape is handled AFTER the field takes the keyboard, so it never fires");
+  assert.match(src, /\{ isActive: active \}/, "the handler is switched off while the field is open");
+  // And the screen says so, rather than relying on a rule nobody would guess.
+  assert.match(src, /Esc to go back/, "the way out is not written on the screen");
 });

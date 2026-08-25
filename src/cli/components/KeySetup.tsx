@@ -15,15 +15,28 @@
  */
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
+import { FirstRunFrame, FIRST_RUN_TIPS } from "./FirstRunFrame.js";
 import { stripMouse } from "../mouse.js";
 import { useState } from "react";
 import { useInput } from "ink";
 import type { SetupRow, SetupView } from "../keySetup.js";
 
 /** Rows visible at once, so the screen fits a small terminal. */
-const WINDOW = 9;
+/**
+ * How many providers fit alongside everything else on the screen.
+ *
+ * Derived from the terminal height rather than fixed, because the first launch also
+ * carries a welcome and four tips — measured, a fixed nine overflowed a 30-row window by
+ * a line, and the line it lost was the bottom of the list.
+ */
+function windowFor(rows: number, hasTips: boolean): number {
+  const chrome = hasTips ? 22 : 18;
+  return Math.max(4, Math.min(9, rows - chrome));
+}
 
 export interface KeySetupProps {
+  /** Terminal height, so the screen can sit in the middle rather than at the top. */
+  rows: number;
   view: SetupView;
   version: string;
   /** Where keys are written, shown so the user knows what is being touched. */
@@ -43,7 +56,7 @@ export interface KeySetupProps {
   onCancel?: () => void;
 }
 
-export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinue, active = true, onCancel }: KeySetupProps) {
+export function KeySetup({ view, rows, version, envPath, docsUrl, onSaveKey, onContinue, active = true, onCancel }: KeySetupProps) {
   const [sel, setSel] = useState(() => firstUnset(view));
   const [entering, setEntering] = useState<SetupRow | null>(null);
   const [value, setValue] = useState("");
@@ -55,9 +68,20 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
 
   useInput(
     (input, key) => {
-      if (entering) return; // the field owns the keyboard while it is open
-      if (key.escape && onCancel) onCancel();
-      else if (key.upArrow) setSel((s) => (s - 1 + rowCount) % rowCount);
+      // Escape is handled FIRST, and even while the field owns the keyboard. Choosing a
+      // provider and then finding no way back to the list is the trap people hit
+      // immediately, and "submit nothing to go back" is a rule nobody should have to
+      // learn. On the list itself it only leaves when there is somewhere to leave to —
+      // a first run has no session behind it.
+      if (key.escape) {
+        if (entering) {
+          setEntering(null);
+          setValue("");
+        } else onCancel?.();
+        return;
+      }
+      if (entering) return; // everything else belongs to the field
+      if (key.upArrow) setSel((s) => (s - 1 + rowCount) % rowCount);
       else if (key.downArrow) setSel((s) => (s + 1) % rowCount);
       else if (key.return) choose(sel);
       else {
@@ -69,7 +93,7 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
         if (Number.isInteger(n) && n >= 1 && n <= Math.min(9, view.rows.length)) choose(n - 1);
       }
     },
-    { isActive: active && !entering },
+    { isActive: active },
   );
 
   function choose(index: number) {
@@ -88,8 +112,7 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
 
   if (entering) {
     return (
-      <Box flexDirection="column" paddingX={1}>
-        <Header version={version} />
+      <FirstRunFrame rows={rows} version={version}>
         <Text>
           Paste your <Text bold>{entering.label}</Text> API key:
         </Text>
@@ -111,32 +134,35 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
               setEntering(null);
               setValue("");
             }}
-            placeholder="paste, then press Enter  (empty Enter goes back)"
+            placeholder="paste, then press Enter"
             mask="•"
           />
         </Box>
         <Box marginTop={1} flexDirection="column">
           <Text dimColor>Don't have one? Get a key at {entering.keysUrl}</Text>
           <Text dimColor>Saved to {envPath} — on this machine only, sent only to {entering.label}.</Text>
+          <Text dimColor>Esc to go back to the list.</Text>
         </Box>
-      </Box>
+      </FirstRunFrame>
     );
   }
 
-  const start = windowStart(sel, rowCount);
+  const win = windowFor(rows, view.readyCount === 0);
+  const start = windowStart(sel, rowCount, win);
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <Header version={version} />
-      <Text>
-        {view.readyCount === 0
-          ? "Welcome. Add a key for whichever provider you already use — one is enough."
-          : // NAMED, not counted. The list scrolls, so a provider that was just set up is
-            // often off-screen with its tick, and "1 provider ready" answers a question
-            // nobody asked while leaving the obvious one — which? — unanswered.
-            `Ready: ${view.rows.filter((r) => r.ready).map((r) => r.label).join(", ")}. Add more, or continue.`}
-      </Text>
+    <FirstRunFrame
+      rows={rows}
+      version={version}
+      subtitle={
+        view.readyCount === 0
+          ? "Welcome — a coding agent that runs in your terminal, on your own key."
+          : `Ready: ${view.rows.filter((r) => r.ready).map((r) => r.label).join(", ")}. Add more, or continue.`
+      }
+      tips={view.readyCount === 0 ? FIRST_RUN_TIPS : undefined}
+    >
+      <Text>Add a key for whichever provider you already use — one is enough.</Text>
       <Box marginTop={1} flexDirection="column">
-        {view.rows.slice(start, start + WINDOW).map((row, i) => {
+        {view.rows.slice(start, start + win).map((row, i) => {
           const index = start + i;
           const on = index === sel;
           return (
@@ -154,8 +180,8 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
             </Box>
           );
         })}
-        {start + WINDOW < view.rows.length ? (
-          <Text dimColor>{`   … ${view.rows.length - start - WINDOW} more below`}</Text>
+        {start + win < view.rows.length ? (
+          <Text dimColor>{`   … ${view.rows.length - start - win} more below`}</Text>
         ) : null}
         <Box marginTop={1}>
           <Text color={onContinueRow ? "cyan" : undefined} bold={onContinueRow} dimColor={!view.canContinue}>
@@ -171,16 +197,7 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
         </Text>
         <Text dimColor>Keys are saved to {envPath}, on this machine only. Learn more: {docsUrl}</Text>
       </Box>
-    </Box>
-  );
-}
-
-function Header({ version }: { version: string }) {
-  return (
-    <Box marginBottom={1}>
-      <Text bold color="yellow">Mindweave</Text>
-      <Text dimColor>{version}</Text>
-    </Box>
+    </FirstRunFrame>
   );
 }
 
@@ -191,7 +208,7 @@ function firstUnset(view: SetupView): number {
 }
 
 /** Scroll the window so the selection stays inside it. */
-export function windowStart(sel: number, rowCount: number, size = WINDOW): number {
+export function windowStart(sel: number, rowCount: number, size: number): number {
   if (rowCount <= size) return 0;
   const half = Math.floor(size / 2);
   return Math.max(0, Math.min(sel - half, rowCount - 1 - size));

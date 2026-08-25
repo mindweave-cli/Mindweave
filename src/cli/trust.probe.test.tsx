@@ -49,7 +49,7 @@ function frame(cwd: string) {
   } as unknown as NodeJS.WriteStream;
   const b = rootBreadth(cwd);
   const app = render(
-    <TrustGate cwd={cwd} breadth={b} warning={breadthWarning(b, cwd)} persists={trustPersists(b)}
+    <TrustGate rows={30} cwd={cwd} breadth={b} warning={breadthWarning(b, cwd)} persists={trustPersists(b)}
       version=" v1.9.9" docsUrl="mindweave.dev/docs" onTrust={() => {}} onQuit={() => {}} active={false} />,
     { stdout: stream, patchConsole: false },
   );

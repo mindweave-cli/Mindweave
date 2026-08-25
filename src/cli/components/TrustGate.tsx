@@ -13,9 +13,12 @@
 import { Box, Text } from "ink";
 import { useInput } from "ink";
 import { useState } from "react";
+import { FirstRunFrame } from "./FirstRunFrame.js";
 import type { Breadth } from "../trust.js";
 
 export interface TrustGateProps {
+  /** Terminal height, so the gate sits in the middle rather than at the top. */
+  rows: number;
   cwd: string;
   breadth: Breadth;
   /** The extra sentence for a broad root, or "" for an ordinary folder. */
@@ -31,7 +34,7 @@ export interface TrustGateProps {
 
 const CHOICES = ["Yes, work in this folder", "No, quit"] as const;
 
-export function TrustGate({ cwd, breadth, warning, persists, version, docsUrl, onTrust, onQuit, active = true }: TrustGateProps) {
+export function TrustGate({ cwd, rows, breadth, warning, persists, version, docsUrl, onTrust, onQuit, active = true }: TrustGateProps) {
   const [sel, setSel] = useState(0);
 
   useInput(
@@ -46,13 +49,7 @@ export function TrustGate({ cwd, breadth, warning, persists, version, docsUrl, o
   );
 
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <Box marginBottom={1}>
-        <Text bold color="yellow">Mindweave</Text>
-        <Text dimColor>{version}</Text>
-      </Box>
-
-      <Text>Work in this folder?</Text>
+    <FirstRunFrame rows={rows} version={version} subtitle="Work in this folder?">
       <Box marginTop={1}>
         <Text bold color="cyan">{cwd}</Text>
       </Box>
@@ -90,6 +87,6 @@ export function TrustGate({ cwd, breadth, warning, persists, version, docsUrl, o
         </Text>
         <Text dimColor>↑/↓ or 1-2 · Enter to choose · Esc to quit · {docsUrl}</Text>
       </Box>
-    </Box>
+    </FirstRunFrame>
   );
 }

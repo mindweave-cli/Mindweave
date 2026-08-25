@@ -1802,6 +1802,7 @@ export function App() {
   if (trustOpen) {
     return (
       <TrustGate
+        rows={rows}
         cwd={startCwd.current}
         breadth={trustBreadth}
         warning={breadthWarning(trustBreadth, startCwd.current)}
@@ -1822,6 +1823,7 @@ export function App() {
   if (setupOpen) {
     return (
       <KeySetup
+        rows={rows}
         view={setupView(hasApiKey)}
         version={versionLabel()}
         envPath={globalEnvPath()}
