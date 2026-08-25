@@ -60,6 +60,7 @@ import { chatLayout, reflowScroll } from "./chatAnchor.js";
 import { virtualWindow } from "./virtualWindow.js";
 import { perf, perfEnabled } from "./perfLog.js";
 import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./groupReveal.js";
+import { drain as drainQueue, popAll as popAllQueued, visibleQueue } from "./messageQueue.js";
 import { toolDisplay, isGroupable, KIND_COLOR } from "./toolDisplay.js";
 import { workingVerb } from "./workingVerb.js";
 import { narrationPending, revealWait } from "./revealPace.js";
@@ -548,14 +549,37 @@ export function App() {
     if (mgr && mgr.pendingCount() > 0) void reactToBackground();
   }, [bgTick, busy, ready, needsKey]);
 
-  // When the turn ends, send the next queued message (chains through the queue).
+  // When the turn ends, send what's queued — CONSECUTIVE plain messages together, as
+  // one turn (see messageQueue.ts for why), a slash command on its own. Chains: each
+  // send ends, this fires again, until the queue is empty.
   useEffect(() => {
     if (busy || !ready || needsKey || overlay) return;
-    if (queueRef.current.length === 0) return;
-    const next = queueRef.current.shift()!;
-    setQueued([...queueRef.current]);
-    void handleSubmit(next);
+    const next = drainQueue(queueRef.current);
+    if (!next) return;
+    queueRef.current = next.rest;
+    setQueued(next.rest);
+    void handleSubmit(next.send);
   }, [busy, ready, needsKey, overlay]);
+
+  // ↑ or Esc takes the queue back into the input box, editable, and empties it. This
+  // is the ONLY way to change your mind about something already queued, so it has to
+  // work while Mindweave is still working — that is the whole moment it is for.
+  //
+  // Esc is the exception, and deliberately so: while a turn is running Esc means STOP,
+  // and a keypress that both stopped the turn and silently emptied the queue would be
+  // two decisions on one key. So mid-turn Esc is declined here and the interrupt
+  // handler above has it alone. ↑ has no such conflict and always pops.
+  const popQueue = useCallback(
+    (input: string, cursor: number, via: "up" | "escape") => {
+      if (via === "escape" && busy) return undefined;
+      const popped = popAllQueued(queueRef.current, input, cursor);
+      if (!popped) return undefined;
+      queueRef.current = [];
+      setQueued([]);
+      return popped;
+    },
+    [busy],
+  );
 
   // Start/stop a turn's timer (drives the persistent status line).
   function startTurn() {
@@ -2237,6 +2261,7 @@ export function App() {
               onLargePaste={registerPaste}
               maxMenuRows={maxMenuItems}
               onMenuChange={onMenuChange}
+              onQueuePop={popQueue}
             />
           ) : (
             <Box paddingX={1}>
@@ -2680,14 +2705,30 @@ const TIPS = [
   "/undo restores the last checkpoint",
 ];
 
-/** Messages typed while Mindweave is working, waiting to be sent when the turn ends. */
+/**
+ * Messages typed while Mindweave is working, waiting to be sent when the turn ends.
+ *
+ * Bounded on purpose. This sits in the footer, and the footer is not height-limited:
+ * past the terminal height Ink stops erasing correctly and the whole frame tears
+ * rather than clipping (the same hazard the approval prompt is written around). So
+ * only the first few show, and the rest are counted.
+ *
+ * The last line says how to take them back. Without it the queue is a one-way door
+ * you cannot see the handle on — ↑ is not a thing anyone guesses, and the cost of not
+ * guessing it is a message you no longer wanted being sent anyway.
+ */
 function QueuedBar({ queued }: { queued: string[] }) {
   if (queued.length === 0) return null;
+  const { rows, hidden } = visibleQueue(queued);
   return (
     <Box flexDirection="column">
-      {queued.map((q, i) => (
+      {rows.map((q, i) => (
         <Text key={i} dimColor wrap="truncate-end">{"⏎ queued: "}{q}</Text>
       ))}
+      {hidden > 0 ? (
+        <Text dimColor>{`  …and ${hidden} more`}</Text>
+      ) : null}
+      <Text dimColor>{`  ↑ to edit ${queued.length === 1 ? "it" : "them"}`}</Text>
     </Box>
   );
 }

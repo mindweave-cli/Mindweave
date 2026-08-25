@@ -81,6 +81,7 @@ type Action =
   | { t: "selUp" }
   | { t: "selDown"; max: number }
   | { t: "histReplace"; value: string; histIdx: number | null; draft?: string }
+  | { t: "restore"; value: string; cursor: number } // queued messages pulled back for editing
   | { t: "reset" };
 
 function reduce(s: InputState, a: Action): InputState {
@@ -134,6 +135,11 @@ function reduce(s: InputState, a: Action): InputState {
         histIdx: a.histIdx,
         draft: a.draft ?? s.draft,
       };
+    case "restore":
+      // Unlike histReplace this keeps NO history position and no draft: the text
+      // came from the queue, not from history, so ↑ afterwards should walk history
+      // from the newest again rather than resuming a walk the user never started.
+      return { ...s, value: a.value, cursor: Math.min(a.value.length, a.cursor), histIdx: null, selected: 0 };
     case "reset":
       return INITIAL;
   }
@@ -167,12 +173,24 @@ interface PromptInputProps {
    *  filtered to a different number of rows). The App needs this to re-measure
    *  the footer — see the call site for why it can't detect it on its own. */
   onMenuChange?: () => void;
+  /** Pull messages queued while Mindweave is working back into the box for editing,
+   *  emptying the queue. Called on ↑ (from the first line) and on Esc. Returns the
+   *  text and where to put the cursor, or undefined when nothing is queued — that
+   *  distinction matters: on undefined ↑ must fall through to history, and Esc must
+   *  fall through to the App's interrupt. */
+  onQueuePop?: (
+    input: string,
+    cursor: number,
+    via: "up" | "escape",
+  ) => { text: string; cursor: number } | undefined;
   /** Hard ceiling on how many rows the text area may occupy. Past it the box
    *  scrolls with the cursor instead of growing, because the rows it would take
    *  come off the bottom of a fixed frame — where the tip line lives. */
   maxInputRows?: number;
 }
 
+/** A literal newline, kept out of the key handler so the source has no escapes there. */
+const NEWLINE = String.fromCharCode(10);
 const DEFAULT_MAX_SUGGESTIONS = 6;
 /** Rows the text area may grow to before it scrolls instead. Enough for a real
  *  paragraph; small enough that the chat above it is never squeezed away. */
@@ -189,6 +207,7 @@ export function PromptInput({
   onLargePaste,
   maxMenuRows = DEFAULT_MAX_SUGGESTIONS,
   onMenuChange,
+  onQueuePop,
   maxInputRows = DEFAULT_MAX_INPUT_ROWS,
 }: PromptInputProps) {
   const [state, dispatch] = useReducer(reduce, INITIAL);
@@ -349,7 +368,7 @@ export function PromptInput({
       // ↑/↓: navigate the menu when open, otherwise walk input history.
       if (key.upArrow) {
         if (menuOpen) dispatch({ t: "selUp" });
-        else historyPrev();
+        else if (!popQueue()) historyPrev();
         return;
       }
       if (key.downArrow) {
@@ -383,8 +402,18 @@ export function PromptInput({
         return;
       }
 
-      // Ignore control chords / keys we don't handle here (Esc is App's interrupt).
-      if (key.ctrl || key.meta || key.escape || key.tab) {
+      // Esc takes back whatever is queued, if anything is. When nothing is, it falls
+      // through untouched and stays what it has always been — the App's interrupt.
+      // Both handlers are live at once while Mindweave is working, and that is the
+      // behaviour we want there: Esc stops the turn, and popQueue() declines because
+      // App refuses to pop mid-turn (see its onQueuePop).
+      if (key.escape) {
+        popQueue();
+        return;
+      }
+
+      // Ignore control chords / keys we don't handle here.
+      if (key.ctrl || key.meta || key.tab) {
         return;
       }
 
@@ -402,6 +431,18 @@ export function PromptInput({
         } else {
           dispatch({ t: "insert", text: input });
         }
+      }
+
+      /** Take the queue back into the box. False when there was nothing to take. */
+      function popQueue(): boolean {
+        if (!onQueuePop) return false;
+        // Only from the FIRST line. In a multi-line draft ↑ means "move up a line",
+        // and stealing that would make the queue impossible to leave alone.
+        if (key.upArrow && value.slice(0, cursor).includes(NEWLINE)) return false;
+        const popped = onQueuePop(value, cursor, key.upArrow ? "up" : "escape");
+        if (!popped) return false;
+        dispatch({ t: "restore", value: popped.text, cursor: popped.cursor });
+        return true;
       }
 
       function historyPrev() {
