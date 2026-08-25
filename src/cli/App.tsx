@@ -34,6 +34,8 @@ import { addRoot, removeRoot } from "../tools/workspace.js";
 import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
 import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
 import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "../tools/approval.js";
+import { KeySetup } from "./components/KeySetup.js";
+import { setupView } from "./keySetup.js";
 import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
 import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProvider, providerOf, usableFallback, needsKeySetup, withModel, saveModelConfig, refreshModels, type ModelConfig } from "../dynamo/model.js";
 import { allProviders, manifestForModel, modelsOf } from "../drivers/registry.js";
@@ -41,7 +43,7 @@ import { accessRefusal } from "../drivers/providerError.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 import { completePath } from "./pathComplete.js";
 import { formatHelp } from "./help.js";
-import { hasApiKey, saveApiKey, globalEnvPath } from "./bootstrap.js";
+import { hasApiKey, saveApiKey, globalEnvPath, reloadConfig } from "./bootstrap.js";
 import { versionLabel, appVersion } from "./version.js";
 import { PromptInput } from "./components/PromptInput.js";
 import { Picker } from "./components/Picker.js";
@@ -249,10 +251,14 @@ export function App() {
   // any of the other twelve into a dead end: a prompt the user never chose, with no way
   // past it, while the session loader quietly switched them to the provider they could
   // actually use underneath it.
-  const [keyNeed, setKeyNeed] = useState<KeyNeed | null>(() =>
-    needsKeySetup(DEFAULT_MODEL_CONFIG.model, hasApiKey) ? missingKeyFor(DEFAULT_MODEL_CONFIG.model) : null,
-  );
-  const needsKey = keyNeed !== null;
+  const [keyNeed, setKeyNeed] = useState<KeyNeed | null>(null);
+  // First-run setup: open only when NOTHING can run. Asking about the default provider
+  // alone turned a key for any of the other twelve into a dead end — a prompt the user
+  // never chose, with no way past it.
+  const [setupOpen, setSetupOpen] = useState(() => needsKeySetup(DEFAULT_MODEL_CONFIG.model, hasApiKey));
+  // Bumped when a key is saved, so the list re-reads and marks it.
+  const [, setSetupTick] = useState(0);
+  const needsKey = keyNeed !== null || setupOpen;
   // The key the user is typing on the welcome screen.
   const [keyInput, setKeyInput] = useState("");
   // Sent-message history, oldest-first — walked with ↑/↓ in the input.
@@ -1765,6 +1771,37 @@ export function App() {
 
   // Key setup screen. Shown on first run, and again if the user switches to a
   // provider they haven't given a key for yet.
+  // FIRST RUN: nothing can run yet, so offer every provider rather than one. The user
+  // adds as many keys as they like and continues when they are ready. See KeySetup.
+  if (setupOpen) {
+    return (
+      <KeySetup
+        view={setupView(hasApiKey)}
+        version={versionLabel()}
+        envPath={globalEnvPath()}
+        docsUrl={MINDWEAVE_DOCS_URL}
+        onSaveKey={(row, key) => {
+          saveApiKey(row.envVar, key);
+          // Re-read so the list marks it immediately and Continue lights up.
+          reloadConfig(session.current?.cwd ?? process.cwd());
+          setSetupTick((n) => n + 1);
+        }}
+        onContinue={() => {
+          setSetupOpen(false);
+          const s = session.current;
+          const fallback = s ? usableFallback(s.modelConfig.model, hasApiKey) : null;
+          if (fallback && s) {
+            void switchTo(fallback, providerOf(fallback).label);
+          } else {
+            note("you're all set. ask me anything.");
+          }
+        }}
+      />
+    );
+  }
+
+  // MID-SESSION: the user chose a provider they have no key for. A targeted prompt,
+  // with a way out, because there is a working session behind it to return to.
   if (keyNeed) {
     return (
       <Box flexDirection="column" paddingX={1}>
