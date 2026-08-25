@@ -267,6 +267,8 @@ export function App() {
   const [trustOpen, setTrustOpen] = useState(() => !isTrusted(projectDir(startCwd.current), rootBreadth(startCwd.current)));
   // Bumped when a key is saved, so the list re-reads and marks it.
   const [, setSetupTick] = useState(0);
+  // Opened by /key rather than by a first run, so Esc is a way back rather than a way out.
+  const [setupCancellable, setSetupCancellable] = useState(false);
   const needsKey = keyNeed !== null || setupOpen;
   // The key the user is typing on the welcome screen.
   const [keyInput, setKeyInput] = useState("");
@@ -1517,6 +1519,15 @@ export function App() {
       setOverlay({ kind: "provider" });
       return;
     }
+    // The same screen the first run uses, reopened. A key that is wrong — a typo, or one
+    // pasted for a different provider — was previously only fixable by finding
+    // ~/.mindweave/.env and editing it by hand: eighteen commands and not one of them
+    // could replace a key, which is the commonest way a first run dies.
+    if (name === "/key") {
+      setSetupCancellable(true);
+      setSetupOpen(true);
+      return;
+    }
 
     if (name === "/model") {
       await refreshModels();
@@ -1816,6 +1827,7 @@ export function App() {
           reloadConfig(session.current?.cwd ?? process.cwd());
           setSetupTick((n) => n + 1);
         }}
+        {...(setupCancellable ? { onCancel: () => setSetupOpen(false) } : {})}
         onContinue={() => {
           setSetupOpen(false);
           const s = session.current;
@@ -2460,6 +2472,7 @@ function useTerminalSize(): { columns: number; rows: number } {
 const BASE_COMMANDS = [
   { name: "/help", description: "show this list" },
   { name: "/provider", description: "choose which provider serves this project" },
+  { name: "/key", description: "add or replace an API key" },
   { name: "/model", description: "choose which model answers, from the current provider" },
   { name: "/think", description: "set the reasoning level for the model" },
   { name: "/rules", description: "list rules, or add one: /rules <directive>" },

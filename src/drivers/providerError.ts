@@ -170,9 +170,18 @@ export function accessRefusal(error: unknown, providerLabel: string, canSwitch: 
   const isRefusal = ACCESS_STATUSES.has(status) || (status === 400 && namesAnAllowance(said));
   if (!isRefusal) return null;
 
-  const action = canSwitch
-    ? "The conversation is saved. Sort it out on the provider's side, or run\n/provider to carry on with a different key."
-    : "The conversation is saved. Sort it out on the provider's side and pick up\nwhere you left off.";
+  // WHICH failure decides the advice. A rejected key is fixed here, by typing it again —
+  // it is the commonest way a first run dies, usually a typo or a key pasted for the
+  // wrong provider, and "sort it out on the provider's side" sends someone to a billing
+  // page over a mistyped character. A spent balance or a rate limit genuinely is on the
+  // provider's side, and offering to retype a working key would be the wrong steer.
+  const keyRejected = status === 401 || status === 403;
+  const switchLine = canSwitch ? " Or /provider to use a different one." : "";
+  const action = keyRejected
+    ? "The conversation is saved. Run /key to enter it again — a mistyped key, or one for" +
+      String.fromCharCode(10) + "a different provider, is the usual cause." + switchLine
+    : "The conversation is saved. Sort it out on the provider's side and pick up" +
+      String.fromCharCode(10) + "where you left off." + switchLine;
 
   return {
     title: `${providerLabel} isn't accepting requests on this key`,

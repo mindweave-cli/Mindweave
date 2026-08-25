@@ -167,3 +167,28 @@ test("detailOf prefers the raw body, then the SDK's parsed one, then the message
   assert.match(detailOf({ error: { message: "parsed" }, message: "msg" }), /parsed/);
   assert.equal(detailOf({ message: "msg" }), "msg");
 });
+
+
+test("a rejected key points at the fix; a spent account points at the provider", () => {
+  // The commonest way a first run dies is a mistyped key or one pasted for the wrong
+  // provider. Sending that person to a billing page is the wrong steer, and until /key
+  // existed there was no way to retype it at all — eighteen commands, none of them keys.
+  const rejected = accessRefusal(httpError(401, "Authentication Fails"), "DeepSeek", false);
+  assert.match(rejected!.body, /\/key/, "a rejected key does not say how to replace it");
+  assert.doesNotMatch(rejected!.body, /provider's side/, "it still blames the account");
+
+  // A balance or a rate limit genuinely is on the provider's side, and offering to
+  // retype a key that works would send someone chasing the wrong thing.
+  for (const status of [402, 429]) {
+    const account = accessRefusal(httpError(status, "no balance"), "DeepSeek", false);
+    assert.match(account!.body, /provider's side/, `${status} should point at the account`);
+    assert.doesNotMatch(account!.body, /\/key/, `${status} should not suggest retyping a working key`);
+  }
+});
+
+test("switching is only suggested when there is something to switch to", () => {
+  const alone = accessRefusal(httpError(401, "bad"), "DeepSeek", false);
+  assert.doesNotMatch(alone!.body, /\/provider/, "offered a switch with nothing to switch to");
+  const spoiled = accessRefusal(httpError(401, "bad"), "DeepSeek", true);
+  assert.match(spoiled!.body, /\/provider/, "another usable key exists and is not mentioned");
+});

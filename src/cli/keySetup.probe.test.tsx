@@ -100,3 +100,36 @@ test("the number shortcut it advertises is one it actually has", () => {
   // And the rest are still reachable, which is what makes 1-9 honest rather than a limit.
   assert.match(out, /↑\/↓ to move/, "there is no way to reach the rows without a number");
 });
+
+
+test("a first run has no escape; /key does", () => {
+  // Opposite defaults on purpose. On a first run there is nothing behind the screen to
+  // go back to, so an escape would only reach an app that cannot answer. Reopened
+  // deliberately to fix a key, leaving without changing anything is the whole point.
+  const firstRun = frame(
+    <KeySetup view={setupView(() => false)} version=" v1" envPath="~/.mindweave/.env"
+      docsUrl="d" onSaveKey={() => {}} onContinue={() => {}} active={false} />,
+  );
+  assert.doesNotMatch(firstRun, /Esc to leave/, "a first run offers an exit to an app that cannot run");
+
+  const reopened = frame(
+    <KeySetup view={setupView(() => true)} version=" v1" envPath="~/.mindweave/.env"
+      docsUrl="d" onSaveKey={() => {}} onContinue={() => {}} onCancel={() => {}} active={false} />,
+  );
+  assert.match(reopened, /Esc to leave/, "/key traps the user in the setup screen");
+});
+
+test("a provider that already has a key can still be chosen, to replace it", () => {
+  // The reason /key exists: a mistyped key is the commonest way a first run dies, and
+  // before this the only fix was editing ~/.mindweave/.env by hand.
+  const view = setupView(() => true);
+  assert.ok(view.rows.every((r) => r.ready));
+  assert.equal(view.canContinue, true);
+  const out = frame(
+    <KeySetup view={view} version=" v1" envPath="~/.mindweave/.env" docsUrl="d"
+      onSaveKey={() => {}} onContinue={() => {}} onCancel={() => {}} active={false} />,
+  );
+  // Every row is still listed and selectable — nothing is greyed out just for being set.
+  assert.match(out, /key added/);
+  assert.match(out, /1\s+DeepSeek/);
+});

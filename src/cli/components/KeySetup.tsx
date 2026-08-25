@@ -34,9 +34,15 @@ export interface KeySetupProps {
   onContinue: () => void;
   /** Only one input owner may be live. */
   active?: boolean;
+  /**
+   * Esc leaves without changing anything. Offered when the screen was opened DELIBERATELY
+   * (/key) and withheld on a first run, where there is no session behind it to go back to
+   * and an escape would only be a way to reach an app that cannot answer.
+   */
+  onCancel?: () => void;
 }
 
-export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinue, active = true }: KeySetupProps) {
+export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinue, active = true, onCancel }: KeySetupProps) {
   const [sel, setSel] = useState(() => firstUnset(view));
   const [entering, setEntering] = useState<SetupRow | null>(null);
   const [value, setValue] = useState("");
@@ -49,7 +55,8 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
   useInput(
     (input, key) => {
       if (entering) return; // the field owns the keyboard while it is open
-      if (key.upArrow) setSel((s) => (s - 1 + rowCount) % rowCount);
+      if (key.escape && onCancel) onCancel();
+      else if (key.upArrow) setSel((s) => (s - 1 + rowCount) % rowCount);
       else if (key.downArrow) setSel((s) => (s + 1) % rowCount);
       else if (key.return) choose(sel);
       else {
@@ -153,7 +160,10 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
         </Box>
       </Box>
       <Box marginTop={1} flexDirection="column">
-        <Text dimColor>↑/↓ to move · 1-{Math.min(9, view.rows.length)} to jump · Enter to choose</Text>
+        <Text dimColor>
+          ↑/↓ to move · 1-{Math.min(9, view.rows.length)} to jump · Enter to choose
+          {onCancel ? " · Esc to leave" : ""}
+        </Text>
         <Text dimColor>Keys are saved to {envPath}, on this machine only. Learn more: {docsUrl}</Text>
       </Box>
     </Box>
