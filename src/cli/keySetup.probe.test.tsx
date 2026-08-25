@@ -87,3 +87,16 @@ test("every provider is reachable by name somewhere in setup", () => {
     assert.ok(view.rows.some((r) => r.label === p.label && r.envVar === p.apiKeyEnv), `${p.label} is missing`);
   }
 });
+
+
+test("the number shortcut it advertises is one it actually has", () => {
+  // A single keypress commits, so a two-digit row can never be typed: "1" picks row 1
+  // before the second key arrives. The footer used to promise the full range, which was
+  // a shortcut four providers did not have — Gemini among them.
+  const out = screen(() => false);
+  const promised = out.match(/1-(\d+) to jump/);
+  assert.ok(promised, "the screen no longer says which numbers work");
+  assert.ok(Number(promised![1]) <= 9, `it promises 1-${promised![1]}, but only single digits can be typed`);
+  // And the rest are still reachable, which is what makes 1-9 honest rather than a limit.
+  assert.match(out, /↑\/↓ to move/, "there is no way to reach the rows without a number");
+});

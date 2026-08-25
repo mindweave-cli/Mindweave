@@ -53,8 +53,12 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
       else if (key.downArrow) setSel((s) => (s + 1) % rowCount);
       else if (key.return) choose(sel);
       else {
+        // ONE keypress commits, so only single digits can ever arrive here: typing "1"
+        // for row 11 picks row 1 before the second key is pressed. The hint below says
+        // 1-9 for that reason — it used to advertise the full range, which was a
+        // shortcut four providers did not have, Gemini among them.
         const n = Number.parseInt(input, 10);
-        if (Number.isInteger(n) && n >= 1 && n <= view.rows.length) choose(n - 1);
+        if (Number.isInteger(n) && n >= 1 && n <= Math.min(9, view.rows.length)) choose(n - 1);
       }
     },
     { isActive: active && !entering },
@@ -149,7 +153,7 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
         </Box>
       </Box>
       <Box marginTop={1} flexDirection="column">
-        <Text dimColor>↑/↓ or 1-{view.rows.length} · Enter to choose</Text>
+        <Text dimColor>↑/↓ to move · 1-{Math.min(9, view.rows.length)} to jump · Enter to choose</Text>
         <Text dimColor>Keys are saved to {envPath}, on this machine only. Learn more: {docsUrl}</Text>
       </Box>
     </Box>
