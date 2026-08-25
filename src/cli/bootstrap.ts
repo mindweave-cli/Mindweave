@@ -17,12 +17,22 @@
  * the user has an obvious place to paste their key.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { stateRoot } from "../memory/store.js";
+import { allProviders } from "../drivers/registry.js";
 
-/** The global Mindweave config directory (~/.mindweave). */
+/**
+ * The global Mindweave config directory (~/.mindweave).
+ *
+ * The SAME directory the state lives in, and now the same function that resolves it.
+ * They were computed separately and only one honoured `MINDWEAVE_STATE_DIR`, so a test
+ * run — or anyone relocating Mindweave's files — moved the sessions and left the config
+ * behind in the real home. The suite creates this template, which meant a clean machine
+ * got a config file written into `~/.mindweave` by `npm test`: exactly the pollution
+ * scripts/testState.mjs exists to prevent, still open on the config side.
+ */
 export function globalConfigDir(): string {
-  return join(homedir(), ".mindweave");
+  return stateRoot();
 }
 
 /** The global env file (~/.mindweave/.env) — where the API key lives. */
@@ -93,6 +103,32 @@ export function saveApiKey(envVar: string, key: string): void {
   writeFileSync(path, next, { mode: 0o600 });
 }
 
+/**
+ * What lands in ~/.mindweave/.env the first time Mindweave runs.
+ *
+ * Every provider, because this is the file a new user actually opens — it listed two of
+ * thirteen, and someone who came for Gemini or Groq found no sign their provider existed.
+ * Built from the registry rather than typed out, so a new driver cannot be forgotten
+ * here (docsCurrent.test.ts holds the same line for .env.example and PROVIDERS.md).
+ */
+const GLOBAL_ENV_TEMPLATE = [
+  "# Mindweave global config — applies in every project.",
+  "# Paste a key below (no quotes needed). You only need the one for the provider you",
+  "# actually use; fill in several and /provider moves between them.",
+  "",
+  // The name on its OWN line, never trailing the assignment. `KEY=   # DeepSeek` reads
+  // fine and parses as a VALUE of "# DeepSeek", so every provider would have reported a
+  // key it did not have: no first-run prompt, and every request rejected with no
+  // explanation. Caught by reading the parsed result rather than the file.
+  ...allProviders().flatMap((p) => [`# ${p.label}`, `${p.apiKeyEnv}=`]),
+  "",
+  "# Optional:",
+  "# MINDWEAVE_MODEL — which model to open with. Run /model in Mindweave for the list.",
+  "# MINDWEAVE_MODEL=",
+  "",
+].join(String.fromCharCode(10));
+
+
 /** Create ~/.mindweave/.env with a commented template the first time we run. */
 function ensureGlobalTemplate(): void {
   try {
@@ -102,17 +138,7 @@ function ensureGlobalTemplate(): void {
     if (!existsSync(path)) {
       writeFileSync(
         path,
-        "# Mindweave global config — applies in every project.\n" +
-          "# Paste a key below (no quotes needed). You only need the one for the\n" +
-          "# provider whose models you actually use; set both to switch with /model.\n" +
-          "DEEPSEEK_API_KEY=\n" +
-          "ANTHROPIC_API_KEY=\n" +
-          "\n" +
-          "# Optional overrides:\n" +
-          "# MINDWEAVE_MODEL — which model to start with. Run /model in Mindweave for the list.\n" +
-          "# MINDWEAVE_MODEL=\n" +
-          "# MINDWEAVE_BASE_URL — overrides the DeepSeek endpoint only.\n" +
-          "# MINDWEAVE_BASE_URL=\n",
+        GLOBAL_ENV_TEMPLATE,
         { mode: 0o600 },
       );
     }
