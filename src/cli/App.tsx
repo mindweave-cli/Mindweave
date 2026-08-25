@@ -37,7 +37,7 @@ import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "../tools/approval.js";
 import { KeySetup } from "./components/KeySetup.js";
 import { setupView } from "./keySetup.js";
 import { KeyManager } from "./components/KeyManager.js";
-import { keyManagerView } from "./keyManager.js";
+import { providerRows, keyRowsFor, nextSlotFor } from "./keyManager.js";
 import { keysFor } from "./keyStore.js";
 import { TrustGate } from "./components/TrustGate.js";
 import { rootBreadth, breadthWarning, trustPersists, isTrusted, rememberTrust } from "./trust.js";
@@ -1926,16 +1926,18 @@ export function App() {
       return (
         <KeyManager
           key={keysTick}
-          view={keyManagerView()}
+          providers={providerRows()}
+          keysOf={(p) => keyRowsFor(p)}
+          nextSlot={(p) => nextSlotFor(p)}
           width={width}
           reveal={(row) => keysFor(row.apiKeyEnv).find((k) => k.slot === row.slot)?.value ?? ""}
-          onUse={(row) => {
+          onActivate={(row) => {
             useApiKey(row.apiKeyEnv, row.slot);
-            note(`${row.label} ${row.hint} is now the key in use.`);
+            note(`${row.label} key ${row.slot} ${row.hint} is now the active one.`);
             setKeysTick((n) => n + 1);
           }}
-          onSave={(apiKeyEnv, slot, key) => {
-            saveApiKey(apiKeyEnv, key, slot);
+          onSave={(provider, slot, key) => {
+            saveApiKey(provider.apiKeyEnv, key, slot);
             setKeysTick((n) => n + 1);
           }}
           onRemove={(row) => {

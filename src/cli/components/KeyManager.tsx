@@ -1,74 +1,99 @@
 /**
- * KeyManager.tsx — what /key shows: the keys you have, and what you can do to them.
+ * KeyManager.tsx — what /key shows.
  *
- * A FOOTER OVERLAY, not a screen. It sits where the prompt sits, the conversation stays
- * visible above it, and it is only as tall as it needs to be. The first version took the
- * whole terminal for a list of three keys, which is the wrong weight for "change a
- * setting" and left nothing on screen to come back to.
+ * A FOOTER OVERLAY, not a screen: it sits where the prompt sits, the conversation stays
+ * visible above it, and it is only as tall as it needs to be. Taking the whole terminal
+ * to change a setting is the wrong weight and leaves nothing to come back to.
  *
- * Three views in one box. The LIST is every stored key across every provider with the
- * live one marked; choosing one opens its ACTIONS (show, use, replace, remove); "Add a
- * key" picks a provider and takes the value. Everything returns to the list, so managing
- * several keys is one place you stay rather than a command you keep re-running.
+ * Three levels, drilling in. PROVIDERS, then that provider's KEYS with an "add another"
+ * that never runs out, then what can be done to one key. The first version was a flat
+ * list of every key across every provider, which buried the thing people came to do.
  *
- * Esc always goes back one step, INCLUDING while typing a key. A text field that traps
- * you is the thing people notice first, and "empty Enter goes back" is a rule nobody
- * should have to learn.
+ * Esc always goes back one level, INCLUDING while typing a key — a field that can only
+ * be left by submitting nothing is a trap.
  */
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
-import { stripMouse } from "../mouse.js";
 import { useState, type ReactNode } from "react";
-import type { KeyManagerView, KeyRow } from "../keyManager.js";
-import { actionsFor } from "../keyManager.js";
+import { stripMouse } from "../mouse.js";
+import {
+  ACTION_ACTIVATE,
+  ACTION_BACK,
+  ACTION_EDIT,
+  ACTION_REMOVE,
+  ACTION_SHOW,
+  actionsFor,
+  countLabel,
+  type KeyRow,
+  type ProviderRow,
+} from "../keyManager.js";
 
 /** Rows visible at once. The footer is height-bounded; this is not a screen. */
 const WINDOW = 7;
 
 type Mode =
-  | { kind: "list" }
-  | { kind: "actions"; row: KeyRow }
-  | { kind: "pickProvider" }
-  | { kind: "enter"; label: string; apiKeyEnv: string; slot: number; replacing: boolean };
+  | { kind: "providers" }
+  | { kind: "keys"; provider: ProviderRow }
+  | { kind: "actions"; provider: ProviderRow; row: KeyRow }
+  | { kind: "enter"; provider: ProviderRow; slot: number; replacing: boolean };
 
 export interface KeyManagerProps {
-  view: KeyManagerView;
-  /** The full value of a key, revealed only when the user asks for it. */
+  providers: ProviderRow[];
+  /** One provider's keys, read fresh so the list reflects the last edit. */
+  keysOf: (provider: ProviderRow) => KeyRow[];
+  /** Where the next key would go, or null when the provider is full. */
+  nextSlot: (provider: ProviderRow) => number | null;
+  /** The full value of a key, only ever called when the user asks to see it. */
   reveal: (row: KeyRow) => string;
   width: number;
-  onUse: (row: KeyRow) => void;
-  onSave: (apiKeyEnv: string, slot: number, key: string) => void;
+  onActivate: (row: KeyRow) => void;
+  onSave: (provider: ProviderRow, slot: number, key: string) => void;
   onRemove: (row: KeyRow) => void;
   onClose: () => void;
   active?: boolean;
 }
 
-export function KeyManager({ view, reveal, width, onUse, onSave, onRemove, onClose, active = true }: KeyManagerProps) {
-  const [mode, setMode] = useState<Mode>({ kind: "list" });
+export function KeyManager({
+  providers,
+  keysOf,
+  nextSlot,
+  reveal,
+  width,
+  onActivate,
+  onSave,
+  onRemove,
+  onClose,
+  active = true,
+}: KeyManagerProps) {
+  const [mode, setMode] = useState<Mode>({ kind: "providers" });
   const [sel, setSel] = useState(0);
   const [value, setValue] = useState("");
-  /** Which key is currently shown in full, cleared whenever the view changes. */
   const [shown, setShown] = useState<string | null>(null);
 
-  const addIndex = view.rows.length;
-  const targets = pickTargets(view);
-  const actions = mode.kind === "actions" ? actionsFor(mode.row, siblings(view, mode.row)) : [];
+  const keys = mode.kind === "keys" || mode.kind === "actions" ? keysOf(mode.provider) : [];
+  const actions = mode.kind === "actions" ? actionsFor(mode.row, keys.length) : [];
+  // "Add a new key" is one more row after the keys, and it is there however many there
+  // already are — that is what makes adding a second, or a fifth, obvious.
+  const canAdd = mode.kind === "keys" ? nextSlot(mode.provider) !== null : false;
 
   const count =
-    mode.kind === "list" ? view.rows.length + 1 : mode.kind === "actions" ? actions.length : mode.kind === "pickProvider" ? targets.length : 0;
+    mode.kind === "providers"
+      ? providers.length
+      : mode.kind === "keys"
+        ? keys.length + (canAdd ? 1 : 0)
+        : mode.kind === "actions"
+          ? actions.length
+          : 0;
 
   function back() {
     setShown(null);
     setValue("");
-    if (mode.kind === "list") onClose();
-    else {
-      setMode({ kind: "list" });
-      setSel(0);
-    }
+    setSel(0);
+    if (mode.kind === "providers") onClose();
+    else if (mode.kind === "keys") setMode({ kind: "providers" });
+    else setMode({ kind: "keys", provider: mode.provider });
   }
 
-  // Escape is handled even while the text field owns the keyboard, because a field you
-  // cannot leave is the first thing anyone runs into.
   useInput(
     (input, key) => {
       if (key.escape) return back();
@@ -87,62 +112,62 @@ export function KeyManager({ view, reveal, width, onUse, onSave, onRemove, onClo
 
   function commit(index: number) {
     setShown(null);
-    if (mode.kind === "list") {
-      if (index === addIndex) {
-        setSel(0);
-        return setMode({ kind: "pickProvider" });
+    if (mode.kind === "providers") {
+      const provider = providers[index];
+      if (!provider) return;
+      setSel(0);
+      // A provider with no keys goes straight to the field: there is no list to show, and
+      // one more press to reach the only thing you could have wanted is a press wasted.
+      const slot = nextSlot(provider);
+      if (provider.count === 0 && slot !== null) return setMode({ kind: "enter", provider, slot, replacing: false });
+      return setMode({ kind: "keys", provider });
+    }
+    if (mode.kind === "keys") {
+      if (index === keys.length) {
+        const slot = nextSlot(mode.provider);
+        if (slot === null) return;
+        setValue("");
+        return setMode({ kind: "enter", provider: mode.provider, slot, replacing: false });
       }
-      const row = view.rows[index];
-      if (row) {
-        setSel(0);
-        setMode({ kind: "actions", row });
-      }
-      return;
+      const row = keys[index];
+      if (!row) return;
+      setSel(0);
+      return setMode({ kind: "actions", provider: mode.provider, row });
     }
     if (mode.kind === "actions") {
-      const chosen = actions[index] ?? "Back";
-      if (chosen === "Show the key") return setShown(reveal(mode.row));
-      setSel(0);
-      if (chosen === "Use this key") onUse(mode.row);
-      else if (chosen.startsWith("Remove")) onRemove(mode.row);
-      else if (chosen === "Replace it") {
+      const chosen = actions[index] ?? ACTION_BACK;
+      if (chosen === ACTION_SHOW) return setShown(reveal(mode.row));
+      if (chosen === ACTION_EDIT) {
         setValue("");
-        return setMode({
-          kind: "enter",
-          label: mode.row.label,
-          apiKeyEnv: mode.row.apiKeyEnv,
-          slot: mode.row.slot,
-          replacing: true,
-        });
+        return setMode({ kind: "enter", provider: mode.provider, slot: mode.row.slot, replacing: true });
       }
-      return setMode({ kind: "list" });
-    }
-    if (mode.kind === "pickProvider") {
-      const target = targets[index];
-      if (!target) return;
-      setValue("");
-      setMode({ kind: "enter", label: target.label, apiKeyEnv: target.apiKeyEnv, slot: target.slot, replacing: false });
+      setSel(0);
+      if (chosen === ACTION_ACTIVATE) onActivate(mode.row);
+      else if (chosen.startsWith(ACTION_REMOVE)) onRemove(mode.row);
+      return setMode({ kind: "keys", provider: mode.provider });
     }
   }
 
   if (mode.kind === "enter") {
     return (
-      <Panel width={width} title={`${mode.replacing ? "Replace" : "Add"} a ${mode.label} key`}>
+      <Panel
+        width={width}
+        title={`${mode.replacing ? "Edit the" : "Add a"} ${mode.provider.label} key${mode.replacing ? ` (key ${mode.slot})` : ""}`}
+      >
         <Box flexShrink={0}>
           <Text bold color="cyan">{"  key "}</Text>
           <TextInput
             value={value}
-            // Mouse reports arrive at a focused field as TYPED TEXT once wheel reporting is
-            // on, so scrolling while pasting a key fills it with escape sequences and the
-            // key fails in a way that looks like the key itself is wrong. The prompt has
-            // stripped these for a long time; these fields are new and did not.
+            // Mouse reports arrive at a focused field as TYPED TEXT once wheel reporting
+            // is on, so scrolling while pasting fills the field with escape sequences and
+            // the key fails later in a way that looks like the key itself is wrong.
             onChange={(v) => setValue(stripMouse(v))}
             onSubmit={(v) => {
               const key = v.trim();
-              if (key) onSave(mode.apiKeyEnv, mode.slot, key);
+              if (key) onSave(mode.provider, mode.slot, key);
               setValue("");
-              setMode({ kind: "list" });
               setSel(0);
+              setMode({ kind: "keys", provider: mode.provider });
             }}
             placeholder="paste, then press Enter"
             mask="*"
@@ -157,7 +182,7 @@ export function KeyManager({ view, reveal, width, onUse, onSave, onRemove, onClo
     return (
       <Panel
         width={width}
-        title={`${mode.row.label} key ${mode.row.slot}  ${mode.row.hint}${mode.row.live ? "   ● in use" : ""}`}
+        title={`${mode.provider.label} · key ${mode.row.slot}  ${mode.row.hint}${mode.row.active ? "   ● active" : ""}`}
       >
         {actions.map((a, i) => (
           <Row key={a} on={i === sel} n={i + 1} left={a} width={width} />
@@ -167,73 +192,58 @@ export function KeyManager({ view, reveal, width, onUse, onSave, onRemove, onClo
             <Text color="yellow" wrap="truncate-end">{`  ${shown}`}</Text>
           </Box>
         ) : null}
-        <Hint>{shown ? "shown until you leave this key · Esc to go back" : "↑/↓ · Enter to choose · Esc to go back"}</Hint>
+        <Hint>{shown ? "hidden again when you leave · Esc to go back" : "↑/↓ · Enter to choose · Esc to go back"}</Hint>
       </Panel>
     );
   }
 
-  if (mode.kind === "pickProvider") {
-    const start = windowStart(sel, targets.length);
+  if (mode.kind === "keys") {
+    const start = windowStart(sel, count);
     return (
-      <Panel width={width} title="Which provider is this key for?">
-        {targets.slice(start, start + WINDOW).map((t, i) => (
+      <Panel width={width} title={`${mode.provider.label} · ${countLabel(keys.length)}`}>
+        {keys.slice(start, start + WINDOW).map((r, i) => (
           <Row
-            key={`${t.apiKeyEnv}-${t.slot}`}
+            key={r.slot}
             on={start + i === sel}
             n={start + i + 1}
-            left={t.label}
-            right={t.slot > 1 ? `key ${t.slot}` : "first key"}
+            left={`key ${r.slot}`}
+            mid={r.hint}
+            right={r.active ? "● active" : ""}
+            rightColor={r.active ? "green" : undefined}
             width={width}
           />
         ))}
-        <Hint>{more(start, targets.length)}↑/↓ · Enter to choose · Esc to go back</Hint>
+        {canAdd && start + WINDOW > keys.length ? (
+          <Row on={sel === keys.length} n={keys.length + 1} left="Add a new key" width={width} />
+        ) : null}
+        <Hint>{more(start, keys.length)}↑/↓ · Enter to choose · Esc to go back</Hint>
       </Panel>
     );
   }
 
-  const start = windowStart(sel, view.rows.length + 1);
+  const start = windowStart(sel, providers.length);
   return (
-    <Panel width={width} title={view.rows.length === 0 ? "Keys — none yet" : "Keys"}>
-      {view.rows.slice(start, start + WINDOW).map((r, i) => (
+    <Panel width={width} title="Keys">
+      {providers.slice(start, start + WINDOW).map((p, i) => (
         <Row
-          key={`${r.apiKeyEnv}-${r.slot}`}
+          key={p.id}
           on={start + i === sel}
           n={start + i + 1}
-          left={r.label}
-          mid={r.hint}
-          right={r.live ? "● in use" : ""}
-          rightColor={r.live ? "green" : undefined}
+          left={p.label}
+          right={countLabel(p.count)}
+          rightColor={p.count > 0 ? "green" : undefined}
           width={width}
         />
       ))}
-      {start + WINDOW > view.rows.length ? (
-        <Row on={sel === addIndex} n={addIndex + 1} left="Add a key" width={width} />
-      ) : null}
-      <Hint>{more(start, view.rows.length)}↑/↓ · Enter to choose · Esc to close</Hint>
+      <Hint>{more(start, providers.length)}↑/↓ · Enter to choose · Esc to close</Hint>
     </Panel>
   );
 }
 
-/** "… 4 more · " when the window is hiding rows, so nothing is silently off the bottom. */
+/** "… 4 more · " when the window hides rows, so nothing is silently off the bottom. */
 function more(start: number, total: number): string {
   const hidden = total - start - WINDOW;
   return hidden > 0 ? `… ${hidden} more · ` : "";
-}
-
-function siblings(view: KeyManagerView, row: KeyRow): number {
-  return view.rows.filter((r) => r.apiKeyEnv === row.apiKeyEnv).length;
-}
-
-/** Where a new key could go: every provider with none, then every provider with room. */
-function pickTargets(view: KeyManagerView): { label: string; apiKeyEnv: string; slot: number }[] {
-  const fresh = view.emptyProviders.map((p) => ({ label: p.label, apiKeyEnv: p.apiKeyEnv, slot: 1 }));
-  const more = new Map<string, { label: string; apiKeyEnv: string; slot: number }>();
-  for (const r of view.rows) {
-    if (!r.canAddMore) continue;
-    const seen = more.get(r.apiKeyEnv);
-    more.set(r.apiKeyEnv, { label: r.label, apiKeyEnv: r.apiKeyEnv, slot: Math.max(seen?.slot ?? 0, r.slot + 1) });
-  }
-  return [...more.values(), ...fresh];
 }
 
 /** Scroll the window so the selection stays inside it. */
@@ -252,7 +262,15 @@ export function windowStart(sel: number, rowCount: number, size = WINDOW): numbe
  */
 function Panel({ width, title, children }: { width: number; title: string; children: ReactNode }) {
   return (
-    <Box flexDirection="column" width={width} flexShrink={0} borderStyle="single" borderColor="gray" paddingX={1} marginTop={1}>
+    <Box
+      flexDirection="column"
+      width={width}
+      flexShrink={0}
+      borderStyle="single"
+      borderColor="gray"
+      paddingX={1}
+      marginTop={1}
+    >
       <Box flexShrink={0}>
         <Text bold wrap="truncate-end">{title}</Text>
       </Box>
@@ -274,9 +292,8 @@ function Hint({ children }: { children: ReactNode }) {
 
 /**
  * One row. `mid` is a second COLUMN rather than more text in `left`, because a hint
- * appended to a provider name moves with the length of the name — "DeepSeek …a4f2" and
- * "Gemini …77de" then put their markers in different places and the list stops reading
- * as a table.
+ * appended to a label moves with the length of the label and the markers then land in
+ * different places, so the list stops reading as a table.
  */
 function Row({
   on,
@@ -302,7 +319,7 @@ function Row({
         {on ? " › " : "   "}
         {`${n}  `}
       </Text>
-      <Box width={mid === undefined ? 22 : 12}>
+      <Box width={mid === undefined ? 24 : 10}>
         <Text color={on ? "cyan" : undefined} bold={on} wrap="truncate-end">{left}</Text>
       </Box>
       {mid === undefined ? null : (
