@@ -1846,6 +1846,13 @@ function emitUsage(result: StreamResult, options: RespondOptions): void {
  * keeps the last good notes.
  */
 async function sweepSessionMemory(session: Session, options: RespondOptions): Promise<void> {
+  // Not for a sub-agent. The notes exist so the MAIN conversation survives being
+  // summarised; a child's transcript is thrown away whole the moment it reports back, so
+  // there is nothing for them to carry. Writing them costs a real model call on the
+  // user's key with the child's whole recent transcript as input — measured: a 20-step
+  // research worker reaches the threshold at ~9.8K tokens, and a five-way fan-out paid
+  // that five times, for notes nothing ever read. The child does not even persist them.
+  if ((session.toolContext.subagentDepth ?? 0) > 0) return;
   const grown = shouldUpdateSessionMemory(
     estimateEntriesTokens(session.transcript),
     session.sessionMemoryTokens ?? 0,
