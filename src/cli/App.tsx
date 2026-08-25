@@ -22,7 +22,7 @@
  */
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { isAbsolute, resolve } from "node:path";
-import { Box, Text, measureElement, useInput, useStdout, type DOMElement } from "ink";
+import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from "ink";
 import TextInput from "ink-text-input";
 import { compactNow, respond } from "../dynamo/engine.js";
 import { createSession, resumeSession, reloadProjectMemory } from "../memory/session.js";
@@ -36,6 +36,9 @@ import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
 import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "../tools/approval.js";
 import { KeySetup } from "./components/KeySetup.js";
 import { setupView } from "./keySetup.js";
+import { TrustGate } from "./components/TrustGate.js";
+import { rootBreadth, breadthWarning, trustPersists, isTrusted, rememberTrust } from "./trust.js";
+import { projectDir } from "../memory/store.js";
 import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
 import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProvider, providerOf, usableFallback, needsKeySetup, withModel, saveModelConfig, refreshModels, type ModelConfig } from "../dynamo/model.js";
 import { allProviders, manifestForModel, modelsOf } from "../drivers/registry.js";
@@ -256,6 +259,12 @@ export function App() {
   // alone turned a key for any of the other twelve into a dead end — a prompt the user
   // never chose, with no way past it.
   const [setupOpen, setSetupOpen] = useState(() => needsKeySetup(DEFAULT_MODEL_CONFIG.model, hasApiKey));
+  // Where we are working is the widest permission there is — every other guard is scoped
+  // to the workspace — so it is confirmed once, before anything else. See trust.ts.
+  const { exit } = useApp();
+  const startCwd = useRef(process.cwd());
+  const [trustBreadth] = useState(() => rootBreadth(startCwd.current));
+  const [trustOpen, setTrustOpen] = useState(() => !isTrusted(projectDir(startCwd.current), rootBreadth(startCwd.current)));
   // Bumped when a key is saved, so the list re-reads and marks it.
   const [, setSetupTick] = useState(0);
   const needsKey = keyNeed !== null || setupOpen;
@@ -1771,6 +1780,27 @@ export function App() {
 
   // Key setup screen. Shown on first run, and again if the user switches to a
   // provider they haven't given a key for yet.
+  // Asked BEFORE anything else, including the key prompt: agreeing to hand over a key is
+  // a smaller decision than agreeing to what the agent may touch, and the second one is
+  // the reason the first matters.
+  if (trustOpen) {
+    return (
+      <TrustGate
+        cwd={startCwd.current}
+        breadth={trustBreadth}
+        warning={breadthWarning(trustBreadth, startCwd.current)}
+        persists={trustPersists(trustBreadth)}
+        version={versionLabel()}
+        docsUrl={MINDWEAVE_DOCS_URL}
+        onTrust={() => {
+          rememberTrust(projectDir(startCwd.current), trustBreadth);
+          setTrustOpen(false);
+        }}
+        onQuit={() => exit()}
+      />
+    );
+  }
+
   // FIRST RUN: nothing can run yet, so offer every provider rather than one. The user
   // adds as many keys as they like and continues when they are ready. See KeySetup.
   if (setupOpen) {
