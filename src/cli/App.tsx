@@ -35,7 +35,7 @@ import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
 import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
 import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "../tools/approval.js";
 import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
-import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProvider, providerOf, usableFallback, withModel, saveModelConfig, refreshModels, type ModelConfig } from "../dynamo/model.js";
+import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProvider, providerOf, usableFallback, needsKeySetup, withModel, saveModelConfig, refreshModels, type ModelConfig } from "../dynamo/model.js";
 import { allProviders, manifestForModel, modelsOf } from "../drivers/registry.js";
 import { accessRefusal } from "../drivers/providerError.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
@@ -245,7 +245,13 @@ export function App() {
   // boolean: with more than one provider, the key we must ask for depends on the
   // model the user is about to run, and switching models can make a different key
   // become the missing one.
-  const [keyNeed, setKeyNeed] = useState<KeyNeed | null>(() => missingKeyFor(DEFAULT_MODEL_CONFIG.model));
+  // Only when NOTHING can run. Asking about the default provider alone turned a key for
+  // any of the other twelve into a dead end: a prompt the user never chose, with no way
+  // past it, while the session loader quietly switched them to the provider they could
+  // actually use underneath it.
+  const [keyNeed, setKeyNeed] = useState<KeyNeed | null>(() =>
+    needsKeySetup(DEFAULT_MODEL_CONFIG.model, hasApiKey) ? missingKeyFor(DEFAULT_MODEL_CONFIG.model) : null,
+  );
   const needsKey = keyNeed !== null;
   // The key the user is typing on the welcome screen.
   const [keyInput, setKeyInput] = useState("");

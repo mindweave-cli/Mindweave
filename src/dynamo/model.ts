@@ -99,6 +99,24 @@ export function usableFallback(model: ModelId, hasKey: (envVar: string) => boole
   return null;
 }
 
+/**
+ * Does this machine need a key BEFORE anything can run?
+ *
+ * True only when no installed provider has one. The first-run gate used to ask about
+ * the DEFAULT provider alone, so someone arriving with a key for any of the other twelve
+ * was shown a prompt for a provider they had not chosen and could not dismiss — the
+ * escape is only offered when a switch is pending mid-session. The session loader would
+ * meanwhile move them onto the provider they could actually run, underneath a screen
+ * still demanding a different one.
+ *
+ * `hasKey` is injected for the same reason as above: this decides whether the app opens
+ * at all, so it is worth being able to test.
+ */
+export function needsKeySetup(model: ModelId, hasKey: (envVar: string) => boolean): boolean {
+  if (hasKey(manifestForModel(model).apiKeyEnv)) return false;
+  return usableFallback(model, hasKey) === null;
+}
+
 /** The reasoning levels offered by `/think` for a model. */
 export function thinkLevels(model: ModelId): ThinkLevel[] {
   return manifestForModel(model).thinkLevels(model);

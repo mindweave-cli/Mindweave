@@ -17,7 +17,8 @@ import { readFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, globalEnvPath, hasApiKey } from "./bootstrap.js";
-import { allProviders } from "../drivers/registry.js";
+import { allProviders, manifestForModel } from "../drivers/registry.js";
+import { DEFAULT_MODEL_CONFIG, needsKeySetup, usableFallback } from "../dynamo/model.js";
 
 /** A machine that has never run Mindweave. */
 function firstRun(): { env: string; text: string } {
@@ -66,4 +67,38 @@ test("config and state resolve to the SAME relocatable place", () => {
     globalEnvPath().startsWith(root),
     `config went to ${globalEnvPath()} while state went to ${root}`,
   );
+});
+
+
+// ── the gate that decides whether the app opens at all ───────────────────────
+
+const DEFAULT_MODEL = DEFAULT_MODEL_CONFIG.model;
+const keys = (...set: string[]) => (envVar: string) => set.includes(envVar);
+
+test("a machine with NO key is asked for one", () => {
+  assert.equal(needsKeySetup(DEFAULT_MODEL, () => false), true);
+});
+
+test("a key for the DEFAULT provider opens the app", () => {
+  const theDefault = manifestForModel(DEFAULT_MODEL).apiKeyEnv;
+  assert.equal(needsKeySetup(DEFAULT_MODEL, keys(theDefault)), false);
+});
+
+test("a key for ANY other provider opens the app too", () => {
+  // The dead end: the gate asked about the default provider alone, so someone arriving
+  // with a key for one of the other twelve was shown a prompt for a provider they never
+  // chose — and the escape is only offered when a switch is pending mid-session, so on
+  // first run there was no way past it at all.
+  const theDefault = manifestForModel(DEFAULT_MODEL).apiKeyEnv;
+  const others = allProviders().filter((p) => p.apiKeyEnv !== theDefault);
+  assert.ok(others.length > 0, "there is only one provider — this test proves nothing");
+  for (const p of others) {
+    assert.equal(
+      needsKeySetup(DEFAULT_MODEL, keys(p.apiKeyEnv)),
+      false,
+      `a user holding only a ${p.label} key is still locked out`,
+    );
+    // And the app has somewhere to send them.
+    assert.ok(usableFallback(DEFAULT_MODEL, keys(p.apiKeyEnv)), `nothing runnable found for ${p.label}`);
+  }
 });
