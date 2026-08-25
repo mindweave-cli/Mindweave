@@ -32,16 +32,20 @@ test("applyProvider checks for the key before it saves anything", () => {
   assert.ok(save < 0 || check < save, "the key must be checked before the switch is persisted");
 });
 
-test("applyProvider hands the pending switch to the key prompt", () => {
-  // Without carrying `pending`, the prompt has nothing to complete on success and
-  // nothing to abandon on Esc — which is what made it a dead end.
-  assert.match(body("applyProvider"), /pending:/, "the prompt must know which switch it would unlock");
+test("a switch to a keyless provider is HELD, not abandoned", () => {
+  // Choosing a provider you have no key for used to open a prompt of its own that could
+  // not be escaped. It now opens the key manager and remembers the switch, so adding the
+  // key finishes it — one flow instead of two commands with a dead end between them.
+  const fn = body("applyProvider");
+  assert.match(fn, /pendingSwitch\.current = /, "nothing remembers which switch to finish");
+  assert.match(fn, /setKeysOpen\(true\)/, "the user is not shown anywhere to add the key");
+  assert.doesNotMatch(fn, /setKeyNeed/, "the removed single-provider prompt is back");
 });
 
-test("the key prompt is escapable exactly when there is something to go back to", () => {
-  // Esc is gated on `pending`: a first-run gate has no session behind it, so it stays
-  // blocking; a gate reached by choosing a provider must let you out.
-  assert.match(source, /isActive: keyNeed\?\.pending !== undefined/, "Esc must be active only for a pending switch");
+test("the held switch is finished when that provider's key is saved", () => {
+  const src = source.slice(source.indexOf("onSave={(provider, slot, key)"));
+  assert.match(src.slice(0, 600), /pendingSwitch\.current/, "saving a key does not complete a held switch");
+  assert.match(src.slice(0, 600), /held\.apiKeyEnv === provider\.apiKeyEnv/, "any key would complete the switch");
 });
 
 test("a saved config whose provider lost its key falls back instead of trapping", () => {

@@ -23,7 +23,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { isAbsolute, resolve } from "node:path";
 import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from "ink";
-import TextInput from "ink-text-input";
 import { compactNow, respond } from "../dynamo/engine.js";
 import { createSession, resumeSession, reloadProjectMemory } from "../memory/session.js";
 import { saveSession, listSessions } from "../memory/store.js";
@@ -84,11 +83,12 @@ const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
  * prompt escapable: a first-run gate has nothing behind it, but a gate reached by
  * choosing a provider does — the session you were already in.
  */
+/** What a model's provider needs before it can answer. Used to DECIDE, never to render:
+ *  the screens that ask for a key are KeySetup and KeyManager. */
 type KeyNeed = {
   envVar: string;
   label: string;
   keysUrl: string;
-  pending?: { model: string; providerLabel: string };
 };
 
 /**
@@ -255,12 +255,10 @@ export function App() {
   // become the missing one.
   // Only when NOTHING can run. Asking about the default provider alone turned a key for
   // any of the other twelve into a dead end: a prompt the user never chose, with no way
-  // past it, while the session loader quietly switched them to the provider they could
-  // actually use underneath it.
-  const [keyNeed, setKeyNeed] = useState<KeyNeed | null>(null);
-  // First-run setup: open only when NOTHING can run. Asking about the default provider
-  // alone turned a key for any of the other twelve into a dead end — a prompt the user
-  // never chose, with no way past it.
+  // There is no separate "paste this one provider's key" screen any more. It asked for
+  // whichever provider happened to be configured, could not be escaped, and reappeared
+  // after setup had already taken a key. Both jobs belong to screens that do them
+  // properly: KeySetup on a first run, KeyManager for everything after.
   const [setupOpen, setSetupOpen] = useState(() => needsKeySetup(DEFAULT_MODEL_CONFIG.model, hasApiKey));
   // Where we are working is the widest permission there is — every other guard is scoped
   // to the workspace — so it is confirmed once, before anything else. See trust.ts.
@@ -275,9 +273,12 @@ export function App() {
   // Distinct from the first-run setup screen, which only ever needs to get one key in.
   const [keysOpen, setKeysOpen] = useState(false);
   const [keysTick, setKeysTick] = useState(0);
-  const needsKey = keyNeed !== null || setupOpen;
-  // The key the user is typing on the welcome screen.
-  const [keyInput, setKeyInput] = useState("");
+  // A /provider switch held back because that provider had no key. Finished the moment
+  // one is saved for it, so choosing a provider and adding its key is one flow rather
+  // than two commands with a dead end in between.
+  const pendingSwitch = useRef<{ model: string; apiKeyEnv: string; label: string } | null>(null);
+  // The keyboard belongs to a setup screen while one is open.
+  const needsKey = setupOpen || keysOpen;
   // Sent-message history, oldest-first — walked with ↑/↓ in the input.
   const [history, setHistory] = useState<string[]>([]);
   // Messages typed while Mindweave is working — queued, then sent in order when the
@@ -534,7 +535,9 @@ export function App() {
         );
         return;
       }
-      setKeyNeed(need);
+      // Nothing can run at all: open setup, which is the screen for exactly that.
+      void need;
+      setSetupOpen(true);
     });
   }, []);
 
@@ -553,38 +556,6 @@ export function App() {
     setQueued([...queueRef.current]);
     void handleSubmit(next);
   }, [busy, ready, needsKey, overlay]);
-
-  // First-run key setup, done entirely in the terminal: the user pastes their key
-  // on the welcome screen. We save it to ~/.mindweave/.env (so it persists for every
-  // future launch, in every project) and start chatting right away — no restart,
-  // never asked again. The key lives only on this machine; it's sent only to the
-  // user's own requests to their chosen provider, never to us.
-  function handleKeySubmit(value: string) {
-    const key = value.trim();
-    if (!key) return;
-    if (!keyNeed) return;
-    saveApiKey(keyNeed.envVar, key);
-    setKeyInput("");
-    const pending = keyNeed.pending;
-    setKeyNeed(null);
-    // The switch was held back until the key existed — complete it now.
-    if (pending) void switchTo(pending.model, pending.providerLabel);
-    else note("key saved on this machine — you're all set. ask me anything.");
-  }
-
-  // Esc out of a key prompt we arrived at by CHOOSING a provider: nothing was changed
-  // or saved, so abandoning it simply leaves the session as it was. The first-run gate
-  // stays blocking — there is no session behind it to return to.
-  useInput(
-    (_input, key) => {
-      if (!key.escape) return;
-      setKeyInput("");
-      setKeyNeed(null);
-      const s = session.current;
-      if (s) note(`stayed on ${providerOf(s.modelConfig.model).label} · ${modelLabel(s.modelConfig.model)}`);
-    },
-    { isActive: keyNeed?.pending !== undefined },
-  );
 
   // Start/stop a turn's timer (drives the persistent status line).
   function startTurn() {
@@ -1228,9 +1199,12 @@ export function App() {
     // what turned a wrong pick into a project that reopened straight into the key
     // prompt on every launch, with no way back from inside the app. Ask for the key,
     // and apply the switch only once it exists.
-    const need = missingKeyFor(target.id);
-    if (need) {
-      setKeyNeed({ ...need, pending: { model: target.id, providerLabel: provider.label } });
+    if (missingKeyFor(target.id)) {
+      // Open the manager rather than a prompt of its own, and finish the switch as soon
+      // as a key for THIS provider is saved.
+      pendingSwitch.current = { model: target.id, apiKeyEnv: manifestForModel(target.id).apiKeyEnv, label: provider.label };
+      note(`${provider.label} has no key yet — add one and the switch will finish.`);
+      setKeysOpen(true);
       return;
     }
     await switchTo(target.id, provider.label);
@@ -1837,61 +1811,19 @@ export function App() {
         onContinue={() => {
           setSetupOpen(false);
           const s = session.current;
-          const fallback = s ? usableFallback(s.modelConfig.model, hasApiKey) : null;
-          if (fallback && s) {
-            void switchTo(fallback, providerOf(fallback).label);
-          } else {
+          if (!s) return;
+          if (!missingKeyFor(s.modelConfig.model)) {
             note("you're all set. ask me anything.");
+            return;
           }
+          const fallback = usableFallback(s.modelConfig.model, hasApiKey);
+          if (fallback) void switchTo(fallback, providerOf(fallback).label);
+          else note("you're all set. ask me anything.");
         }}
       />
     );
   }
 
-  // MID-SESSION: the user chose a provider they have no key for. A targeted prompt,
-  // with a way out, because there is a working session behind it to return to.
-  if (keyNeed) {
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Box marginBottom={1}>
-          <Text bold color="yellow">Mindweave</Text>
-          <Text dimColor>{versionLabel()}</Text>
-        </Box>
-        <Text>
-          {keyNeed.pending
-            ? `${keyNeed.label} needs a key before it can answer. Nothing has changed yet.`
-            : "Welcome to Mindweave — your terminal coding agent. Let's set you up, one time only."}
-        </Text>
-        <Box marginTop={1}>
-          <Text>Paste your {keyNeed.label} API key to start chatting:</Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text bold color="cyan">{"  key › "}</Text>
-          <TextInput
-            value={keyInput}
-            // Same guard as the prompt: wheel reports reach this field as typed
-            // text, and an API key with `[<64;25;26M` spliced through it fails
-            // in a way that looks like the key itself is wrong.
-            onChange={(v) => setKeyInput(stripMouse(v))}
-            onSubmit={handleKeySubmit}
-            placeholder="sk-…  (paste, then press Enter)"
-            mask="•"
-          />
-        </Box>
-        <Box marginTop={1} flexDirection="column">
-          <Text dimColor>Don't have one? Get a key at {keyNeed.keysUrl}</Text>
-          <Text dimColor>Learn more: {MINDWEAVE_DOCS_URL}</Text>
-          {keyNeed.pending ? <Text dimColor>Esc — stay where you are and change nothing.</Text> : null}
-        </Box>
-        <Box marginTop={1}>
-          <Text dimColor>
-            Your key is saved only on this machine ({globalEnvPath()}) and is sent only to
-            {" "}{keyNeed.label} on your own requests — never to us. You won't be asked again.
-          </Text>
-        </Box>
-      </Box>
-    );
-  }
 
   // Record the sent text in history (no consecutive dupes). While busy, queue it
   // (the input stays live); the turn-end effect sends it next. Otherwise handle now.
@@ -1941,6 +1873,12 @@ export function App() {
           onSave={(provider, slot, key) => {
             saveApiKey(provider.apiKeyEnv, key, slot);
             setKeysTick((n) => n + 1);
+            const held = pendingSwitch.current;
+            if (held && held.apiKeyEnv === provider.apiKeyEnv) {
+              pendingSwitch.current = null;
+              setKeysOpen(false);
+              void switchTo(held.model, held.label);
+            }
           }}
           onRemove={(row) => {
             removeApiKey(row.apiKeyEnv, row.slot);
