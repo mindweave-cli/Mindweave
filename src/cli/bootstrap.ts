@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stateRoot } from "../memory/store.js";
 import { allProviders } from "../drivers/registry.js";
+import { keysFor, slotVar } from "./keyStore.js";
 
 /**
  * The global Mindweave config directory (~/.mindweave).
@@ -59,6 +60,26 @@ export function loadConfig(cwd: string = process.cwd()): void {
 export function reloadConfig(cwd: string = process.cwd()): void {
   applyEnvFile(join(cwd, ".env"));
   applyEnvFile(globalEnvPath());
+  activateStoredKeys();
+}
+
+/**
+ * Point each provider at its first stored key, unless something already has.
+ *
+ * Storage is `VAR_1..VAR_9` and the LIVE key is the bare `VAR` that every driver reads —
+ * two roles, deliberately two variables. Nothing on disk fills the live one, so without
+ * this a key added through /key would be written, reloaded, and then invisible on the
+ * next launch: the app would ask for a key it already had.
+ *
+ * Set-if-absent, so a shell export still wins and a key chosen for this session with
+ * /key is not overwritten by a later reload.
+ */
+function activateStoredKeys(): void {
+  for (const provider of allProviders()) {
+    if (process.env[provider.apiKeyEnv]?.trim()) continue;
+    const first = keysFor(provider.apiKeyEnv)[0];
+    if (first) process.env[provider.apiKeyEnv] = first.value;
+  }
 }
 
 /**
@@ -80,28 +101,108 @@ export function hasApiKey(envVar: string): boolean {
  * preserving every other line, so adding a second provider's key never disturbs
  * the first one.
  */
-export function saveApiKey(envVar: string, key: string): void {
-  const trimmed = key.trim();
-  if (!trimmed) return;
-  process.env[envVar] = trimmed;
-
+/**
+ * Write a variable into the global env file, or remove it when `value` is null.
+ *
+ * One place, because saving and removing have to agree about the file's shape — a
+ * remover that only deleted from `process.env` would leave the key on disk and it would
+ * come back on the next launch.
+ */
+function writeEnvVar(envVar: string, value: string | null): void {
+  const NEWLINE = String.fromCharCode(10);
   const dir = globalConfigDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const path = globalEnvPath();
-
   let existing = "";
   try {
     existing = readFileSync(path, "utf8");
   } catch {
     /* no file yet */
   }
-  const line = `${envVar}=${trimmed}`;
-  const pattern = new RegExp(`^\\s*${envVar}=.*$`, "m");
-  const next = pattern.test(existing)
-    ? existing.replace(pattern, line)
-    : (existing ? existing.replace(/\s*$/, "\n") : "") + line + "\n";
+  const pattern = new RegExp(`^\s*${envVar}=.*$`, "m");
+  let next: string;
+  if (value === null) {
+    const NL = String.fromCharCode(10);
+    next = pattern.test(existing)
+      ? existing.replace(pattern, "").replace(new RegExp(NL + "{3,}", "g"), NL + NL)
+      : existing;
+  } else {
+    const line = `${envVar}=${value}`;
+    next = pattern.test(existing)
+      ? existing.replace(pattern, line)
+      : (existing ? existing.replace(/\s*$/, NEWLINE) : "") + line + NEWLINE;
+  }
   writeFileSync(path, next, { mode: 0o600 });
 }
+
+/**
+ * Move a bare `VAR=value` into `VAR_1`, once, so storage and the live key stop sharing a
+ * variable. An existing config or a shell export arrives that way; everything written
+ * after this point is numbered.
+ */
+function normalizeLegacy(apiKeyEnv: string): void {
+  const bare = process.env[apiKeyEnv]?.trim();
+  if (!bare) return;
+  if (process.env[slotVar(apiKeyEnv, 1)]?.trim()) return;
+  process.env[slotVar(apiKeyEnv, 1)] = bare;
+  writeEnvVar(slotVar(apiKeyEnv, 1), bare);
+  writeEnvVar(apiKeyEnv, null);
+}
+
+/** Store a key in a slot. Slot 1 also becomes the live key when nothing else is. */
+export function saveApiKey(apiKeyEnv: string, key: string, slot = 1): void {
+  const trimmed = key.trim();
+  if (!trimmed) return;
+  normalizeLegacy(apiKeyEnv);
+  const envVar = slotVar(apiKeyEnv, slot);
+  process.env[envVar] = trimmed;
+  writeEnvVar(envVar, trimmed);
+  if (!process.env[apiKeyEnv]?.trim() || slot === 1) process.env[apiKeyEnv] = trimmed;
+}
+
+/**
+ * Remove one stored key, closing the gap behind it.
+ *
+ * Slots are renumbered so there is never a hole: with `_2` gone, `_3` becomes `_2`. A
+ * hole reads fine to a program and badly to a person opening the file. Cleared first and
+ * rewritten from 1, because renumbering in place would overwrite a value before it had
+ * been moved.
+ */
+export function removeApiKey(apiKeyEnv: string, slot: number): void {
+  normalizeLegacy(apiKeyEnv);
+  const before = keysFor(apiKeyEnv);
+  const live = process.env[apiKeyEnv]?.trim();
+  const remaining = before.filter((k) => k.slot !== slot);
+  for (const k of before) {
+    delete process.env[k.envVar];
+    writeEnvVar(k.envVar, null);
+  }
+  remaining.forEach((k, i) => {
+    const envVar = slotVar(apiKeyEnv, i + 1);
+    process.env[envVar] = k.value;
+    writeEnvVar(envVar, k.value);
+  });
+  // Removing the key that was in use must not leave the provider pointing at nothing.
+  if (!remaining.some((k) => k.value === live)) {
+    if (remaining[0]) process.env[apiKeyEnv] = remaining[0].value;
+    else delete process.env[apiKeyEnv];
+  }
+}
+
+/**
+ * Make a stored key the one the drivers send, for this session.
+ *
+ * Assigned into the variable they already read, and the stored slots are left alone: a
+ * key that is merely rate-limited today belongs back in its usual place tomorrow, and
+ * choosing one should not reorder a file the user maintains.
+ */
+export function useApiKey(apiKeyEnv: string, slot: number): boolean {
+  const found = keysFor(apiKeyEnv).find((k) => k.slot === slot);
+  if (!found) return false;
+  process.env[apiKeyEnv] = found.value;
+  return true;
+}
+
 
 /**
  * What lands in ~/.mindweave/.env the first time Mindweave runs.

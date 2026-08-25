@@ -15,6 +15,7 @@
  */
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
+import { stripMouse } from "../mouse.js";
 import { useState } from "react";
 import { useInput } from "ink";
 import type { SetupRow, SetupView } from "../keySetup.js";
@@ -96,7 +97,11 @@ export function KeySetup({ view, version, envPath, docsUrl, onSaveKey, onContinu
           <Text bold color="cyan">{"  key › "}</Text>
           <TextInput
             value={value}
-            onChange={setValue}
+            // Mouse reports arrive at a focused field as TYPED TEXT once wheel reporting is
+            // on, so scrolling while pasting a key fills it with escape sequences and the
+            // key fails in a way that looks like the key itself is wrong. The prompt has
+            // stripped these for a long time; these fields are new and did not.
+            onChange={(v) => setValue(stripMouse(v))}
             onSubmit={(v) => {
               const key = v.trim();
               // An empty submit is how you back out — there is nothing to save, and

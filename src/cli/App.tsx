@@ -36,6 +36,9 @@ import { rootLabel, rootsOf, relativize } from "../tools/paths.js";
 import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "../tools/approval.js";
 import { KeySetup } from "./components/KeySetup.js";
 import { setupView } from "./keySetup.js";
+import { KeyManager } from "./components/KeyManager.js";
+import { keyManagerView } from "./keyManager.js";
+import { keysFor } from "./keyStore.js";
 import { TrustGate } from "./components/TrustGate.js";
 import { rootBreadth, breadthWarning, trustPersists, isTrusted, rememberTrust } from "./trust.js";
 import { projectDir } from "../memory/store.js";
@@ -46,7 +49,7 @@ import { accessRefusal } from "../drivers/providerError.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 import { completePath } from "./pathComplete.js";
 import { formatHelp } from "./help.js";
-import { hasApiKey, saveApiKey, globalEnvPath, reloadConfig } from "./bootstrap.js";
+import { hasApiKey, saveApiKey, removeApiKey, useApiKey, globalEnvPath, reloadConfig } from "./bootstrap.js";
 import { versionLabel, appVersion } from "./version.js";
 import { PromptInput } from "./components/PromptInput.js";
 import { Picker } from "./components/Picker.js";
@@ -268,7 +271,10 @@ export function App() {
   // Bumped when a key is saved, so the list re-reads and marks it.
   const [, setSetupTick] = useState(0);
   // Opened by /key rather than by a first run, so Esc is a way back rather than a way out.
-  const [setupCancellable, setSetupCancellable] = useState(false);
+  // /key opens the key MANAGER — the keys you have, and what you can do to them.
+  // Distinct from the first-run setup screen, which only ever needs to get one key in.
+  const [keysOpen, setKeysOpen] = useState(false);
+  const [keysTick, setKeysTick] = useState(0);
   const needsKey = keyNeed !== null || setupOpen;
   // The key the user is typing on the welcome screen.
   const [keyInput, setKeyInput] = useState("");
@@ -1524,8 +1530,7 @@ export function App() {
     // ~/.mindweave/.env and editing it by hand: eighteen commands and not one of them
     // could replace a key, which is the commonest way a first run dies.
     if (name === "/key") {
-      setSetupCancellable(true);
-      setSetupOpen(true);
+      setKeysOpen(true);
       return;
     }
 
@@ -1827,7 +1832,6 @@ export function App() {
           reloadConfig(session.current?.cwd ?? process.cwd());
           setSetupTick((n) => n + 1);
         }}
-        {...(setupCancellable ? { onCancel: () => setSetupOpen(false) } : {})}
         onContinue={() => {
           setSetupOpen(false);
           const s = session.current;
@@ -1915,6 +1919,34 @@ export function App() {
 
   // While an overlay is open it replaces the input and owns the keyboard.
   function buildOverlayView() {
+    // /key sits where the prompt sits, like every other thing that asks something. It
+    // used to replace the whole screen for a list of three keys, which is the wrong
+    // weight for changing a setting and leaves nothing to come back to.
+    if (keysOpen) {
+      return (
+        <KeyManager
+          key={keysTick}
+          view={keyManagerView()}
+          width={width}
+          reveal={(row) => keysFor(row.apiKeyEnv).find((k) => k.slot === row.slot)?.value ?? ""}
+          onUse={(row) => {
+            useApiKey(row.apiKeyEnv, row.slot);
+            note(`${row.label} ${row.hint} is now the key in use.`);
+            setKeysTick((n) => n + 1);
+          }}
+          onSave={(apiKeyEnv, slot, key) => {
+            saveApiKey(apiKeyEnv, key, slot);
+            setKeysTick((n) => n + 1);
+          }}
+          onRemove={(row) => {
+            removeApiKey(row.apiKeyEnv, row.slot);
+            note(`removed ${row.label} key ${row.slot} ${row.hint}.`);
+            setKeysTick((n) => n + 1);
+          }}
+          onClose={() => setKeysOpen(false)}
+        />
+      );
+    }
     if (!overlay) return null;
     const cur = session.current;
     if (overlay.kind === "sessions") {
