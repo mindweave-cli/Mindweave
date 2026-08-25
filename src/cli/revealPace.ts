@@ -1,49 +1,33 @@
 /**
  * revealPace.ts — the tempo the transcript reveals at.
  *
- * A turn's events arrive in bursts. The engine can resolve five tool calls in the
- * time it takes to read one row, and painting them as they land drops the whole
- * burst on screen at once. That reads as output being thrown at you rather than as
- * work being done, and the difference is not cosmetic: it is the entire signal the
- * user has for whether the thing is deliberate or careless.
+ * A turn's events arrive in bursts, and this once held every block that appeared to a
+ * three-second beat so a burst of tool calls did not land at once. The reasoning was
+ * about perceived effort: a wait that shows work happening reads as deliberate rather
+ * than slow.
  *
- * So every block that APPEARS waits for the same beat. Not a decay, not a budget,
- * not a catch-up. One constant, start to finish, every turn.
+ * IT DOES NOT. Used in anger it reads as an animation — words arriving with motion,
+ * the chat still moving after the work is done — which is the opposite of the
+ * impression it was aiming for. That was always the one thing here no test could
+ * settle, and the file said so: change it and re-run. It has now been run.
  *
- * WHY UNIFORM, given a shrinking gap would finish sooner. A gap that decays means
- * the tool visibly accelerates as the turn goes on, and an accelerating rhythm reads
- * as rushing — it starts careful and gets bored. A cap is worse still, because the
- * moment it trips is the most visible event in the turn: twenty seconds of composure
- * and then everything dumps. Constant tempo is the whole product here. A metronome
- * is calming precisely because it never changes its mind.
+ * Claude Code paces nothing at all. There is no reveal delay, no typewriter, no gap
+ * between a block arriving and being painted, and it is the fastest-feeling terminal
+ * agent there is. A tool that is quick should look quick.
  *
- * WHY THIS IS NOT JUST ADDED LATENCY. Buell and Norton (Management Science, 2011)
- * ran five experiments where people preferred a slower service to an instant one
- * returning identical results, when the wait showed the work happening. The measured
- * mediator was perceived effort producing reciprocity, so the effect only fires when
- * the delay is OCCUPIED — Maister's first principle, and the reason every chatbot
- * study finds bare latency harmful while latency behind a typing indicator is not.
- *
- * Which is the constraint this file lives under, and the reason the number here can
- * be well above the ~1s that the latency literature calls a ceiling. Those studies
- * measure dead time before any output: an empty screen and a spinner. This gap sits
- * BETWEEN blocks that are already arriving, with the previous one still being read
- * and the status line's clock still running. It is occupied time, which is the
- * condition where the effect is positive rather than the one where it is negative.
- *
- * The gap is a MINIMUM SINCE THE LAST REVEAL, never an added sleep. That falls out
- * of one subtraction and it matters more than it looks: at the start of a turn the
- * last reveal was minutes ago, so the first block appears IMMEDIATELY. Dead time
- * stays under Nielsen's one-second flow limit and only occupied time is paced,
- * without needing a special case to say so.
+ * The mechanism is kept because it still SERIALISES: blocks reveal in order, one pump
+ * at a time, and Esc still flushes. Only the wait is gone.
  */
 
 /**
- * The beat, in milliseconds. One number, deliberately alone on its line: it is the
- * only thing here that cannot be settled by reasoning, because whether it reads as
- * considered or as sluggish is a judgement no test can make. Change it and re-run.
+ * The beat, in milliseconds. Zero: content appears when it arrives.
+ *
+ * Left as a named constant rather than deleted along with the arithmetic, because the
+ * question it answers is a real one and a future change here should be a number, not a
+ * re-derivation. Anything above zero is visible as animation — that is measured by use,
+ * not by a test.
  */
-export const REVEAL_GAP_MS = 3000;
+export const REVEAL_GAP_MS = 0;
 
 /** Everything the wait depends on. */
 export interface PaceInput {

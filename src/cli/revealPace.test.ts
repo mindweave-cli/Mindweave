@@ -35,8 +35,10 @@ test("the gap is a MINIMUM since the last reveal, not an added sleep", () => {
   // A model that thought for two seconds between calls has already paid most of the
   // beat. Adding the full gap on top would punish exactly the turns that were
   // already reading at the right pace.
-  assert.equal(revealWait({ now: 5_000, lastRevealAt: 3_000, flush: false }), REVEAL_GAP_MS - 2_000);
-  assert.equal(revealWait({ now: 5_000, lastRevealAt: 4_900, flush: false }), REVEAL_GAP_MS - 100);
+  // Kept as arithmetic rather than a fixed number so it stays honest whatever the beat
+  // is: time already spent counts toward it, and it never becomes an added sleep.
+  assert.equal(revealWait({ now: 5_000, lastRevealAt: 3_000, flush: false }), Math.max(0, REVEAL_GAP_MS - 2_000));
+  assert.equal(revealWait({ now: 5_000, lastRevealAt: 4_900, flush: false }), Math.max(0, REVEAL_GAP_MS - 100));
 });
 
 test("time already spent past the beat costs nothing, and never goes negative", () => {
@@ -58,9 +60,12 @@ test("Esc drops the beat to nothing", () => {
   assert.equal(revealWait({ now: 1_000, lastRevealAt: 1_000, flush: true }), 0);
 });
 
-test("the beat is one number, and it is the one that was agreed", () => {
-  // Pinned so a change is a deliberate edit to a test rather than a silent drift.
-  assert.equal(REVEAL_GAP_MS, 3000);
+test("nothing is held back: content appears when it arrives", () => {
+  // The beat was three seconds, on a theory about perceived effort. Used in anger it
+  // read as an animation — words arriving with motion, the chat still moving after the
+  // work was done. Pinned at zero so bringing it back is a deliberate edit here.
+  assert.equal(REVEAL_GAP_MS, 0);
+  assert.equal(revealWait({ now: 1_000, lastRevealAt: 1_000, flush: false }), 0, "a burst is still held");
 });
 
 // ── narration gets its own beat ───────────────────────────────────────────────

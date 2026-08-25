@@ -614,11 +614,10 @@ export function App() {
   // Scrolls by LINES. The clamp to the content's real height happens at render,
   // where that height is known, so this only has to refuse to go below zero.
   //
-  // The movement is EASED rather than applied in one step (`smoothScroll.ts`). A wheel
-  // notch is three lines, and jumping three lines in a single frame gives the eye
-  // nothing to track — a flick of the wheel reads as a stack of discrete jolts instead
-  // of movement. The destination is unchanged; only the values on the way there are new.
-  // APPLIED IMMEDIATELY, and that is a decision, not an omission.
+  // APPLIED IMMEDIATELY, and that is a decision, not an omission. (An earlier comment
+  // here described an eased version and a `smoothScroll.ts` that no longer exists —
+  // left behind when the easing was removed, and exactly the kind of stale claim that
+  // sends the next reader looking for a file that is not there.)
   //
   // An eased version was built and shipped (200ms ease-in-out, copied from Gemini CLI's
   // ScrollableList) and it was WORSE, immediately and obviously: a mouse wheel sends
