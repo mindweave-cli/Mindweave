@@ -122,6 +122,27 @@ test("a forked sub-agent never inherits a session grant", () => {
   assert.equal(child.toolContext.requestApproval, undefined, "and it cannot reach the user");
 });
 
+test("a forked sub-agent inherits NOTHING the user granted in person", () => {
+  // One rule, three things it applies to. Each was added at a different time and the
+  // second was missed when it was introduced, so this asserts the rule rather than the
+  // instance: a permission the user gave while watching their own work does not travel
+  // to an agent they never saw start.
+  const parent = parentSession(["write_file"]);
+  const p = parent.toolContext as unknown as Record<string, unknown>;
+  p.allowedOutsideDirs = new Set(["D:/somewhere-else"]);
+  p.activePlan = "1. The parent's approved plan";
+  p.activePlanApprovedAt = new Date().toISOString();
+
+  const c = forkSession(parent, "go and look at something").toolContext as unknown as Record<string, unknown>;
+  assert.ok(!(c.guardAllowed as Set<string> | undefined)?.size, "a Sentinel grant travelled");
+  assert.ok(!(c.allowedOutsideDirs as Set<string> | undefined)?.size, "a folder grant travelled");
+  assert.equal(c.requestApproval, undefined, "the approval channel travelled");
+  // Empty string, NOT undefined: undefined means "not looked for yet", which would send
+  // the child to load the very plan this is keeping away from it straight off disk.
+  assert.equal(c.activePlan, "", "the parent's approved plan travelled, or will be re-read");
+  assert.equal(c.activePlanApprovedAt, undefined);
+});
+
 test("a forked sub-agent gets its own session id", () => {
   const child = forkSession(parentSession([]), "task");
   assert.notEqual(child.toolContext.sessionId, "parent-id");

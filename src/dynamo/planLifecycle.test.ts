@@ -431,3 +431,26 @@ test("a fresh start leaves the session notes able to restart, not stalled", asyn
     `the baseline still measures the old conversation (${s.sessionMemoryTokens})`,
   );
 });
+
+
+// ── a sub-agent must not retire its parent's plan ────────────────────────────
+
+test("a sub-agent's turn does NOT mark the parent's plan complete", async () => {
+  // A child forks the parent's tool context, so it inherits `activePlan` — and a child
+  // runs the same `respond()` loop, which settles a finished plan when its turn ends.
+  // The plan artifact is a file, shared by both, so the child retired the agreement its
+  // parent was still in the middle of carrying out.
+  const root = tempRoot();
+  await savePlanArtifact(root, "1. The parent's plan", "lightning");
+
+  const { forkSession } = await import("../memory/session.js");
+  const parent = session(root, { id: "parent" });
+  const child = forkSession(parent, "go and look at something");
+
+  await respond(child);
+
+  assert.ok(
+    await loadPlanArtifact(root),
+    "the sub-agent marked its parent's plan done while the parent was still working on it",
+  );
+});

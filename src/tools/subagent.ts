@@ -11,11 +11,18 @@
  *
  * It reuses the engine's own `respond()` loop on a forked session (via `ctx.forkChild`,
  * injected by the engine), so a sub-agent is a full agent, not a lesser one. Recursion
- * is capped by `subagentDepth` so a sub-agent can't spawn its own sub-agents. The child
- * inherits the parent's approval channel and Sentinel gate, so its edits are gated too;
- * `read_only` restricts it to searching/reading for safe research tasks — and ONLY a
- * read-only worker is concurrency-safe (an editing worker runs alone, in order, so
- * parallel edits can't race). A process-wide semaphore bounds how many run at once.
+ * is capped by `subagentDepth` so a sub-agent can't spawn its own sub-agents.
+ *
+ * A child CANNOT reach the user. It has no approval channel, and nothing the user
+ * granted in person — a Sentinel allowance, a folder they let the agent write to, the
+ * plan they approved — comes with it. So under Sentinel a child's mutating tools are
+ * REFUSED rather than prompted, and it reports back instead. That is the failing
+ * direction to pick: the alternative is a question on screen from an agent the user
+ * never saw start, or worse, an action taken on a permission they gave for something
+ * else. `read_only` restricts a child to searching/reading for safe research tasks —
+ * and ONLY a read-only worker is concurrency-safe (an editing worker runs alone, in
+ * order, so parallel edits can't race). A process-wide semaphore bounds how many run
+ * at once.
  */
 import { randomUUID } from "node:crypto";
 import { STATUS_INSTRUCTION, renderVerdict, verifySubagentReport } from "./subagentReport.js";

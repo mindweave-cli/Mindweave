@@ -187,9 +187,10 @@ const SUBAGENT_PREAMBLE =
  * A scoped child session for a sub-agent. It gets its OWN transcript (seeded with
  * the task) and its OWN read ledger + todo list, so its work is isolated and never
  * pollutes the parent's working set. It SHARES the parent's code map, checkpoints
- * (so its edits are undoable too), governance, and approval channel by reference —
- * everything the parent already stood up. Only the child's final reply crosses back
- * to the parent, through the spawn tool.
+ * (so its edits are undoable too) and governance by reference — everything the parent
+ * already stood up. What it does NOT get is anything the user granted in person: the
+ * approval channel, session permission grants, and the parent's approved plan all stop
+ * here. Only the child's final reply crosses back to the parent, through the spawn tool.
  */
 export function forkSession(parent: Session, task: string, opts: { readOnly?: boolean } = {}): Session {
   const p = parent.toolContext;
@@ -216,6 +217,22 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
     // to ask through, so its mutating tools are refused and it reports back instead —
     // which is the failing direction to pick.
     guardAllowed: undefined,
+    // Cleared for the same reason, and it was missed when this one was added: a folder
+    // the user allowed writing to is a judgement about work they were watching. Claude
+    // Code draws the identical line when it scopes a child — it keeps the permissions
+    // given on the command line and clears the SESSION ones, "to prevent unintended
+    // leakage".
+    allowedOutsideDirs: undefined,
+    // The parent's approved plan is NOT the child's work. Two things go wrong when it
+    // rides along: the child is handed a binding instruction to follow a plan it was not
+    // spawned for, on top of the one task it was given — and because a child runs the
+    // same turn loop, its turn ending settles that plan, marking the artifact DONE on
+    // disk while the parent is still in the middle of carrying it out.
+    //
+    // Empty string, not undefined: undefined means "not looked for yet" and would send
+    // the child to load the plan straight back off disk.
+    activePlan: "",
+    activePlanApprovedAt: undefined,
     // A child CANNOT reach the user. The spread above inherited the parent's approval
     // channel, so `ask_user` (which is read-only, and therefore offered even to a
     // read-only child) put a question on screen from an agent the user never saw start
