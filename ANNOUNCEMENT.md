@@ -41,8 +41,9 @@ conversation, and tool output appears once, already finished, instead of a
 placeholder that changes its mind a second later. Long plans and permission
 prompts no longer tear the screen when they run past the window.
 
-Every block lands on a steady three-second beat, on purpose, so the tool never
-feels like it's rushing through a turn or stalling on you. Summaries that used to
+Output appears the moment it is ready. An earlier version held every block back on
+a steady beat, on the theory that a visible pause reads as deliberate work; in use
+it read as an animation, so it is gone. Summaries that used to
 render as a wall of text now break into real paragraphs and tables again, with a
 reading width that keeps answers legible even on a maximized window. Compaction
 shows a before-and-after bar with the exact token count it just reclaimed, every
@@ -54,6 +55,17 @@ to do about it. Mindweave used to paint that as an error, which trains you to sk
 error rows, and skimming past them is how you miss the ones that count. Those corrections
 are now silent. Real news stays loud: a command that failed, a write that was refused, a
 path that does not exist.
+
+**You can take back a message you queued.** Typing while Mindweave is working
+queues what you send, and until now that was a one-way door: the message was going
+out whether you still wanted it or not. Press up, or escape, and the whole queue
+comes back into the input box as ordinary editable text, with whatever you were
+part-way through typing kept after it. Clear the box and the messages are simply
+gone. Escape during a turn still means stop, and leaves the queue alone, so one key
+never carries two decisions. Messages queued back to back are now sent as a single
+turn rather than one turn each — if you type three things while waiting, you meant
+them together, and answering the first without having read the third produces an
+answer that is stale before you read it.
 
 **Typing is fast now.** It used to lag in long conversations, and the cause was
 not the work being done. The renderer was capped at 30 frames a second, which put
