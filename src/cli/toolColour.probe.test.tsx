@@ -47,9 +47,17 @@ async function frameOf(element: React.ReactElement, needle: RegExp): Promise<str
     stdin,
     patchConsole: false,
   });
-  await new Promise((r) => setTimeout(r, 60));
+  // WAIT for the frame rather than sleeping a fixed amount. A fixed sleep encodes the
+  // speed of the machine that wrote it: 60ms passed here for weeks and the same render
+  // took 345ms on CI, which is how the queue probe came to fail only there.
+  const deadline = Date.now() + 10_000;
+  let frame: string | undefined;
+  for (;;) {
+    frame = stdout.frames.filter((fr) => needle.test(fr)).at(-1);
+    if (frame || Date.now() > deadline) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
   instance.unmount();
-  const frame = stdout.frames.filter((f) => needle.test(f)).at(-1);
   assert.ok(frame, "nothing rendered the content this probe measures");
   return frame;
 }
