@@ -11,6 +11,68 @@ Mindweave lands on npm and the numbering resets.
 
 Work since v1.9.9, not yet given a version.
 
+### /mcp add and /mcp remove never ran
+
+The guard routing those sub-commands read as a word-boundary pattern and held a stray
+control byte where the escape belonged, so it required a control character to be typed
+and never matched anything. Every `/mcp add` opened the server-health view instead,
+while the command advertised itself in its own help text. The code behind it was correct
+and covered by tests; only the route to it was dead.
+
+Command routing now lives in one place as data rather than a pattern, and is tested. The
+eighteen built-in commands had no coverage before this, because the routing was a chain
+of conditions inside a view component with nothing to call. A test also holds the command
+list and the handlers together, so a command cannot be advertised with nothing behind it
+or work while appearing in no list.
+
+### Two new commands, and arguments that are no longer discarded
+
+`/clear` starts a fresh conversation without leaving the folder; until now the only way
+was to quit, or to take the third option in the session picker. `/init` has the model
+write MINDWEAVE.md, the file loaded into context every turn that nothing had ever been
+able to create.
+
+`/model`, `/think` and `/compact` accepted an argument and threw it away in silence.
+All three take it now. A name that is ambiguous or unrecognised is refused with the real
+options rather than resolved to the nearest match, because the wrong model is billed on
+the next turn. A `/compact` focus is additive and says so in the prompt: that summary
+replaces the older conversation, so a focus read as a narrowing instruction would
+destroy the rest of it permanently.
+
+Starting a fresh conversation also stopped quietly shrinking the workspace. Folders added
+with `/include` or `/link` were dropped, so every tool silently searched one folder
+instead of several, and undo history went with them even though the files stayed edited.
+
+### Messages queued while it works can be taken back
+
+Typing while Mindweave is working queues the message, and that was a one-way door.
+Pressing up looked like editing the queued message but replayed it from history, leaving
+the queued copy live, so editing and sending produced two messages. Up, or escape,
+now pulls the whole queue back into the input as editable text; clearing the box is how
+a queued message is cancelled. Escape during a turn still means stop and leaves the queue
+alone, so one key never carries two decisions. Consecutive queued messages are sent as a
+single turn rather than one turn each.
+
+### The interface stopped talking about itself
+
+Every turn printed lines about the tool's own housekeeping — which prompt cache had been
+invalidated, that a checkpoint had been sealed, how close the context was to a
+compaction, that a background command had started and then been stopped by the person
+who stopped it. None of it was news, several fired more than once a turn, and together
+they crowded out the work. What survives is the small set that reports something wrong
+and actionable.
+
+Prose between tool calls is no longer capped at one block per turn. The cap could not
+tell a repetitive model from a sparing one, so against a model that narrates rarely it
+only guaranteed silence for the rest of a long turn. Each block is still trimmed, which
+is what bounds the wall.
+
+A shell command reads as `Run(npm test)` now, the same shape as `Read(index.ts)`,
+instead of a sentence with the command on a row beneath it. Output no longer waits on a
+three-second beat before appearing: an earlier version held every block back on the
+theory that a visible pause reads as deliberate work, and in use it read as an animation.
+
+
 ### Forbidden paths now cover every folder in the workspace
 
 v1.9.9 recorded the opposite, and it was accurate at the time: patterns were measured

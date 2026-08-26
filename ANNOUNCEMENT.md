@@ -56,6 +56,24 @@ error rows, and skimming past them is how you miss the ones that count. Those co
 are now silent. Real news stays loud: a command that failed, a write that was refused, a
 path that does not exist.
 
+**The interface stopped talking about itself.** Every turn used to print lines about
+Mindweave's own housekeeping: which prompt cache had been invalidated and why, that a
+checkpoint had been sealed, how close the conversation was to a compaction, that a
+background command had started and then been stopped by the person who had just stopped
+it. None of it was news, several fired more than once a turn, and together they crowded
+out the work they were describing. What is left is the short list that reports something
+actually wrong: a conversation shed to fit, a compaction that failed, a background
+command that died on its own.
+
+Prose between tool calls is no longer capped at one block per turn. That cap was aimed
+at a real problem, a long turn printing two dozen near-identical lines, but it cannot
+tell a repetitive model from a sparing one — against a model that narrates rarely it
+only guaranteed silence for the rest of a long turn, so the tool looked like it had
+stopped responding. A shell command now reads as `Run(npm test)`, the same
+verb-and-subject shape as `Read(index.ts)`, rather than a sentence with the command on
+a row of its own beneath it.
+
+
 **Commands take their arguments, and two new ones.** `/model` and `/think` accept
 the choice inline instead of opening a picker and discarding what you typed, and
 `/compact` takes a focus for the summary. A near miss is refused with the real options
