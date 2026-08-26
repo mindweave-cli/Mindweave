@@ -27,7 +27,7 @@ import { compactNow, respond } from "../dynamo/engine.js";
 import { createSession, resumeSession, reloadProjectMemory } from "../memory/session.js";
 import { saveSession, listSessions } from "../memory/store.js";
 import { stopChassis } from "../alternator/lane.js";
-import { findSkill, loadSkillBody, substituteSkillArgs } from "../governor/skills.js";
+import { loadSkillBody, substituteSkillArgs } from "../governor/skills.js";
 import { appendForbidden, appendForbiddenCommand } from "../governor/write.js";
 import { addRoot, removeRoot } from "../tools/workspace.js";
 import { discoverRelatedRoots } from "../tools/workspaceDiscover.js";
@@ -61,6 +61,7 @@ import { virtualWindow } from "./virtualWindow.js";
 import { perf, perfEnabled } from "./perfLog.js";
 import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./groupReveal.js";
 import { drain as drainQueue, popAll as popAllQueued, visibleQueue } from "./messageQueue.js";
+import { routeCommand, parseCommandLine, unknownCommandMessage } from "./commandRoute.js";
 import { toolDisplay, isGroupable, KIND_COLOR } from "./toolDisplay.js";
 import { workingVerb } from "./workingVerb.js";
 import { narrationPending, revealWait } from "./revealPace.js";
@@ -70,7 +71,7 @@ import type { Usage } from "../drivers/types.js";
 import type { ShellInfo } from "../tools/backgroundShells.js";
 import type { ConnectionStatus as McpStatus } from "../mcp/connection.js";
 import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, splitArgs } from "../mcp/configWrite.js";
-import { mapPromptArguments, parsePromptCommand, promptCommand, promptUsage } from "../mcp/prompts.js";
+import { mapPromptArguments, promptCommand, promptUsage } from "../mcp/prompts.js";
 import type { Entry, Session, SessionMeta } from "../memory/types.js";
 import { DEFAULT_MODE, modeById, modeFromFlags, nextMode, type ModeId } from "./modes.js";
 import { ApprovalChannel } from "./approvalChannel.js";
@@ -1313,9 +1314,18 @@ export function App() {
   async function handleCommand(raw: string) {
     const s = session.current;
     if (!s) return;
-    const firstTok = raw.trim().split(/\s+/)[0];
-    const name = firstTok.toLowerCase();
-    const arg = raw.trim().slice(firstTok.length).trim(); // anything after the command word
+    // WHICH command this is is decided in commandRoute.ts, where it can be tested —
+    // the eighteen branches below are the bodies, not the decision. The catalog is the
+    // same BASE_COMMANDS list `/help` and the input's autocomplete render from, so the
+    // three cannot disagree about what exists.
+    const route = routeCommand(raw, {
+      builtins: BASE_COMMANDS.map((c) => c.name),
+      skills: s.governance.skills ?? [],
+    });
+    // `route` decides WHICH branch runs; these two are what the branches say back to
+    // the user. They come from the same parse, so a message can never name a different
+    // command from the one that ran.
+    const { name, arg } = parseCommandLine(raw);
 
     // /help — every command, rendered from the same list the input's autocomplete
     // offers, so the two can never disagree about what exists.
@@ -1484,8 +1494,8 @@ export function App() {
     }
 
     // /mcp add … — write a server to mcp.json and connect it now.
-    if (name === "/mcp" && /^(add|remove|rm)/.test(arg)) {
-      await mcpConfigCommand(arg);
+    if (route.kind === "mcp-config") {
+      await mcpConfigCommand(route.arg);
       return;
     }
 
@@ -1712,9 +1722,9 @@ export function App() {
     }
 
     // A project skill invoked as /name — load its steps and run them as a turn.
-    const skill = findSkill(s.governance.skills, name);
-    if (skill) {
-      const rest = raw.trim().slice(raw.trim().split(/\s+/)[0].length).trim();
+    if (route.kind === "skill") {
+      const skill = route.skill;
+      const rest = route.arg;
       const body = await loadSkillBody(skill);
       if (!body) {
         say(`Skill ${skill.name} has no readable SKILL.md.`);
@@ -1730,14 +1740,14 @@ export function App() {
     // A server prompt invoked as /server:name — render it and run it, exactly like a
     // skill. Checked after skills so a project's own command always wins over a
     // third-party server's.
-    const promptRef = parsePromptCommand(name);
-    if (promptRef) {
+    if (route.kind === "prompt") {
+      const promptRef = { server: route.server, name: route.prompt };
       const prompt = s.toolContext.mcp?.findPrompt(promptRef.server, promptRef.name);
       if (!prompt) {
         say(`No MCP prompt ${name}. Run /mcp to see which servers are connected.`);
         return;
       }
-      const rest = raw.trim().slice(name.length).trim();
+      const rest = route.arg;
       const { values, missing } = mapPromptArguments(prompt, rest ? rest.split(/\s+/) : []);
       if (missing.length > 0) {
         say(`${name} needs ${missing.join(", ")}.\n${promptUsage(prompt)}`);
@@ -1754,9 +1764,9 @@ export function App() {
       return;
     }
 
-    say(
-      `Unknown command ${name}. Try /model, /think, /rules, /skills, /forbidden, /link, /include, /exclude, /shells, /mcp, /context, /undo, /compact or /continue.`,
-    );
+
+    say(unknownCommandMessage(name));
+
   }
 
   async function handleSubmit(value: string) {
