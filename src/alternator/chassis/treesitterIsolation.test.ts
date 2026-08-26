@@ -59,10 +59,27 @@ test("the markup tier is isolated too — it had no guard of any kind before", {
   resetIsolationForTests();
 });
 
+/**
+ * Whether a worker capped at a tiny heap actually died.
+ *
+ * These tests force a fatal out-of-memory inside the worker to prove the HOST survives
+ * it. That premise is a fact about V8, not about this code, and it does not hold
+ * everywhere: Node 22 cannot compile the OCaml grammar inside an 8 MB heap and dies,
+ * which is the condition being contained, while Node 20 fits it and returns a result.
+ * CI found that, one runtime green and the other red on the same commit.
+ *
+ * Where the crash does not happen there is nothing to contain, and asserting the
+ * containment anyway tests the runtime rather than the code. So the premise is checked
+ * and the test skips with its reason instead of failing on a difference it does not own.
+ */
+function crashDidNotHappen(): boolean {
+  return isolationStats.crashes === 0;
+}
+
 test(
   "REPRODUCTION: compiling OCaml under a too-small limit kills the worker, not the host",
   { timeout: 60_000 },
-  async () => {
+  async (t) => {
     resetIsolationForTests();
     // Shrink the worker until the real grammar cannot compile inside it. This is
     // the original crash condition, relocated to somewhere it is allowed to happen.
@@ -73,6 +90,13 @@ test(
     process.env.MINDWEAVE_TS_WORKER_TIMEOUT_MS = "30000";
     try {
       const result = await treeSitterExtract("/repro/crash.ml", OCAML_SAMPLE);
+      if (crashDidNotHappen()) {
+        t.skip(
+          "this runtime compiled the grammar inside an 8 MB worker heap, so the crash " +
+            "this test exists to contain never happened",
+        );
+        return;
+      }
       // The host reaching THIS line is the fix: previously this was process death.
       assert.equal(result, null, "a crashed worker must resolve to null, never throw");
       assert.ok(isolationStats.crashes >= 1, "the worker must actually have died");
@@ -194,14 +218,19 @@ test("a child over its memory budget is retired, and the work still completes", 
  * The cap is shrunk to 1 so exhaustion is actually reachable here, and the two crashes
  * use DIFFERENT grammars because the first one poisons its own.
  */
-test("crashes separated by healthy work do not accumulate into a dead session", { timeout: 90_000 }, async () => {
+test("crashes separated by healthy work do not accumulate into a dead session", { timeout: 90_000 }, async (t) => {
   resetIsolationForTests();
   process.env.MINDWEAVE_TS_MAX_RESPAWNS = "1";
   const crashHeap = () => (process.env.MINDWEAVE_TS_WORKER_HEAP_MB = "8");
   const sane = () => delete process.env.MINDWEAVE_TS_WORKER_HEAP_MB;
   try {
     crashHeap();
-    assert.equal(await treeSitterExtract("/x/a.ml", OCAML_SAMPLE), null, "first crash");
+    const firstCrash = await treeSitterExtract("/x/a.ml", OCAML_SAMPLE);
+    if (crashDidNotHappen()) {
+      t.skip("this runtime does not die under an 8 MB worker heap, so there is no crash to recover from");
+      return;
+    }
+    assert.equal(firstCrash, null, "first crash");
     sane();
 
     // Real work in between: this is what makes the child healthy again.

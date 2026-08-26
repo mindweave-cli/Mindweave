@@ -26,16 +26,15 @@ jobs:
     runs-on: windows-latest
     # A hung test step would otherwise hold a runner for GitHub's six hour default.
     #
-    # This was 20, set when the whole job finished in under four minutes. The suite has
-    # since grown past 2,100 tests, and two runs on 2026-08-26 were killed here at
-    # exactly 20m00s with the test step still going. Measured at the time: 200s locally
-    # on 8 cores, against a 4-core runner that had not finished after 19m30s.
+    # This was raised to 45 while chasing a run that kept being killed here, and that
+    # was treating the symptom: the job was not slow, a test was hanging, and a bigger
+    # ceiling only bought a longer wait for the same anonymous cancellation. The real
+    # fix was --test-timeout in the test script, which fails a hung test by NAME.
     #
-    # Raised to catch a genuine hang while letting a real run finish. If a job ever
-    # approaches this again, find the cost rather than raising it: as measured,
-    # backgroundShells.test.ts alone is ~130s of the local 200s, because it waits out
-    # real startup and exit grace periods.
-    timeout-minutes: 45
+    # Back to 20 now the suite finishes in about four minutes here. Keep it tight: a
+    # ceiling this job never approaches is the one that still means something when it
+    # fires.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
