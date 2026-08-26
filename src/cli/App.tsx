@@ -1431,6 +1431,10 @@ export function App() {
           `README, and do not pad it. Look at the project first — read the manifest, the ` +
           `scripts, and enough of the source to be accurate. If MINDWEAVE.md already ` +
           `exists, IMPROVE it in place rather than replacing it, and say what you ` +
+          `changed. If one subject deserves a page of its own, put it in its own file and ` +
+          `pull it in with an @-import line rather than making the root file long; if a ` +
+          `convention is true of one folder only, write a MINDWEAVE.md inside that folder ` +
+          `instead, which costs nothing when work is happening elsewhere. ` +
           `changed. Finish by confirming in one line what you wrote and why.`,
         "writing MINDWEAVE.md…",
       );

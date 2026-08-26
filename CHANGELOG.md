@@ -101,6 +101,30 @@ the formats and the image budget for it, and says nothing about reasoning effort
 driver has already shipped a reasoning level the API does not accept once, so an
 unverified one is not advertised again.
 
+### The project's notes grew three layers
+
+MINDWEAVE.md is what makes a new session continue rather than start over: it is loaded
+for the agent every time, and the agent maintains it. It was one file at the project
+root, read whole, which works until a project has more to say than fits on a readable
+page. Then it is either too long to keep accurate or too short to be worth loading.
+
+**Imports.** A line containing `@./docs/architecture.md` pulls that file in as part of
+the notes. They nest five deep, a cycle stops instead of hanging, and an `@` inside
+code or backticks is left alone, which matters because a notes file is exactly the
+document that mentions `@scope/package` and decorators. An import naming a file that is
+not there is reported rather than silently dropped.
+
+**A personal layer.** `~/.mindweave/MINDWEAVE.md` applies to every project on the
+machine, for what is true of how you work rather than of one codebase. The project's
+notes are read after it, so where the two disagree the project wins.
+
+**Notes for a folder.** A MINDWEAVE.md inside a directory describes that directory and
+is given to the agent only while it is working on files there. A convention that is true
+of one area costs nothing everywhere else. These arrive in the volatile part of the
+request rather than the cached prefix, so moving between folders cannot invalidate the
+cache.
+
+
 ### Eleven more providers
 
 Mindweave shipped the 1.x line with two. It now speaks to thirteen: DeepSeek, Anthropic,

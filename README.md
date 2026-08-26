@@ -87,6 +87,12 @@ second account to manage.
 app that started from an app that works. One window, never the whole screen, and it asks
 first, naming the window it is about to capture.
 
+**Project notes that carry across sessions.** MINDWEAVE.md is loaded every session and
+maintained by the agent, so a new conversation continues rather than starts over. Split
+it with `@./path` imports, keep machine-wide notes in `~/.mindweave/MINDWEAVE.md`, and
+put a MINDWEAVE.md inside a folder for conventions that are true only there — that one
+is loaded only while the agent works in it. `/init` writes the first one.
+
 **Per-project governor.** Give a project standing rules, reusable skills, and forbidden
 paths or commands the agent has to respect.
 

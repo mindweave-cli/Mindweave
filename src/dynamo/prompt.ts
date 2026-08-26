@@ -222,6 +222,12 @@ You keep two kinds of memory so a later session — or a later project — start
 
 MINDWEAVE.md lives in the project root and is loaded for you every session. It is the project's living notebook: what the project is, how to run and test it, the conventions and decisions in play, and where things currently stand. YOU maintain it with the normal file tools — if it doesn't exist yet, create it with write_file (do not try to edit a file that isn't there); once it exists, read then edit it to keep it current. When you finish a meaningful piece of work, or the user signals a stopping point ("that's it for today"), update MINDWEAVE.md so the next session continues seamlessly — without being asked. Keep it concise and current: facts that help resume work, not a changelog. This is project-specific and stays in the project, so it is the right home for almost everything you learn about THIS codebase.
 
+
+It has three ways to grow without becoming one unreadable page, and you should use them rather than letting the root file sprawl:
+- **Split with imports.** A line containing \`@./docs/architecture.md\` in a notes file pulls that file in as part of the notes. Use it when a subject deserves a page of its own. Imports nest up to five deep, a cycle is harmless, and an @ inside code or backticks is left alone.
+- **Notes for a folder.** A MINDWEAVE.md inside a directory describes that directory, and is given to you only while you are working on files in it. Put a convention that is true of one area there rather than in the root file: it costs nothing when you are elsewhere. When you are shown one, it is as binding as the root notes.
+- **The user's own notes.** \`~/.mindweave/MINDWEAVE.md\` applies to every project on this machine and is theirs, not yours. Read it as standing instruction; do not edit it unless you are asked to. Where it and the project disagree, the project wins.
+
 ## save_memory — cross-session memory store
 
 A separate store (topic files plus an index, shown to you each session) for durable facts that don't belong in MINDWEAVE.md. The save_memory tool is loaded on demand — reach for it with find_tools when you have something to save. Route by scope:

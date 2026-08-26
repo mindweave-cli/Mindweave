@@ -29,11 +29,12 @@ import { basePrompt } from "./prompt.js";
 import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
-import { relativize, resolvePath, rootLabel } from "../tools/paths.js";
+import { relativize, resolvePath, rootLabel, rootsOf } from "../tools/paths.js";
 import { renderRules, renderSkillCatalog, reloadGovernance, governanceStamp, rescope } from "../governor/index.js";
 import type { Session, Entry, ToolCallRecord } from "../memory/types.js";
 import { forkSession, reloadProjectMemory } from "../memory/session.js";
 import { selectActiveFiles } from "../memory/workingSet.js";
+import { directoryNotesFor } from "../memory/projectNotes.js";
 import { rippleCheck } from "../tools/editRipple.js";
 import { fullReadPaths } from "../memory/presence.js";
 import {
@@ -194,11 +195,22 @@ ${deferred}`;
  * system + conversation prefix stay byte-stable and be served from the provider's
  * prompt cache. Returns "" when there's nothing to add.
  */
+
+/**
+ * How many of the most recently touched files are checked for folder notes.
+ *
+ * Bounded because this reads disk every turn. The agent works in a handful of places
+ * at a time, and the files below this line are ones it has already moved on from.
+ */
+const ACTIVE_FILES_FOR_NOTES = 20;
+
 export function volatileContext(
   rules: string,
   planMode: boolean,
   sessionMemory: string,
   approvedPlan = "",
+  /** Notes for the folders being worked in right now (see memory/projectNotes.ts). */
+  directoryNotes: { path: string; text: string }[] = [],
 ): string {
   const parts: string[] = [];
   // Standing rules FIRST in the volatile tail. They're rebuilt every turn here (not
@@ -237,6 +249,21 @@ export function volatileContext(
   // "here's where we are" before the map/task list. Survives compaction.
   const memBlock = renderSessionMemory(sessionMemory);
   if (memBlock) parts.push(memBlock);
+  // Notes belonging to the FOLDERS currently in play. Volatile on purpose: they change
+  // as the agent moves around the repository, and folding them into the cached prefix
+  // would rewrite that prefix every time it opened a file in a new directory. Read
+  // after the session state and before the work, so the most specific standing facts
+  // are the last thing seen.
+  if (directoryNotes.length > 0) {
+    const notes = directoryNotes
+      .map((n) => `<notes for="${n.path}">\n${n.text}\n</notes>`)
+      .join("\n");
+    parts.push(
+      "Notes the project keeps for the folders you are working in. They apply to files in " +
+        "those folders and are as binding as the project's own notes:\n" +
+        notes,
+    );
+  }
   // NO ranked code map and NO task list. Both were rebuilt and re-sent on every step,
   // and both already exist somewhere cached:
   //
@@ -552,6 +579,8 @@ function buildRequest(
   bgEvents: string[],
   tools: ReturnType<typeof toolSchemas>,
   imagePayloads: Map<string, string> = new Map(),
+  /** Notes for the folders in play, resolved by the caller (it has to read disk). */
+  directoryNotes: { path: string; text: string }[] = [],
 ): ModelRequest {
   const canSeeImages = modelSeesImages(session);
   const messages: ChatMessage[] = [];
@@ -628,6 +657,7 @@ function buildRequest(
             mode: "lightning",
           })
         : "",
+      directoryNotes,
     ),
     tools,
     model: session.modelConfig,
@@ -1054,11 +1084,25 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     // compaction bars measure it — so the provider's reported total minus this is the
     // real size of everything else in the prompt.
     const sentTranscriptTokens = estimateEntriesTokens(session.transcript);
+    // Every root, not just the primary: a file in a folder added with /include should
+    // pick up that folder's notes the same way one in the main project does. Deduped by
+    // path, because roots can nest.
+    const active = selectActiveFiles(session.toolContext.reads, ACTIVE_FILES_FOR_NOTES).map((a) => a.path);
+    const seenNotes = new Set<string>();
+    const dirNotes: { path: string; text: string }[] = [];
+    for (const root of rootsOf(session.toolContext)) {
+      for (const note of await directoryNotesFor(root, active)) {
+        if (seenNotes.has(note.path)) continue;
+        seenNotes.add(note.path);
+        dirNotes.push(note);
+      }
+    }
     const request = buildRequest(
       session,
       bgEvents,
       stepTools(),
       await loadImagePayloads(session),
+      dirNotes,
     );
     // Did the cacheable prefix survive since the last call? A break re-bills the system
     // prompt and every tool schema at full price, silently — nothing fails, the reply is

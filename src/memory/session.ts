@@ -24,35 +24,16 @@ import { loadModelConfig } from "../dynamo/model.js";
 import { ensureMemoryDir, loadMemoryIndex, memoryDir } from "./autoMemory.js";
 import { loadMcpConfig } from "../mcp/config.js";
 import { McpManager } from "../mcp/manager.js";
+import { assembleNotes, NOTES_FILE } from "./projectNotes.js";
 
 /**
- * Ceiling on how much MINDWEAVE.md is rendered into the cached prefix.
+ * Read the project's notes: MINDWEAVE.md, the user's own, and everything they import.
  *
- * The file is loaded WHOLE into the system prompt, the prompt tells the model to keep
- * it concise, and the same prompt tells the model to update it at every meaningful
- * stopping point. Nothing enforced the first instruction, so the structural pressure
- * ran one way only: a file that can only grow, read in full every session, maintained
- * by an agent rewarded for thoroughness. Everything else assembled into the prefix
- * (the project snapshot's tree, README, git status, docs list) is explicitly budgeted;
- * this was the one unbounded input. ~4K tokens is generous for "facts about this
- * codebase" and still bounds the worst case.
+ * The layers and their rules live in projectNotes.ts. This is only the seam the
+ * session uses, kept as a single string because that is what the cached prefix takes.
  */
-const MAX_PROJECT_MEMORY_CHARS = 16_000;
-
-/** Read the project's MINDWEAVE.md (facts the agent should always know). "" if none. */
 async function loadProjectMemory(cwd: string): Promise<string> {
-  let text: string;
-  try {
-    text = (await fs.readFile(join(cwd, "MINDWEAVE.md"), "utf8")).trim();
-  } catch {
-    return "";
-  }
-  if (text.length <= MAX_PROJECT_MEMORY_CHARS) return text;
-  // Truncate at a line boundary and SAY SO. A silent cut would leave the model
-  // confidently acting on half a document with no way to know the rest exists.
-  const cut = text.slice(0, MAX_PROJECT_MEMORY_CHARS);
-  const atLine = cut.slice(0, cut.lastIndexOf("\n") + 1) || cut;
-  return `${atLine.trimEnd()}\n\n[MINDWEAVE.md is longer than fits here and was truncated at this point. Read the file directly if you need the rest, and consider trimming it.]`;
+  return (await assembleNotes(cwd)).text;
 }
 
 /**
