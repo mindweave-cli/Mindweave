@@ -46,6 +46,7 @@ import {
   KEEP_LAST_N,
   KEEP_LAST_N_BOUNDARY,
   SUMMARY_REQUEST,
+  summaryRequest,
   SUMMARY_SYSTEM_PROMPT,
   dropOldestRounds,
   estimateEntriesTokens,
@@ -420,6 +421,12 @@ export interface RespondOptions {
    * user who never typed /compact still learns their conversation was summarized.
    */
   onCompaction?: (report: CompactionReport) => void;
+  /**
+   * What the user asked a MANUAL compaction to concentrate on (`/compact <text>`).
+   * Additive only — it ranks detail inside the nine sections, it never narrows them.
+   * Absent for automatic compactions, which nobody asked for and so nobody steered.
+   */
+  compactFocus?: string;
   /** Called for every live event of the turn (deltas, tool lifecycle, usage). The
    *  streaming UI renders from these; omit it for a non-interactive caller. */
   onEvent?: (event: EngineEvent) => void;
@@ -2068,7 +2075,12 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
     // Summaries don't need reasoning — use the chosen model with thinking off.
     const turn = await activeDriver().toolTurn({
       system: SUMMARY_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: `${formatTranscriptForSummary(session.transcript)}\n\n${SUMMARY_REQUEST}` }],
+      messages: [
+        {
+          role: "user",
+          content: `${formatTranscriptForSummary(session.transcript)}\n\n${summaryRequest(options.compactFocus)}`,
+        },
+      ],
       model: { ...session.modelConfig, thinking: false },
     });
     // The reply is untrusted: a cut-off or all-scratchpad summary must not be allowed

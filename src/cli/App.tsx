@@ -62,6 +62,7 @@ import { perf, perfEnabled } from "./perfLog.js";
 import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./groupReveal.js";
 import { drain as drainQueue, popAll as popAllQueued, visibleQueue } from "./messageQueue.js";
 import { routeCommand, parseCommandLine, unknownCommandMessage } from "./commandRoute.js";
+import { resolveChoice } from "./commandArgs.js";
 import { toolDisplay, isGroupable, KIND_COLOR } from "./toolDisplay.js";
 import { workingVerb } from "./workingVerb.js";
 import { narrationPending, revealWait } from "./revealPace.js";
@@ -1171,15 +1172,48 @@ export function App() {
     showResumed(resumed.transcript);
   }
 
-  // Drop the current chat and start a clean session in the same project.
-  async function startFresh() {
+  /**
+   * Drop the current chat and start a clean session in the same project.
+   *
+   * `wipeScreen` is the difference between the two ways in. Reached through
+   * `/continue`, the old conversation is still worth seeing — you went looking for
+   * sessions, so the history above is context for the choice you just made. Reached
+   * through `/clear`, you asked for it to be gone, and leaving it on screen while the
+   * model can no longer see it is the worst of both: it reads as still being there.
+   *
+   * What SURVIVES is as deliberate as what goes. The project's rules, skills and
+   * forbidden paths are properties of the folder, not of the conversation. Undo history
+   * stays: clearing the conversation does not un-edit the files, and taking away the
+   * only way to roll them back would leave the user worse off than before.
+   *
+   * Background shells do NOT survive, because they cannot. A shell belongs to its
+   * session's tool context, and the new session builds its own — leaving the old ones
+   * alive would hold ports and file handles that nothing can reach or stop any more.
+   * So they are killed, and `/clear` SAYS how many, because silently stopping someone's
+   * dev server is exactly the kind of surprise a one-word command should not spring.
+   */
+  async function startFresh(wipeScreen = false) {
     const s = session.current;
     if (!s) return;
+    // Counted BEFORE the lanes stop — afterwards the manager is disposed and there is
+    // nothing left to count.
+    const killed = s.toolContext.backgroundShells?.running().length ?? 0;
     await stopCurrentLanes();
     const fresh = await createSession(s.cwd);
     attachApproval(fresh);
     session.current = fresh;
-    note("— started a fresh session —");
+    if (wipeScreen) {
+      // The chips are keyed per conversation; a stale one would expand into a message
+      // the new session never saw.
+      pasteStore.current.clear();
+      setScrollUp(0);
+      dispatch({ type: "clear" });
+    }
+    note(
+      killed > 0
+        ? `— started a fresh session (stopped ${killed} background command${killed === 1 ? "" : "s"}) —`
+        : "— started a fresh session —",
+    );
   }
 
   // Apply the resume-mode pick for a chosen session: compact & continue / as-is / fresh.
@@ -1351,6 +1385,36 @@ export function App() {
       return;
     }
 
+    // /clear — a fresh conversation without leaving the folder. Until now the only
+    // way to start over was to quit and relaunch, or to go through /continue and pick
+    // its third option, which is not somewhere anyone looks for "start over".
+    if (name === "/clear") {
+      await startFresh(true);
+      return;
+    }
+
+    // /init — have the model write MINDWEAVE.md. The file is read into the cached
+    // prefix of every single turn (see memory/session.ts), and nothing in Mindweave
+    // ever created it: a new user had to know both that it mattered and what belonged
+    // in it. Model work, not a template — what is worth always knowing about a project
+    // is a judgement about THAT project.
+    if (name === "/init") {
+      await runDirective(
+        `Write this project's MINDWEAVE.md, at the workspace root. It is read into your ` +
+          `context at the start of every turn, so it must be SHORT and consist only of ` +
+          `things worth knowing every single time: how to build, test and run this ` +
+          `project (exact commands); the shape of the codebase and where things live; ` +
+          `conventions a newcomer would otherwise get wrong; and anything surprising. ` +
+          `Do not restate what is obvious from reading a file, do not summarize the ` +
+          `README, and do not pad it. Look at the project first — read the manifest, the ` +
+          `scripts, and enough of the source to be accurate. If MINDWEAVE.md already ` +
+          `exists, IMPROVE it in place rather than replacing it, and say what you ` +
+          `changed. Finish by confirming in one line what you wrote and why.`,
+        "writing MINDWEAVE.md…",
+      );
+      return;
+    }
+
     if (name === "/compact") {
       startTurn();
       try {
@@ -1360,6 +1424,10 @@ export function App() {
         await compactNow(s, {
           onActivity: (line, opts) => note(line, opts),
           onCompaction: (report) => dispatch({ type: "compaction", report }),
+          // `/compact focus on the auth work` — the person compacting usually knows
+          // which thread they are about to keep working on. Additive: it ranks detail
+          // inside the summary, it never narrows what the summary must cover.
+          ...(arg ? { compactFocus: arg } : {}),
         });
         await saveSession(s);
       } catch (error) {
@@ -1541,13 +1609,28 @@ export function App() {
       return;
     }
 
+    // Both take the choice inline as well as through the picker. Typing the name and
+    // getting the picker anyway — which is what happened before, because the argument
+    // was dropped without a word — reads as the app not having heard you.
     if (name === "/model") {
       await refreshModels();
+      if (arg) {
+        const picked = resolveChoice(arg, modelsOfProvider(s.modelConfig.model), "model");
+        if (picked.kind === "error") return say(picked.message);
+        await applyModel(picked.index);
+        return;
+      }
       setOverlay({ kind: "model" });
       return;
     }
 
     if (name === "/think") {
+      if (arg) {
+        const picked = resolveChoice(arg, thinkLevels(s.modelConfig.model), "reasoning level");
+        if (picked.kind === "error") return say(picked.message);
+        await applyThink(picked.index);
+        return;
+      }
       setOverlay({ kind: "think" });
       return;
     }
@@ -2479,6 +2562,7 @@ function useTerminalSize(): { columns: number; rows: number } {
 // are appended at render time from the live session.
 const BASE_COMMANDS = [
   { name: "/help", description: "show this list" },
+  { name: "/init", description: "write MINDWEAVE.md — what the agent should always know about this project" },
   { name: "/provider", description: "choose which provider serves this project" },
   { name: "/key", description: "add or replace an API key" },
   { name: "/model", description: "choose which model answers, from the current provider" },
@@ -2495,6 +2579,7 @@ const BASE_COMMANDS = [
   { name: "/context", description: "show what Mindweave sees about this project" },
   { name: "/undo", description: "roll back file changes: /undo, /undo list, /undo <n>" },
   { name: "/compact", description: "summarize the conversation to free up context" },
+  { name: "/clear", description: "start a fresh conversation in this project" },
   { name: "/continue", description: "pick a past session to resume" },
 ];
 

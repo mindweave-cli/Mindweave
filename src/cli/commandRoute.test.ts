@@ -12,9 +12,9 @@ import { parseCommandLine, routeCommand, unknownCommandMessage, MCP_CONFIG_VERBS
 import type { SkillMeta } from "../governor/types.js";
 
 const BUILTINS = [
-  "/help", "/provider", "/key", "/model", "/think", "/rules", "/skills", "/forbidden",
-  "/forbid-command", "/link", "/include", "/exclude", "/shells", "/mcp", "/context",
-  "/undo", "/compact", "/continue",
+  "/help", "/init", "/provider", "/key", "/model", "/think", "/rules", "/skills",
+  "/forbidden", "/forbid-command", "/link", "/include", "/exclude", "/shells", "/mcp",
+  "/context", "/undo", "/compact", "/clear", "/continue",
 ];
 
 function skill(name: string): SkillMeta {
@@ -139,4 +139,33 @@ test("a typed /mcp remove reaches the removal branch with its target", async () 
   const argv = splitArgs(r.kind === "mcp-config" ? r.arg : "");
   assert.equal(argv.shift(), "remove");
   assert.equal(argv[0], "fetch", "the server name never reached the removal");
+});
+
+/**
+ * The list and the handlers, held together.
+ *
+ * BASE_COMMANDS is what `/help` prints and what the input's autocomplete offers. A
+ * command can be added to that list with no handler behind it (it then does nothing at
+ * all, silently), or given a handler and left out of the list (it then exists but is
+ * undiscoverable). Both have happened in this file's history — `/mcp add` was the
+ * second kind for months. Read from the source, because there is nowhere else the two
+ * meet.
+ */
+test("every advertised command has a handler, and every handler is advertised", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync("src/cli/App.tsx", "utf8");
+
+  const listBlock = src.slice(src.indexOf("const BASE_COMMANDS = ["));
+  const listed = new Set(
+    [...listBlock.slice(0, listBlock.indexOf("];")).matchAll(/name: "(\/[a-z-]+)"/g)].map((m) => m[1]!),
+  );
+  const handled = new Set([...src.matchAll(/name === "(\/[a-z-]+)"/g)].map((m) => m[1]!));
+
+  assert.ok(listed.size >= 18, `only found ${listed.size} commands in BASE_COMMANDS — did the list move?`);
+
+  const advertisedButDead = [...listed].filter((c) => !handled.has(c));
+  assert.deepEqual(advertisedButDead, [], "these are offered by /help and autocomplete but nothing handles them");
+
+  const workingButHidden = [...handled].filter((c) => !listed.has(c));
+  assert.deepEqual(workingButHidden, [], "these commands work but are in no list, so nobody can find them");
 });

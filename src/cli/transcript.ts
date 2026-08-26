@@ -161,7 +161,8 @@ export type Action =
   | { type: "context"; text: string } // a set-off context/compaction line
   | { type: "notice"; title: string; body: string } // titled facts on a rail
   | { type: "compaction"; report: CompactionReport } // a compaction pass, with bars
-  | { type: "say"; text: string }; // an assistant markdown block, NOT recorded as the reply
+  | { type: "say"; text: string } // an assistant markdown block, NOT recorded as the reply
+  | { type: "clear" }; // /clear — drop the visible conversation, keep the id counter
 
 export function initialState(): TranscriptState {
   return { committed: [], tail: [], openAsstId: null, raw: "", toolMap: {}, seq: 0, lastReply: "", narrated: false };
@@ -267,6 +268,14 @@ function sealAssistant(s: TranscriptState, asReply: boolean): TranscriptState {
 
 export function reduce(s: TranscriptState, a: Action): TranscriptState {
   switch (a.type) {
+    case "clear":
+      // Everything the conversation put on screen goes, and `seq` deliberately does
+      // NOT. Block ids are React keys: restarting the counter makes the first block of
+      // the new conversation collide with a key React has just seen, and Ink reuses the
+      // old node instead of mounting a fresh one. Nothing else in the state survives —
+      // a half-open assistant block or a toolMap entry pointing at a discarded id would
+      // outlive the conversation it belonged to.
+      return { ...initialState(), seq: s.seq };
     case "user": {
       const id = s.seq + 1;
       // A new turn: the narration budget refills here and nowhere else.

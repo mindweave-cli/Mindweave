@@ -524,3 +524,31 @@ export function dropOldestRounds(
   const kept = groups.slice(dropCount).flat();
   return kept.length > 0 ? kept : null;
 }
+
+/**
+ * The summary request, optionally pointed at what the user cares about.
+ *
+ * `/compact focus on the auth work` used to be discarded without a word. It is a real
+ * feature — the person compacting usually knows which thread they are about to keep
+ * working on, and the summarizer does not.
+ *
+ * The focus is ADDITIVE and says so twice, because the failure mode here is severe and
+ * silent: this summary REPLACES the older transcript, so a model that reads "focus on
+ * X" as "only keep X" destroys the rest of the session permanently. The instruction
+ * therefore never narrows the nine sections, it only ranks detail within them.
+ *
+ * The user's text is quoted rather than interpolated bare so an instruction that looks
+ * like a directive to the summarizer ("ignore the sections above") reads as something
+ * the user said, not as something the system is asking for.
+ */
+export function summaryRequest(focus?: string): string {
+  const wanted = focus?.trim();
+  if (!wanted) return SUMMARY_REQUEST;
+  return (
+    `${SUMMARY_REQUEST}\n\n` +
+    `The user asked for this summary with a particular focus, quoted here: "${wanted}".\n` +
+    `Give that subject the most detail. Do NOT drop or shorten any of the nine sections ` +
+    `to make room for it — this summary replaces the older transcript, so anything left ` +
+    `out is gone regardless of the focus.`
+  );
+}
