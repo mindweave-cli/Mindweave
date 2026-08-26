@@ -63,6 +63,7 @@ import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./gr
 import { drain as drainQueue, popAll as popAllQueued, visibleQueue } from "./messageQueue.js";
 import { routeCommand, parseCommandLine, unknownCommandMessage } from "./commandRoute.js";
 import { resolveChoice } from "./commandArgs.js";
+import { carryAcrossFreshSession } from "./sessionCarry.js";
 import { toolDisplay, isGroupable, KIND_COLOR } from "./toolDisplay.js";
 import { workingVerb } from "./workingVerb.js";
 import { narrationPending, revealWait } from "./revealPace.js";
@@ -1181,10 +1182,14 @@ export function App() {
    * through `/clear`, you asked for it to be gone, and leaving it on screen while the
    * model can no longer see it is the worst of both: it reads as still being there.
    *
-   * What SURVIVES is as deliberate as what goes. The project's rules, skills and
-   * forbidden paths are properties of the folder, not of the conversation. Undo history
-   * stays: clearing the conversation does not un-edit the files, and taking away the
-   * only way to roll them back would leave the user worse off than before.
+   * What SURVIVES is as deliberate as what goes, and none of it is automatic — a fresh
+   * session starts genuinely empty, so anything that outlives the conversation has to
+   * be carried across on purpose (see sessionCarry.ts and `createSession`'s
+   * `carryRoots`). The project's rules, skills and forbidden paths come back because
+   * they are read from the folder. Undo history and the added workspace roots are
+   * handed over deliberately: clearing a conversation does not un-edit the files or
+   * un-add the folders, and losing either silently leaves the user worse off than
+   * before they typed it.
    *
    * Background shells do NOT survive, because they cannot. A shell belongs to its
    * session's tool context, and the new session builds its own — leaving the old ones
@@ -1198,15 +1203,33 @@ export function App() {
     // Counted BEFORE the lanes stop — afterwards the manager is disposed and there is
     // nothing left to count.
     const killed = s.toolContext.backgroundShells?.running().length ?? 0;
+    // Read BEFORE the lanes stop, and carried into the new session: folders added with
+    // /include or /link belong to the workspace, not to the conversation being ended.
+    // Without this, starting over silently narrows every tool back to one root.
+    const carried = rootsOf(s.toolContext);
     await stopCurrentLanes();
-    const fresh = await createSession(s.cwd);
+    const fresh = await createSession(s.cwd, carried);
     attachApproval(fresh);
+    // The files the old conversation edited are still edited, and its checkpoints are
+    // the only record of what they were before.
+    carryAcrossFreshSession(s.toolContext, fresh.toolContext);
     session.current = fresh;
     if (wipeScreen) {
       // The chips are keyed per conversation; a stale one would expand into a message
       // the new session never saw.
       pasteStore.current.clear();
       setScrollUp(0);
+      // Anything the pacer is still holding belongs to the conversation being cleared.
+      // Left in place it would paint into the empty screen a moment later, which looks
+      // exactly like the clear having failed.
+      revealQ.current = [];
+      lastRevealAt.current = 0;
+      streamDone.current = false;
+      flush.current = false;
+      // The status line still reads "Cooked for 1m 23s" from a turn that is no longer
+      // on screen or in the model's context.
+      setTaskUsage(null);
+      setLastMs(null);
       dispatch({ type: "clear" });
     }
     note(

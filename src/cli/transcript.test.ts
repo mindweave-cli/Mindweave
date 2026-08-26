@@ -512,3 +512,67 @@ test("resetReply on a turn with nothing buffered is harmless", () => {
   const s = reduce(reduce(initialState(), { type: "user", text: "hi" }), { type: "resetReply" });
   assert.equal(s.raw, "");
 });
+
+/**
+ * `/clear` — the screen empties, and the id counter deliberately does not restart.
+ *
+ * The blocks are rendered from `committed`+`tail` into a virtualized alt-screen frame
+ * (not Ink's <Static>, which writes to scrollback and could not be taken back), so
+ * emptying these two lists IS the clear.
+ */
+test("clear empties everything the conversation put on screen", () => {
+  let s = initialState();
+  for (const a of [
+    { type: "user", text: "do the thing" },
+    { type: "toolStart", toolId: "t1", name: "read_file", arg: "a.ts" },
+    { type: "toolEnd", toolId: "t1", ok: true, summary: "read" },
+    { type: "token", delta: "here is the answer" },
+    { type: "finishReply" },
+  ] as Action[]) {
+    s = reduce(s, a);
+  }
+  assert.ok(s.committed.length + s.tail.length > 0, "the fixture produced nothing to clear");
+
+  const cleared = reduce(s, { type: "clear" });
+  assert.deepEqual(cleared.committed, [], "finished blocks stayed on screen");
+  assert.deepEqual(cleared.tail, [], "in-progress blocks stayed on screen");
+  assert.deepEqual(cleared.toolMap, {}, "tool rows still map to ids that no longer exist");
+  assert.equal(cleared.openAsstId, null, "a half-open assistant block outlived the conversation");
+  assert.equal(cleared.raw, "", "accumulated reply text outlived the conversation");
+  assert.equal(cleared.lastReply, "", "the previous reply is still the recorded one");
+});
+
+test("clear does NOT restart the block id counter", () => {
+  // Block ids are React keys. Restarting the counter makes the first block of the new
+  // conversation collide with a key React has just seen, and Ink reuses the old node
+  // instead of mounting a fresh one.
+  let s = initialState();
+  s = reduce(s, { type: "user", text: "one" });
+  s = reduce(s, { type: "user", text: "two" });
+  const seqBefore = s.seq;
+  assert.ok(seqBefore > 0);
+
+  const cleared = reduce(s, { type: "clear" });
+  assert.equal(cleared.seq, seqBefore, "the id counter restarted — new blocks will collide with old React keys");
+
+  const next = reduce(cleared, { type: "user", text: "after the clear" });
+  const newId = [...next.committed, ...next.tail][0]!.id;
+  assert.ok(newId > seqBefore, `the first block after a clear reused id ${newId}`);
+});
+
+test("clear leaves a state a new conversation can build on", () => {
+  // A clear that produced a subtly broken state would fail on the NEXT turn, far from
+  // the command that caused it.
+  let s = reduce(initialState(), { type: "user", text: "before" });
+  s = reduce(s, { type: "clear" });
+  s = reduce(s, { type: "user", text: "after" });
+  s = reduce(s, { type: "toolStart", toolId: "t9", name: "read_file", arg: "b.ts" });
+  s = reduce(s, { type: "toolEnd", toolId: "t9", ok: true, summary: "read" });
+  s = reduce(s, { type: "token", delta: "reply" });
+  s = reduce(s, { type: "finishReply" });
+
+  const texts = [...s.committed, ...s.tail].map((b) => ("text" in b ? b.text : ""));
+  assert.ok(texts.some((t) => t.includes("after")), "the new turn did not render");
+  assert.ok(!texts.some((t) => t.includes("before")), "a block from the cleared conversation came back");
+  assert.equal(s.lastReply, "reply", "the reply after a clear was not recorded");
+});

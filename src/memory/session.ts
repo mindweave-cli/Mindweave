@@ -255,7 +255,20 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
 }
 
 /** A brand-new session rooted at `cwd` (defaults to the process cwd). */
-export async function createSession(rawCwd: string = process.cwd()): Promise<Session> {
+/**
+ * A brand-new session.
+ *
+ * `carryRoots` is for starting over WITHOUT losing the workspace: `/clear` builds a
+ * fresh session in the same folder, and the folders someone added with `/include` or
+ * `/link` belong to the folder they are working in, not to the conversation they just
+ * ended. Dropping them was silent — every tool quietly narrowed to one root and
+ * nothing said so. Missing folders are filtered and the primary is de-duplicated, the
+ * same way `resumeSession` treats the roots it restores.
+ */
+export async function createSession(
+  rawCwd: string = process.cwd(),
+  carryRoots: readonly string[] = [],
+): Promise<Session> {
   // Canonicalise the root ONCE, here, before anything derives from it. run_command
   // reports where it ended up as a physical path, and on macOS a great deal sits
   // behind symlinks (/tmp, and all of os.tmpdir()), so a session opened at a logical
@@ -273,7 +286,8 @@ export async function createSession(rawCwd: string = process.cwd()): Promise<Ses
     listSessions(cwd),
   ]);
   const id = randomUUID();
-  const toolContext = freshToolContext(cwd, governance, [cwd]);
+  const extra = carryRoots.filter((r) => r !== cwd && existsSync(r));
+  const toolContext = freshToolContext(cwd, governance, [cwd, ...extra]);
   // So the session tools can exclude this conversation from "your past sessions".
   toolContext.sessionId = id;
   attachMcp(toolContext, cwd);
