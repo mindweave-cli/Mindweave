@@ -38,14 +38,12 @@ If you have hands-on experience optimizing for a specific backend, open an issue
 
 | Provider | Driver Lead | Status |
 | --- | --- | --- |
-| DeepSeek | [Niman](https://github.com/nimanni) (maintainer) | Taken |
-| Anthropic (Claude) | Unclaimed | Shipped in v1.1, open to a lead |
-| OpenAI | Unclaimed | Wanted |
-| Qwen | Unclaimed | Wanted |
-| Ollama / local models | Unclaimed | Wanted |
-| Grok, MiniMax, OpenRouter, anything else | Unclaimed | Open |
+| DeepSeek | [Niman](https://github.com/nimanni) (maintainer) | Reference driver, kept by the maintainer |
+| Anthropic, OpenAI, Gemini, xAI, Mistral, Groq, Cerebras, Qwen, Kimi, GLM, Meta, MiniMax | Unclaimed | **Shipped and working. Open to a lead** |
+| Ollama / local models | Unclaimed | **Not built.** A stub waiting for someone |
+| OpenRouter, anything else | Unclaimed | Open |
 
-**Everything except DeepSeek is free to claim.** DeepSeek is the reference driver and the maintainer keeps it, because a multi-provider architecture needs one driver that is definitively correct to measure the others against. Anthropic already exists and works; it still has no dedicated lead, so it is available to anyone who wants to own it properly.
+**Thirteen providers ship today and every one except DeepSeek is free to claim.** DeepSeek is the reference driver and the maintainer keeps it, because a multi-provider architecture needs one driver that is definitively correct to measure the others against. The rest already exist and work; none has a dedicated lead, so any of them is available to anyone who wants to own it properly. Ollama is the one that is genuinely unwritten.
 
 To claim one, open an issue saying which provider and what you have actually run it against. Prior benchmarking or production experience with the backend matters far more than TypeScript polish; the wire code is the easy part.
 
@@ -116,7 +114,7 @@ in Discussions before starting so work does not collide.
   unchanged. Partly model behaviour, partly prompt work.
   `scripts/narration.mjs` measures it against a real session, so a change here can be
   shown to have worked rather than argued about.
-* **A model driver.** OpenAI, Qwen, Ollama and others are unclaimed. See the table above.
+* **A model driver.** Ollama is a stub and nothing else is written for local models. Twelve shipped providers have no dedicated lead either. See the table above.
 
 Known MCP gaps, deliberately not being worked on right now:
 

@@ -80,3 +80,56 @@ test("once marked stale, the next reload picks the file up and clears the flag",
   assert.equal(session.projectMemory, "rewritten");
   assert.equal(session.projectMemoryStale, false, "a consumed flag must not refresh again next turn");
 });
+
+/**
+ * Which tool calls mark the project memory stale.
+ *
+ * This is the hinge of the whole "the agent maintains its own notes" loop. A false
+ * negative here means the edit the model just made is silently dropped from the next
+ * session's context, and nothing anywhere reports it — the file on disk is right and
+ * the agent starts the next session not knowing what it wrote.
+ *
+ * `/init` makes this sharper than it used to be: MINDWEAVE.md is now routinely CREATED
+ * mid-session, by write_file, in a session that started without one.
+ */
+test("creating MINDWEAVE.md mid-session counts, not just editing it", async () => {
+  const { touchesProjectMemory } = await import("../dynamo/engine.js");
+  // The /init path: the file did not exist when the session started.
+  assert.equal(touchesProjectMemory("write_file", { path: "MINDWEAVE.md" }), true);
+  assert.equal(touchesProjectMemory("edit", { path: "MINDWEAVE.md" }), true);
+  assert.equal(touchesProjectMemory("replace_symbol_body", { path: "MINDWEAVE.md" }), true);
+});
+
+test("it is found however the model spells the path", async () => {
+  const { touchesProjectMemory } = await import("../dynamo/engine.js");
+  // The model passes paths relative, absolute, through a workspace root, and with
+  // either separator. Missing any spelling loses the update silently.
+  for (const path of [
+    "MINDWEAVE.md",
+    "./MINDWEAVE.md",
+    ["D:", "projects", "app", "MINDWEAVE.md"].join(String.fromCharCode(92)),
+    "/home/me/app/MINDWEAVE.md",
+    "backend/MINDWEAVE.md",
+    "  MINDWEAVE.md  ",
+    "mindweave.md",
+  ]) {
+    assert.equal(touchesProjectMemory("write_file", { path }), true, `missed: ${JSON.stringify(path)}`);
+  }
+});
+
+test("it does not fire on files that merely look similar", async () => {
+  const { touchesProjectMemory } = await import("../dynamo/engine.js");
+  for (const path of ["MINDWEAVE.md.bak", "NOTMINDWEAVE.md", "docs/MINDWEAVE.md.tmp", "MINDWEAVE.txt"]) {
+    assert.equal(touchesProjectMemory("write_file", { path }), false, `false positive: ${path}`);
+  }
+  // A read is not a write.
+  assert.equal(touchesProjectMemory("read_file", { path: "MINDWEAVE.md" }), false);
+  assert.equal(touchesProjectMemory("search", { path: "MINDWEAVE.md" }), false);
+});
+
+test("a malformed or missing path argument is not a crash", async () => {
+  const { touchesProjectMemory } = await import("../dynamo/engine.js");
+  assert.equal(touchesProjectMemory("write_file", {}), false);
+  assert.equal(touchesProjectMemory("write_file", { path: 42 as unknown as string }), false);
+  assert.equal(touchesProjectMemory("write_file", { path: "" }), false);
+});

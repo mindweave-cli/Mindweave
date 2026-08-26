@@ -101,13 +101,94 @@ the formats and the image budget for it, and says nothing about reasoning effort
 driver has already shipped a reasoning level the API does not accept once, so an
 unverified one is not advertised again.
 
-### Everything else
+### Eleven more providers
 
-Long sessions hold together across a summary, a rate limit no longer ends a turn, a
-dropped connection keeps the reply you already saw, sessions are written atomically, a
-failing tool cannot take the session with it, and a saved memory can no longer become
-unfindable. Full detail in the commit history until this section is written up properly
-for the release.
+Mindweave shipped the 1.x line with two. It now speaks to thirteen: DeepSeek, Anthropic,
+OpenAI, Gemini, xAI, Mistral, Groq, Cerebras, Qwen, Kimi, GLM, Meta and MiniMax, across
+45 models. Each family keeps its own driver, so a provider's quirks live with that
+provider and never leak into the shared core, and only the driver you are using is
+loaded. Mindweave also identifies itself to every provider now, rather than arriving
+anonymously.
+
+### The terminal interface was rebuilt
+
+It runs on its own screen instead of scrolling your history away, with a pinned header
+and footer and the whole conversation scrollable behind them.
+
+The changes underneath were mostly things that had been quietly wrong. Resizing could
+fuse an old frame onto the new one, because the screen was repainted without being
+erased first. Prose was capped narrower than the window, so a maximised terminal wasted
+half its width. The conversation and the input box could end up flush against each other.
+Diffs and shell output were hard to tell apart at a glance. The input box lost its border
+in one revision and got it back. The caret is a blinking bar rather than a static block,
+which is the difference between a cursor and a rendering artifact.
+
+A terminal left in a bad state by a crash is also repaired on the next launch, rather
+than leaving every scroll writing escape codes into your shell.
+
+### Prompt caching, token accounting, and the tools
+
+The cacheable part of a request was being invalidated by things that did not need to
+touch it, so a conversation paid to re-send its own prefix. Reworked, along with how
+tokens are counted and reported.
+
+Reading and searching changed shape. A whole-file read that is too large now answers with
+the file's structure instead of a truncation, so the model can ask for the part it wants.
+A read of several files with a line range no longer drops the files the range did not
+apply to. Symbol ranking was deleted outright after measuring zero uses across 774 calls.
+Twenty-two copies of "this tool failed" became one. And a model mistyping a tool call no
+longer paints a red row: it is told what was wrong and writes the call again a moment
+later, which is not news, and training people to skim past error rows is how the ones
+that matter get missed.
+
+### The first run
+
+The path a new user takes had never been audited, and it had five dead ends. A key for
+any provider except the default one left you stuck on a prompt with no way past. The
+config template listed two providers of thirteen. A wrong key could only be fixed by
+finding and hand-editing a file, because none of the commands could replace one. Escape
+could not leave the key field. Scrolling the wheel while typing a key corrupted it.
+
+What replaces it: a trust prompt that asks once per folder and says plainly when the
+folder is an entire drive, a provider list you can add as many keys to as you like, and
+`/key` as a real manager, three levels deep, where you can show, switch, edit or remove
+any key for any provider. The screens are centred and carry a welcome, the version, and
+four things worth knowing while you are pasting a key.
+
+A second screen that asked for a key you had already entered was deleted.
+
+### Plan mode, permissions, and sub-agents
+
+An approved plan now actually ends, and can start the work from a clean slate while
+keeping the planning conversation. Two approval questions can no longer cancel each
+other. A permission answer grants what it was asked about rather than everything of that
+shape, and a sub-agent no longer inherits a grant you gave in person about different
+work. A sub-agent also stopped paying for session notes that nobody keeps.
+
+Switching provider mid-session no longer lets one vendor's opaque data reach another.
+
+### The governor
+
+A scoped rule is decided when a file is touched, not when the prompt happens to render,
+which is what makes a rule reliable rather than incidental. The governor re-reads its own
+files when they change on disk. Standing rules stay in force across a summary and inside
+an added folder. Two ways round the file protections were closed: a deny list that
+ignored case, so `.ENV` walked past a rule written for `.env`, and a floor that missed
+`prod.env` and `.envrc`.
+
+### Durability
+
+A long session holds together across a summary. A provider blip is survived rather than
+losing the turn. A dropped connection keeps the reply you had already seen. Sessions are
+written the same careful way files are, so a crash mid-write cannot leave a truncated
+one, and a restore puts a file back with the same care. A failing tool can no longer take
+the whole session with it, and a saved memory can no longer become unfindable.
+
+### MCP
+
+Requests now mirror the body fields Streamable HTTP requires into headers, which is what
+some servers check rather than the body. A tool call is carried through however many
+round trips a server asks for, instead of being abandoned after the first.
 
 ---
 

@@ -2228,7 +2228,7 @@ async function restoreAfterCompaction(session: Session): Promise<void> {
  * false positive is one extra re-read at the next compaction, while the cost of a false
  * negative is a stale project memory carried into the next session.
  */
-function touchesProjectMemory(name: string, args: Record<string, unknown>): boolean {
+export function touchesProjectMemory(name: string, args: Record<string, unknown>): boolean {
   if (name !== "edit" && name !== "write_file" && name !== "replace_symbol_body") return false;
   const path = typeof args.path === "string" ? args.path : "";
   return /(^|[\\/])MINDWEAVE\.md$/i.test(path.trim());
