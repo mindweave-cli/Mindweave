@@ -48,7 +48,12 @@ export function formatHelp(sections: readonly HelpSection[]): string {
     // no autocomplete entry for either, and nothing else mentions them.
     "Also\n" +
       "  @path             attach a file to your message (Tab completes the path)\n" +
-      "  Esc               stop what's running",
+      "  Esc               stop what's running\n" +
+      // The input stays live while a turn runs and the placeholder says so, so
+      // QUEUEING is discoverable. Getting back OUT of the queue is not: nothing on
+      // screen mentions it until something is already queued, and by then a user who
+      // has changed their mind is looking for a way to undo, not to read a hint.
+      "  ↑                 take back a message you queued while it was working",
     // Sub-agents are the one part of the machinery that visibly does something on
     // screen without explaining itself: a rail of tool calls appears under a worker
     // that is not the agent you were talking to. What it costs you and what it hands
