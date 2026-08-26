@@ -6,10 +6,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mindweave-cli/Mindweave/blob/main/LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
+  <a href="LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
   <a href="CHANGELOG.md">Changelog</a> &nbsp;•&nbsp;
+  <a href="KNOWN-ISSUES.md">Known issues</a> &nbsp;•&nbsp;
   <a href="CONTRIBUTING.md">Contributing</a> &nbsp;•&nbsp;
-  <a href="https://github.com/mindweave-cli/Mindweave/stargazers">Stars</a> &nbsp;•&nbsp;
   <a href="https://x.com/mindweavecli">X</a>
 </p>
 
@@ -17,84 +17,20 @@
 
 ## What it is
 
-Mindweave is a coding agent that lives in your terminal and works inside your
-repository: reading, searching, editing, running commands, and checking its own work.
+Mindweave is a coding agent that lives in your terminal and works inside your repository:
+reading, searching, editing, running commands, and checking its own work.
 
-It runs **entirely on your machine**. There is no backend, no telemetry, and no account.
-Your code and your API key never reach a Mindweave server, because there isn't one.
+It runs entirely on your machine. There is no backend, no telemetry and no account. Your
+code and your API key never reach a Mindweave server, because there isn't one.
 
 It is built lean on purpose. Most of a coding agent's context budget goes on scaffolding
 the model never needed. Mindweave keeps prompts thin and leaves the room for the model to
 reason about your code.
 
-How the project is run, what gets into the core and what does not: [PHILOSOPHY.md](PHILOSOPHY.md).
-It is short, and it is the honest version.
-
-> ## ⚠ Still worth waiting a little longer
->
-> The audit findings we warned about here are **fixed**. They are not released
-> yet, so the version on npm is still the one the warning described. If you are
-> installing today, that is the thing to know.
->
-> What the audit found, and where each one stands:
->
-> - **Token consumption was much higher than it should be.** Fixed. Task-critical
->   context no longer rides in the cached prefix, and the blocks that grew without
->   a cap (MINDWEAVE.md, the memory index) are capped and refreshed lazily instead
->   of rewriting the prompt every turn. Measured on the same request: 12,521 to
->   8,166 tokens.
-> - **File writes were not atomic.** Fixed: temp file, fsync, rename. Verified the
->   hard way, by running a reader against the old code until it caught a file at
->   0 bytes and again mid-truncation, then confirming the new path cannot.
-> - **Too many tools were advertised at once.** Fixed. Overlapping tools were
->   merged and rare ones moved behind the same deferred pool MCP tools use: 29
->   registered, around 20 offered at a time, the rest one search away.
-> - **Process cleanup on POSIX** and the **sub-agent result contract**: both fixed.
-> - **Per-session cost instrumentation**: not built, and no longer planned in this
->   form. It was listed here as a fix, which was a promise we should not have made
->   before deciding we wanted the feature.
->
-> Still in progress, and the reason this box is still here: the terminal interface
-> has been rebuilt and needs real use before we call it done. Providers also grew
-> from two to six in the meantime.
->
-> None of this ever lost data in normal use; the worst finding needed a crash at
-> exactly the wrong moment. The fixes land together, with the audit notes in the
-> changelog as usual. If you want to try Mindweave before then, set a spending
-> limit (`MINDWEAVE_MAX_TASK_USD`) and know the above going in.
->
-> Niman
-
-## Coming up: Release 1
-
-Mindweave has been built in the open through the 1.x line, and **that line is now
-finished**. v1.9.9 closed the last of it: every part of the core has been read end to
-end, and the audit queue is empty.
-
-**The next release is the official one: Mindweave 1.** It lands on npm, installable in
-one command, with the numbering reset to match. It is the first version meant for people
-who were not watching it get built, and it carries the most in a single release so far.
-
-The headline is the interface. **The new UI is fully designed and ships with it** —
-drawn from scratch rather than borrowed, because a terminal is not a small browser and
-pretending otherwise is why so many CLI tools feel busy. It is quieter than what ships
-today and it gets out of the way while the agent works. For a tool that lives in a
-terminal, the interface is the product, which is why it is the thing gating the release
-rather than another feature.
-
-What the 1.x line built up to it: web search on both providers, seeing your app through
-a window capture, a plan you approve to start, sixty-odd defects found by auditing every
-tool, every shell path, and every store, and a security pass over everything that
-reaches outside your machine.
-
-See the [changelog](CHANGELOG.md) for the whole road here.
-
 ## Install
 
-Requires **Windows**, **Node.js 20+**, and a model API key.
-
-macOS and Linux are coming later. They are not supported today, and the reason is
-written down under [Known problems](#known-problems) rather than glossed over.
+Requires **Windows** and **Node.js 20+**. macOS and Linux are not supported yet, and the
+reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed over.
 
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
@@ -111,43 +47,20 @@ cd your-project
 mindweave
 ```
 
-On first launch it asks for your API key and saves it to `~/.mindweave/.env`, so it works
-in every project afterwards. Then type what you want done.
+It asks for an API key on first launch and saves it to `~/.mindweave/.env`, so every
+project afterwards just works. `mindweave --help` covers the launch flags; everything
+else is configured inside a session.
 
-`mindweave --help` covers setup and the launch flags; `mindweave --version` prints the
-version. Everything else is configured in a session, not on the command line.
+> The `mindweave` package on npm is a name placeholder, not a release. Install from
+> source until the first published version lands.
 
-Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) makes search faster.
-Without it Mindweave uses a built-in walker.
+## What it can do
 
-### Your key
-
-Two providers ship today. You only need the key for the one you use.
-
-```
-DEEPSEEK_API_KEY=your-key-here     # deepseek-v4-flash, deepseek-v4-pro
-ANTHROPIC_API_KEY=your-key-here    # claude-sonnet-5, claude-opus-5
-```
-
-Set both and you can switch between them in the same project with `/provider`.
-
-## Using it
-
-| Command | What it does |
-| --- | --- |
-| `/help` | Lists every command |
-| `/provider` | Picks who serves this project |
-| `/model` | Picks which of that provider's models answers |
-| `/think` | Picks how hard it reasons |
-| `/continue` | Resumes an earlier session |
-| `/undo` | Reverts what the last turn changed |
-| `/mcp` | Manages connected MCP servers |
-| `shift-tab` | Cycles interaction modes |
-
-Your provider and model choice is remembered per project. See
-[`src/drivers/PROVIDERS.md`](src/drivers/PROVIDERS.md) for the model list.
-
-## What it does well
+**13 providers, 45 models, one key.** DeepSeek, Anthropic, OpenAI, Gemini, xAI, Mistral,
+Groq, Cerebras, Qwen, Kimi, GLM, Meta and MiniMax. Each family gets its own driver so it
+runs at its best without bloating the shared core, and only the driver you are using is
+ever loaded. Switch with `/provider` and `/model`; the choice is remembered per project.
+Full list: [PROVIDERS.md](src/drivers/PROVIDERS.md).
 
 **Deterministic code intelligence.** A background lane indexes your repo with tree-sitter
 and language servers, costing no tokens, so the agent understands your codebase rather
@@ -165,108 +78,58 @@ so "what did we do last time" gets a real answer instead of a guess.
 `/mcp add` or by asking in plain words. They start with your session, and their output is
 treated as untrusted by default. Full guide: [docs/MCP.md](docs/MCP.md).
 
-**Images.** Drag a screenshot into the prompt, or write `@shot.png`. A model that can see
-gets the image. A text-only model says so plainly rather than pretending.
+**Images and web search.** Drag a screenshot into the prompt or write `@shot.png`; a model
+that can see gets the image, and one that cannot says so plainly. Ask about a recent
+release and the agent looks it up instead of guessing, through your own provider, with no
+second account to manage.
 
-**Web search.** Ask about a current API or a recent release and the agent looks it up
-instead of guessing from training data, then follows any source for the full page. It runs
-through your model's own provider, so there is no second account and no key to manage.
-
-**Seeing your app.** The agent can capture one window and look at it, which is how you
-tell an app that started from an app that works. One window, never the whole screen, and
-it asks first, naming the window it is about to capture.
+**Seeing your app.** It can capture one window and look at it, which is how you tell an
+app that started from an app that works. One window, never the whole screen, and it asks
+first, naming the window it is about to capture.
 
 **Per-project governor.** Give a project standing rules, reusable skills, and forbidden
-paths or commands that the agent has to respect.
+paths or commands the agent has to respect.
 
-**Model-adaptive drivers.** Each model family gets its own driver so it runs at its best
-without bloating the shared core. Only the driver you are using is ever loaded.
+## Using it
 
-## Recently
+| Command | What it does |
+| --- | --- |
+| `/help` | Lists every command |
+| `/init` | Writes MINDWEAVE.md, the project notes loaded every session |
+| `/provider` · `/model` · `/think` | Who answers, which model, how hard it reasons |
+| `/clear` · `/continue` | Start fresh, or resume an earlier session |
+| `/undo` | Reverts what the last turn changed |
+| `/mcp` | Manages connected MCP servers |
+| `shift-tab` | Cycles interaction modes |
 
-**v1.9.9 closes the 1.x line.** Compaction, session resume, and the governor were the
-last parts of the core never read end to end, and they were left for last because none
-of them fails loudly. Six defects came out of it, every one of which type-checked,
-passed the suite, and could never throw.
+Type while it works and your message queues; press up to take it back and edit it.
 
-The worst: before the older conversation is thrown away and a summary kept instead, the
-reply is checked for the ways it can be unusable, and it checked one of the four. A
-refusal became the session's record of itself. Alongside that, an attached image could
-be dropped while the model was still looking at it, a sub-agent inherited an "allow all"
-answer you gave about different work, a rule's file patterns could rewrite the rule that
-contained them, and forbidding `rm` also refused `npm run warm`.
+## Read more
 
-Two of the six were sitting under comments describing the safeguard that was missing,
-which is why reading the files had not been enough to find them.
-
-Full detail in the [changelog](CHANGELOG.md).
-
-## Known problems
-
-Written down rather than quietly carried. Several are good places to start if you want to
-contribute, and each links to what it would actually take.
-
-**Windows only for now. macOS and Linux are coming later.** Mindweave is developed and
-tested on Windows, and that is the platform it currently supports. The test suite does
-not yet pass on macOS or Linux: it hangs partway through rather than failing outright,
-which points at process handling that has only ever been exercised on Windows. CI runs
-Windows alone until that is fixed, so a green run means something.
-
-Making a platform work is the single most useful thing an outside contributor can take
-on, and it is genuinely open. See CONTRIBUTING.md.
-
-**The out-of-memory crash is contained, not cured.** Loading the OCaml grammar can
-exhaust V8 when the machine is already under memory pressure. Test runs are given heap
-headroom and the grammar-heavy files run in their own sequential phase, which holds, but
-the underlying cost of that grammar is unchanged.
-
-**The agent explores in more round trips than it needs.** It tends to look things up one
-at a time rather than asking for everything it needs at once, and each round is a full
-model call. Repeated reads of the same content are now caught and refused, so a round
-costs less, but the shape is unchanged. This is partly model behaviour and partly prompt
-work, and it is measurable: `scripts/narration.mjs` reports it against a real session.
-
-
-**MCP has been driven against one real published server.** Tools have been exercised end
-to end; resources and prompts have only been tested against servers written for the
-purpose. Real servers will find edges these did not.
-
-**MCP gaps, deliberately not being worked on right now:** OAuth for remote servers (they
-report `needs-auth` and stop), multi-round tool requests and elicitation, and attaching a
-resource yourself with `@`.
-
-## Found a bug?
-
-**Please open an issue.** Mindweave is developed by running it on real projects and fixing
-what breaks, so a reproduction from someone else's setup is genuinely the most useful
-thing you can send. Nearly everything in the changelog started as a failure someone
-watched happen.
-
-Useful to include: your OS and terminal, which model you were on, and the steps that led
-to it. If the agent did something odd rather than crashed, the transcript around it helps
-more than a description.
-
-Especially worth reporting:
-
-- **Anything MCP**, particularly a server that serves resources or prompts.
-- **A tool the agent was offered but could not call**, or one it insisted did not exist.
-- **A prompt or menu that says something untrue.** Those cannot crash and do not fail
-  tests, so they survive until a person notices. Several changelog entries are exactly
-  this.
+| | |
+| --- | --- |
+| [CHANGELOG.md](CHANGELOG.md) | What changed, and what each fix actually was |
+| [KNOWN-ISSUES.md](KNOWN-ISSUES.md) | What is broken or unfinished, written down rather than carried quietly |
+| [PHILOSOPHY.md](PHILOSOPHY.md) | How the project is run and what gets into the core. Short, and the honest version |
+| [BOUNDARY.md](BOUNDARY.md) | What belongs in the core versus a driver |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Mechanics, and what is most useful to report |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability |
+| [docs/MCP.md](docs/MCP.md) | Connecting and trusting MCP servers |
 
 ## Contributing
 
-Contributions are welcome, especially **model drivers**. OpenAI, Qwen, Ollama and others
-are unclaimed, and a driver is a smaller job than people expect: it owns one provider's
-wire format and nothing about how the agent behaves.
+Contributions are welcome, especially **model drivers**: Ollama is a stub waiting for
+someone, and a driver is a smaller job than people expect, owning one provider's wire
+format and nothing about how the agent behaves.
 
-Small fixes and reproduced bugs with a failing test can go straight to a pull request. For
-anything larger, start a Discussion first. The [Contributing Guide](CONTRIBUTING.md) has
-the mechanics, [BOUNDARY.md](BOUNDARY.md) answers what belongs in the core versus a
-driver, and [PHILOSOPHY.md](PHILOSOPHY.md) explains where the two bars sit.
+Small fixes and reproduced bugs with a failing test can go straight to a pull request.
+For anything larger, start a Discussion first. AI-assisted contributions are fine; the
+one rule is that you understand and have tested what you are submitting.
 
-AI-assisted contributions are fine. The one rule is that you understand and have tested
-what you are submitting.
+Bug reports are genuinely the most useful thing you can send. Mindweave is developed by
+running it on real projects and fixing what breaks, and nearly everything in the
+changelog started as a failure someone watched happen. [What to include, and what is
+especially worth reporting.](CONTRIBUTING.md#reporting-a-bug)
 
 ## License
 

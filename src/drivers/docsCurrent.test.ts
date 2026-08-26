@@ -51,3 +51,23 @@ test("PROVIDERS.md states the real provider and model counts", () => {
   assert.equal(Number(claim![1]), providers.length, "the stated provider count is wrong");
   assert.equal(Number(claim![2]), models, "the stated model count is wrong");
 });
+
+test("the README states the real provider and model counts", () => {
+  // The front page is where a stale claim does the most damage, and it is exactly
+  // where one survived longest: the README said "Two providers ship today" while
+  // thirteen had shipped, and named OpenAI and Qwen as unclaimed driver work months
+  // after both were built. Nobody re-reads the top of a README.
+  const text = readFileSync(join(here, "..", "..", "README.md"), "utf8");
+  const providers = allProviders();
+  const models = providers.reduce((n, p) => n + (p.models ?? []).length, 0);
+
+  const claim = text.match(/(\d+) providers, (\d+) models/);
+  assert.ok(claim, "the README no longer states the counts in a checkable form");
+  assert.equal(Number(claim![1]), providers.length, "the README's provider count is wrong");
+  assert.equal(Number(claim![2]), models, "the README's model count is wrong");
+
+  // And it names them, so a provider added without a line here is caught too.
+  for (const p of providers) {
+    assert.ok(text.includes(p.label), `the README does not name ${p.label}`);
+  }
+});

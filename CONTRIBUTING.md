@@ -153,6 +153,28 @@ recommended a credential format that could never have worked.
 
 ---
 
+## Reporting a bug
+
+**Please open an issue.** Mindweave is developed by running it on real projects and
+fixing what breaks, so a reproduction from someone else's setup is genuinely the most
+useful thing you can send. Nearly everything in the changelog started as a failure
+someone watched happen.
+
+Useful to include: your OS and terminal, which model you were on, and the steps that led
+to it. If the agent did something odd rather than crashed, the transcript around it helps
+more than a description.
+
+Especially worth reporting:
+
+* **Anything MCP**, particularly a server that serves resources or prompts.
+* **A tool the agent was offered but could not call**, or one it insisted did not exist.
+* **A prompt or menu that says something untrue.** Those cannot crash and do not fail
+  tests, so they survive until a person notices. Several changelog entries are exactly
+  this.
+
+---
+
+
 ## AI-Assisted Contributions
 
 AI-generated and AI-assisted code is welcome, we don't gatekeep how you write.
