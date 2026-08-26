@@ -247,7 +247,17 @@ export class BackgroundShells {
   private shells = new Map<number, Entry>();
   private onChange: (() => void) | null = null;
 
-  constructor() {
+  /**
+   * The two grace periods, injectable ONLY so tests can exercise the mechanism
+   * without waiting out real seconds. The defaults are the shipped behaviour and no
+   * production caller passes anything: a suite that waits out a 10s startup grace
+   * per case was 73% of the whole run's wall time, and that cost lands again on
+   * every contributor and every CI job.
+   */
+  constructor(
+    private readonly startupGraceMs = STARTUP_GRACE_MS,
+    private readonly exitGraceMs = EXIT_GRACE_MS,
+  ) {
     active.add(this);
     registerCleanup();
   }
@@ -297,7 +307,7 @@ export class BackgroundShells {
         if (entry.status !== "running") return;
         entry.ready = true;
         this.emit();
-      }, STARTUP_GRACE_MS);
+      }, this.startupGraceMs);
       entry.readyTimer.unref?.();
     }
 
@@ -313,7 +323,7 @@ export class BackgroundShells {
     // holds the stdio pipe. Without this the entry stays "running" for the rest of the
     // session: the UI shows a dead shell, and `runningCount()` is permanently wrong.
     child.on("exit", (code, signal) => {
-      const timer = setTimeout(() => this.onClose(entry, code, signal, false), EXIT_GRACE_MS);
+      const timer = setTimeout(() => this.onClose(entry, code, signal, false), this.exitGraceMs);
       timer.unref?.();
     });
 

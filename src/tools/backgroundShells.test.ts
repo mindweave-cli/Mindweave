@@ -265,7 +265,7 @@ test("a shell finalizes even when a surviving grandchild holds the pipe open", {
   // `close` fires only once every stdio stream closes. Kill the shell wrapper and the
   // grandchild keeps the pipe open, so `close` never arrives and the entry used to sit
   // at "running" for the rest of the session. The `exit` backstop has to finalize it.
-  const mgr = new BackgroundShells();
+  const mgr = new BackgroundShells(FAST_STARTUP_MS, FAST_EXIT_MS);
   const wrapper = spawn(`node -e "setInterval(()=>{},1000)"`, {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -377,10 +377,21 @@ test("guessNotifyPolicy is only a fallback, and is honest about what it knows", 
   assert.equal(guessNotifyPolicy("docker compose up"), "on_finish");
 });
 
+/**
+ * Grace periods short enough to test in milliseconds.
+ *
+ * The shipped values are 10s and 2s, and waiting them out per case made this file 73%
+ * of the whole suite's wall time. What these tests check is the MECHANISM — that a
+ * process surviving its grace reports ready exactly once, that a stop is still
+ * delivered — and none of that depends on the number being ten seconds.
+ */
+const FAST_STARTUP_MS = 250;
+const FAST_EXIT_MS = 100;
+
 // ── Readiness: the event a server actually has ──────────────────────────────
 
 test("a server that stays up reports READY, once, and not as a failure", { timeout: 30_000 }, async () => {
-  const mgr = new BackgroundShells();
+  const mgr = new BackgroundShells(FAST_STARTUP_MS, FAST_EXIT_MS);
   const child = spawn(NODE, ["-e", "setTimeout(()=>{}, 100000)"], { detached: DETACH });
   mgr.adopt(child, { command: "npm run dev", cwd: process.cwd(), notify: "on_failure" });
 
@@ -438,7 +449,7 @@ test("a shell records who stopped it, and tells neither of them", async () => {
 // was down. It must now always arrive, just without breaking into the session.
 
 test("a stop the user caused is still DELIVERED, it just doesn't interrupt", { timeout: 30_000 }, async () => {
-  const mgr = new BackgroundShells();
+  const mgr = new BackgroundShells(FAST_STARTUP_MS, FAST_EXIT_MS);
   const child = spawn(NODE, ["-e", "setTimeout(()=>{}, 100000)"], { detached: DETACH });
   const info = mgr.adopt(child, { command: "npm run dev", cwd: process.cwd(), notify: "on_failure" });
 
