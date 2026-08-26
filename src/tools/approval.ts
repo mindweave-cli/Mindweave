@@ -195,7 +195,7 @@ const OUTSIDE_OPTIONS = [
  * user chose says the agent may write there, and an absolute path is easy for a model to
  * produce from a stale assumption about where it is.
  *
- * Claude Code draws the same line — its auto-accept mode allows a write only when the
+ * The line is drawn where it is because an auto-accept mode allows a write only when the
  * path is inside an allowed working directory, and anything outside falls through to a
  * prompt. The second option scopes the grant to that FOLDER for the session, as theirs
  * does, so a run that legitimately writes next door asks once rather than every file.

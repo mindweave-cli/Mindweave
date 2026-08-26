@@ -27,7 +27,7 @@ test("a drive root and the home directory are recognised as broad", () => {
 
 test("a broad root is NEVER remembered, an ordinary folder is", () => {
   // Saying yes once to your home directory should not make everything you own a trusted
-  // workspace forever. Claude Code makes the same call for the same case.
+  // workspace forever.
   assert.equal(trustPersists("root"), false);
   assert.equal(trustPersists("home"), false);
   assert.equal(trustPersists("ordinary"), true);

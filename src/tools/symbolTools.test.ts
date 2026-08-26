@@ -149,7 +149,7 @@ test("replace_symbol_body preserves CRLF line endings", async () => {
 });
 
 // ── read_symbol pays for the same lines twice ─────────────────────────────────
-// Across Claude Code, Cursor and Codex, repeated file reads are ~42% of avoidable
+// Across terminal coding agents, repeated file reads are ~42% of avoidable
 // token spend. Ours ran through this tool: read_file has always deduped against what
 // the model can still see, read_symbol never did — so a session re-read the same four
 // functions turn after turn while all four sat rendered in <working_files>.

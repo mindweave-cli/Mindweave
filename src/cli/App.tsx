@@ -645,12 +645,12 @@ export function App() {
   // left behind when the easing was removed, and exactly the kind of stale claim that
   // sends the next reader looking for a file that is not there.)
   //
-  // An eased version was built and shipped (200ms ease-in-out, copied from Gemini CLI's
-  // ScrollableList) and it was WORSE, immediately and obviously: a mouse wheel sends
-  // notches faster than 200ms apart, so every notch queued behind the last one and the
-  // view visibly trailed the wheel. Easing suits a scroll the PROGRAM initiates — jump
-  // to top, jump to a match — where the animation explains a movement the user did not
-  // make. A wheel notch is a direct manipulation, and direct manipulation must be 1:1
+  // An eased version was built and shipped (200ms ease-in-out) and it was WORSE,
+  // immediately and obviously: a mouse wheel sends notches faster than 200ms apart, so
+  // every notch queued behind the last one and the view visibly trailed the wheel.
+  // Easing suits a scroll the PROGRAM initiates — jump to top, jump to a match — where
+  // the animation explains a movement the user did not make. A wheel notch is a direct
+  // manipulation, and direct manipulation must be 1:1
   // with the input or it reads as lag, because it IS lag. Do not re-add it here.
   const scrollBy = useCallback((lines: number) => {
     setScrollUp((s) => Math.max(0, s + lines));

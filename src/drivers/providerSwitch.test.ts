@@ -1,8 +1,7 @@
 /**
  * providerSwitch.test.ts — what survives a mid-session /provider change.
  *
- * Claude Code has no equivalent: it speaks to one vendor, so nothing in its transcript
- * can belong to a provider that is no longer running. Ours can, and that is the whole
+ * A single-vendor agent has no equivalent problem: nothing in its transcript can ever
  * hazard. A tool call carries an opaque, provider-specific blob — Gemini attaches a
  * `thought_signature` and returns 400 on the next request if it comes back missing — and
  * the transcript outlives the provider that produced it.

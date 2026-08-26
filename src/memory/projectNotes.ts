@@ -23,11 +23,11 @@
  * resolved per turn against the files in play, and is deliberately NOT part of that
  * text: see `directoryNotesFor`.
  *
- * The import rules follow Claude Code's, because anyone writing these files may well
- * have written CLAUDE.md files first and the syntax should not surprise them: `@path`
- * in ordinary prose, depth capped, cycles broken, and — the part that is easy to miss —
- * **never inside code**. A notes file that documents an npm scope or a decorator would
- * otherwise try to import `@types` as a path.
+ * The import rules are the ones this syntax conventionally carries, so nobody who has
+ * written a notes file before is surprised: `@path` in ordinary prose, depth capped,
+ * cycles broken, and — the part that is easy to miss — **never inside code**. A notes
+ * file that documents an npm scope or a decorator would otherwise try to import
+ * `@types` as a path.
  */
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
@@ -39,9 +39,9 @@ export const NOTES_FILE = "MINDWEAVE.md";
 /**
  * How far an import chain may go before it stops.
  *
- * Five, the same as Claude Code. A notes file importing a file that imports another is
- * normal; five levels of it is a structure nobody is reading, and the cap is what stops
- * a mistake from pulling in a whole documentation tree.
+ * Five. A notes file importing a file that imports another is normal; five levels of it
+ * is a structure nobody is reading, and the cap is what stops a mistake from pulling in
+ * a whole documentation tree.
  */
 export const MAX_IMPORT_DEPTH = 5;
 

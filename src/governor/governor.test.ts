@@ -314,8 +314,7 @@ test("the deny-list covers every folder in the workspace, not just the first", (
   // `/include` adds a second project to a session. Patterns are written relative to a
   // project, and judging them only against the one you opened meant a rule blocking
   // `src/legacy` there quietly did nothing in the folder you added — still listed by
-  // /forbidden, still shown as active, simply not in force. Claude Code takes the same
-  // shape: a path is checked against the original directory UNION every added one.
+  // /forbidden, still shown as active, simply not in force.
   const primary = join("D:", "backend");
   const added = join("D:", "frontend");
   const cfg = { root: primary, patterns: ["src/legacy", "secrets/**"] };

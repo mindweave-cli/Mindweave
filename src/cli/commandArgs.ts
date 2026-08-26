@@ -6,9 +6,8 @@
  * which reads as the app not having heard you — and is worse than an error, because an
  * error tells you to try something else and silence tells you nothing.
  *
- * Claude Code accepts an argument on all three (`[model]`,
- * `[low|medium|high|max|auto]`, `<optional custom summarization instructions>`), so
- * anyone arriving from it will type them.
+ * Terminal agents generally accept an argument on all three, so it is what someone
+ * will type without thinking about it — which is exactly when silence is worst.
  *
  * Nothing here knows any provider's lineup: the candidates are handed in by the caller,
  * which reads them from the registry. That is the rule for core code, and it is also

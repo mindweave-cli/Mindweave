@@ -1,8 +1,8 @@
 /**
  * configWrite.ts — adding and removing MCP servers without hand-editing JSON.
  *
- * Every comparable tool ships an add path (Claude Code has `claude mcp add`, Cursor and
- * Windsurf have a settings pane), and for good reason: the config spawns processes and
+ * Every comparable tool ships an add path rather than making people hand-write the
+ * config, and for good reason: the config spawns processes and
  * carries credentials, so a typo is a server that silently fails to start. Making people
  * hand-write it is how you get a bad first five minutes.
  *

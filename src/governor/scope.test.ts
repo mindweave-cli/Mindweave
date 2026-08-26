@@ -4,8 +4,8 @@
  *
  * The shape being replaced: every model call rebuilt the set of every path the session
  * had ever touched and matched every scoped rule against all of it — O(paths x rules)
- * per step, against a set that only grew. Claude Code resolves conditional rules for
- * the one file being accessed instead, and this does the same.
+ * per step, against a set that only grew. Resolving a conditional rule at the moment a
+ * file is touched is the only version of it that stays correct.
  *
  * Two properties matter and neither is visible from a render: that a fired rule STAYS
  * fired across a compaction, and that rendering does no path work at all.

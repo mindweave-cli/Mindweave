@@ -10,7 +10,7 @@
  * path set that only ever grew — so the cost of a rule the user set once climbed for as
  * long as the session lasted.
  *
- * It is now decided AT ACCESS, which is the shape Claude Code uses for the same feature
+ * It is now decided AT ACCESS, which is the only shape that stays correct
  * (`getManagedAndUserConditionalRules(targetPath, processedPaths)` resolves conditional
  * rules for the ONE file being touched, with a processed-set for dedup). When a path is
  * read or written we test it once, against only the rules that have not already fired,

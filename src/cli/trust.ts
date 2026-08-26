@@ -7,10 +7,10 @@
  * outside-the-workspace prompt — which exists precisely to catch a write somewhere the
  * user did not intend — can never fire, because nothing on that drive is outside it.
  *
- * Claude Code asks the same question on first open ("Is this a project you created or
- * one you trust?") and treats the home directory specially: trust is accepted for the
- * session and deliberately never written to disk. Same shape here, with drive and
- * filesystem roots joining home in that category, because they are broader still.
+ * Asking once per folder is the established shape for this, and the home directory is
+ * the case everyone treats specially: trust is accepted for the session and never
+ * written to disk. Drive and filesystem roots join home in that category here, because
+ * they are broader still.
  */
 import { homedir } from "node:os";
 import { join, parse, resolve, sep } from "node:path";
@@ -37,7 +37,7 @@ export function rootBreadth(cwd: string): Breadth {
  *
  * No for the broad ones. Agreeing to work in your home directory once should not quietly
  * make it a trusted workspace forever — the answer was about today's task, and the folder
- * covers everything you own. Claude Code makes the same call for the same case.
+ * covers everything you own.
  */
 export function trustPersists(breadth: Breadth): boolean {
   return breadth === "ordinary";

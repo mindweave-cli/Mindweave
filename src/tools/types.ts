@@ -96,7 +96,7 @@ export interface ToolResult {
    *
    * The other half is a call whose ARGUMENTS were malformed — a missing required field,
    * a value outside an enum, two options that cannot both be given. The model wrote the
-   * call wrong, is told exactly how, and rewrites it. Claude Code draws the same line
+   * call wrong, is told exactly how, and rewrites it. The line is drawn
    * from the other side: its schema validation collapses to a flat "Invalid tool
    * parameters" on screen while the model still gets the detail.
    *
@@ -342,7 +342,7 @@ export interface ToolContext {
    *
    * Scoped to a directory rather than granted once for everywhere, so a run that
    * legitimately writes next door asks once instead of per file — and a later write
-   * somewhere else entirely still asks. Same shape Claude Code uses for the equivalent
+   * somewhere else entirely still asks. It is the shape that matches what a person
    * grant. Never inherited by a sub-agent, for the same reason a Sentinel grant is not.
    */
   allowedOutsideDirs?: Set<string>;

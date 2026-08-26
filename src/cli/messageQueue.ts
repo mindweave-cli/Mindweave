@@ -18,8 +18,8 @@
  *    which corrupts the whole screen rather than clipping (see App's frameHeight
  *    note). Nothing stopped that.
  *
- * The shape here follows Claude Code's: ↑ or Esc pulls the WHOLE queue back into the
- * input as editable text, and the drain batches. Kept deliberately as pure functions
+ * The shape: ↑ or Esc pulls the WHOLE queue back into the input as editable text, and
+ * the drain batches. Kept deliberately as pure functions
  * over a plain array — the queue is small, always local to one App, and every rule in
  * it is worth a test.
  */

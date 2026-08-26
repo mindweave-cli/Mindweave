@@ -9,7 +9,8 @@
  * to the first tool.
  *
  * So the queue lives here, out of the component, where it can be driven directly by a
- * test. Claude Code queues its permission requests for the same reason.
+ * test. A permission request is state, not decoration, and state that only exists
+ * inside a rendered component cannot be verified without rendering it.
  *
  * Three rules, and all three are the point:
  *   - ONE AT A TIME. A request waits rather than replacing what is on screen.

@@ -129,7 +129,7 @@ export const readSymbolTool: Tool = {
     // DEDUP, the same contract read_file has had and this tool never did. Once a file
     // is in the working set, its content is rebuilt into the volatile tail on EVERY
     // turn — so re-sending a symbol body the model is already looking at pays for the
-    // same lines twice, every time. Measured across Claude Code, Cursor and Codex,
+    // same lines twice, every time. Measured across terminal coding agents,
     // repeated reads are ~42% of avoidable token spend, and this was our version of it:
     // a session re-read the same four functions over and over while all four sat in
     // <working_files>.

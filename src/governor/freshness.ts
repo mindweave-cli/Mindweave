@@ -6,10 +6,10 @@
  * that edit used to do nothing at all until the session was restarted — silently, with
  * the old rule still being enforced and nothing on screen to say so.
  *
- * Claude Code keeps its equivalents fresh two different ways, and both are here because
- * they answer different failure modes:
+ * Freshness is kept two different ways, and both are here because they answer
+ * different failure modes:
  *
- *   1. STAT FRESHNESS. Their global config is watched with `fs.watchFile`, re-read when
+ *   1. STAT FRESHNESS. A watched config is re-read when
  *      mtime moves, guarded so their own writes do not cause a re-read and so a
  *      concurrent write-through is never regressed to a stale snapshot. `stamp()` below
  *      is the same signal (mtime + size), sampled once per turn rather than by a
@@ -17,8 +17,8 @@
  *      so checking it when it is used costs one stat pass and needs no watcher
  *      lifecycle, no polling thread, and no cleanup on exit.
  *
- *   2. LIFECYCLE INVALIDATION. They drop the memoized memory files at exactly two
- *      moments — `/clear` and after a compaction (`resetGetMemoryFilesCache('compact')`).
+ *   2. LIFECYCLE INVALIDATION. A memoized snapshot has to be dropped at the moments that
+ *      rebuild everything around it: starting a fresh conversation, and after a compaction.
  *      A compaction rebuilds the prompt from scratch, so it is the natural point to also
  *      rebuild what the prompt is made of. The engine forces a reload there.
  *

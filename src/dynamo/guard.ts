@@ -17,8 +17,8 @@
  * one file edit turned the gate off for shell commands, sub-agents and writes as well,
  * for the rest of the session. Someone agreeing to an edit has agreed to an edit.
  *
- * Claude Code scopes the same option the same way — "don't ask again for {tool}
- * commands in {directory}" — and offers no blanket off-switch in the dialog at all.
+ * The scoped form is the useful one — "don't ask again for {tool} commands in
+ * {directory}" — and a blanket off-switch does not belong in the dialog at all.
  * Neither do we now: turning the gate off entirely is a mode change, and shift-tab is
  * where modes are chosen, deliberately and visibly.
  */

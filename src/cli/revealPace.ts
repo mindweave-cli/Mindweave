@@ -11,9 +11,9 @@
  * impression it was aiming for. That was always the one thing here no test could
  * settle, and the file said so: change it and re-run. It has now been run.
  *
- * Claude Code paces nothing at all. There is no reveal delay, no typewriter, no gap
- * between a block arriving and being painted, and it is the fastest-feeling terminal
- * agent there is. A tool that is quick should look quick.
+ * The terminal agents that feel fastest pace nothing at all: no reveal delay, no
+ * typewriter, no gap between a block arriving and being painted. A tool that is quick
+ * should look quick.
  *
  * The mechanism is kept because it still SERIALISES: blocks reveal in order, one pump
  * at a time, and Esc still flushes. Only the wait is gone.

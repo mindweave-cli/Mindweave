@@ -7,7 +7,7 @@
  * costs them the ones that matter. So those results are marked `quiet`: the model still
  * receives the full error, the transcript still records it, and the UI drops the row.
  *
- * Claude Code draws the same line from the other side — its schema validation collapses
+ * The same line is drawn from the other side by schema validation, which collapses
  * to a flat "Invalid tool parameters" on screen while the model gets the detail and a
  * schema hint. Their own comment beside it: the model is not great at generating valid
  * input. It is routine, not an incident.

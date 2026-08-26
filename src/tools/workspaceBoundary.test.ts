@@ -7,7 +7,7 @@
  * from a stale assumption about where it is. Measured before this existed: a write to a
  * folder outside every root succeeded with no prompt at all.
  *
- * Claude Code draws the same line — its auto-accept mode allows a write only when the
+ * The line is drawn where it is because an auto-accept mode allows a write only when the
  * path is inside an allowed working directory.
  */
 import { test } from "node:test";

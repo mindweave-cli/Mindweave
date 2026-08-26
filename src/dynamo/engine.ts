@@ -740,9 +740,9 @@ export function callIsConcurrencySafe(
  * Two triggers, and they cover different failures. The STAT check catches a person
  * editing a rule in their editor mid-session — the common case, and the one that used
  * to do nothing at all until restart. The FORCED reload runs after a compaction, which
- * is where Claude Code drops its own memoized memory files: the prompt is being rebuilt
- * from scratch anyway, so it is the natural moment to rebuild what the prompt is made
- * of, and it costs one directory read on an operation that just made a model call.
+ * is the natural moment for it: the prompt is being rebuilt from scratch anyway, so it
+ * is the point to rebuild what the prompt is made of, and it costs one directory read
+ * on an operation that just made a model call.
  *
  * Degrade-safe. Governance is a convenience layer over files that may be mid-write, and
  * an unreadable rules directory must not take the turn down with it — on any failure the
@@ -1302,7 +1302,7 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       //
       // It is a real call to make, not a hypothetical: the tool list the model is
       // holding was built at the start of the step, so the step right after approval
-      // still has exit_plan in it. Claude Code guards the identical case.
+      // still has exit_plan in it.
       if (tool.planOnly && !session.toolContext.planMode) {
         return {
           call,
@@ -1504,9 +1504,8 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       // A session file is rewritten whole on every persist, so without this the very
       // next save would overwrite the planning transcript with the one message that
       // replaced it — and the pointer in that message would name a file holding nothing
-      // but the pointer. Claude Code regenerates its session id at the same moment and
-      // for the same reason; it captures the old path BEFORE the change precisely
-      // because the id is about to move.
+      // but the pointer. The id has to move at exactly this moment, which is why the old
+      // path is captured BEFORE the change.
       const priorPath = transcriptPath(session.cwd, session.id);
       session.id = randomUUID();
       session.toolContext.sessionId = session.id;
@@ -2145,10 +2144,9 @@ async function finishCompaction(session: Session, options: RespondOptions, befor
 
   await restoreAfterCompaction(session);
 
-  // Re-read the governor unconditionally, the way Claude Code drops its memoized memory
-  // files after a compaction. The prompt is being rebuilt from scratch here, so this is
-  // the natural moment to rebuild what it is made of — and it is the one path that does
-  // not depend on the stat check being right about anything.
+  // Re-read the governor unconditionally here. The prompt is being rebuilt from scratch
+  // at this point, so it is the natural moment to rebuild what it is made of — and it is
+  // the one path that does not depend on the stat check being right about anything.
   await refreshGovernance(session, true);
 
   // Report it. Compaction is the one context operation worth showing: it REWRITES the
