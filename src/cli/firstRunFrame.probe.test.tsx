@@ -18,7 +18,7 @@ function frame(rows: number, node: React.ReactElement): string[] {
     write: (s: string) => void out.push(s),
     columns: 84, rows, on: () => {}, off: () => {}, removeListener: () => {},
   } as unknown as NodeJS.WriteStream;
-  const app = render(node, { stdout: stream, patchConsole: false });
+  const app = render(node, { stdout: stream, patchConsole: false, interactive: true });
   app.unmount();
   return out.join("").split(String.fromCharCode(10));
 }

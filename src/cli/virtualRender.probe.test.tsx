@@ -37,7 +37,7 @@ function rowsOf(node: React.ReactNode): string[] {
   const stdout = new FakeStdout();
   const stdin = new EventEmitter() as unknown as NodeJS.ReadStream;
   (stdin as unknown as { isTTY: boolean }).isTTY = false;
-  const instance = render(<>{node}</>, { stdout: stdout as never, stdin, patchConsole: false, debug: true });
+  const instance = render(<>{node}</>, { stdout: stdout as never, stdin, patchConsole: false, interactive: true, debug: true });
   // Read BEFORE unmount, not after — Ink 7 writes a final blank frame on unmount,
   // which would otherwise be mistaken for the real last frame.
   const last = stdout.frames[stdout.frames.length - 1] ?? "";

@@ -46,6 +46,7 @@ async function frameOf(element: React.ReactElement, needle: RegExp): Promise<str
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin,
     patchConsole: false,
+    interactive: true,
   });
   // WAIT for the frame rather than sleeping a fixed amount. A fixed sleep encodes the
   // speed of the machine that wrote it: 60ms passed here for weeks and the same render

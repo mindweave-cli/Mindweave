@@ -130,7 +130,7 @@ async function keystrokeMs(blockCount: number, keys = 40, maxFps?: number): Prom
         <PromptInput onSubmit={() => {}} width={100} />
       </Box>
     </Box>,
-    { stdout: stdout as never, stdin: stdin as never, patchConsole: false, ...(maxFps ? { maxFps } : {}) },
+    { stdout: stdout as never, stdin: stdin as never, patchConsole: false, interactive: true, ...(maxFps ? { maxFps } : {}) },
   );
 
   const before = stdout.writes;

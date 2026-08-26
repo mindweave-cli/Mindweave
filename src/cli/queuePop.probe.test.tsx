@@ -105,6 +105,7 @@ function mount(opts: { queue: string[]; history?: string[]; declineEscape?: bool
       stdin: stdin as unknown as NodeJS.ReadStream,
       stdout: stdout as unknown as NodeJS.WriteStream,
       patchConsole: false,
+      interactive: true,
     },
   );
   h.done = () => app.unmount();

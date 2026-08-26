@@ -67,6 +67,7 @@ async function beats(atMs: number[]): Promise<string[]> {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin: new FakeStdin() as unknown as NodeJS.ReadStream,
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   const seen: string[] = [];

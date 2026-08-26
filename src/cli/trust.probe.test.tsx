@@ -51,7 +51,7 @@ function frame(cwd: string) {
   const app = render(
     <TrustGate rows={30} cwd={cwd} breadth={b} warning={breadthWarning(b, cwd)} persists={trustPersists(b)}
       version=" v1.9.9" docsUrl="mindweave.dev/docs" onTrust={() => {}} onQuit={() => {}} active={false} />,
-    { stdout: stream, patchConsole: false },
+    { stdout: stream, patchConsole: false, interactive: true },
   );
   app.unmount();
   // Whitespace collapsed: rendered text wraps at the terminal width, so a sentence the

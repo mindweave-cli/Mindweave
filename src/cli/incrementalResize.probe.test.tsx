@@ -78,6 +78,7 @@ test("shrinking the terminal mid-render leaves no stale content, with incrementa
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin,
     patchConsole: false,
+    interactive: true,
     incrementalRendering: true,
   });
 

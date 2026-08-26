@@ -14,7 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 const HOME = mkdtempSync(join(tmpdir(), "mindweave-clear-"));
 process.env.USERPROFILE = HOME;
@@ -117,4 +117,20 @@ test("what the model was told does NOT survive", async () => {
   assert.deepEqual(after.toolContext.todos, [], "a task list for work the model can no longer see carried over");
 
   await Promise.all([before, after].map((s) => stop(s)));
+});
+
+test("the primary root is recognised even in a different spelling", async () => {
+  // The CI failure this covers: its temp directory canonicalises to a different string
+  // from the path handed in, so a raw comparison did not recognise the primary root and
+  // the workspace came back holding the same folder twice. Windows offers several
+  // spellings of one path — 8.3 short names, drive-letter case, symlinked temp dirs —
+  // and any of them reaching /clear would have done the same thing.
+  const { root } = project();
+  const s = await createSession(root, [root + sep, root, join(root, ".")]);
+  assert.deepEqual(
+    rootsOf(s.toolContext).length,
+    1,
+    `the same folder was added again in another spelling: ${rootsOf(s.toolContext).join(", ")}`,
+  );
+  await stop(s);
 });

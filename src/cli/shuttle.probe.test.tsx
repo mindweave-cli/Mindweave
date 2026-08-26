@@ -56,6 +56,7 @@ async function rows(busy: boolean, atMs: number[]): Promise<string[]> {
       stdout: stdout as unknown as NodeJS.WriteStream,
       stdin: new FakeStdin() as unknown as NodeJS.ReadStream,
       patchConsole: false,
+      interactive: true,
       debug: true,
     },
   );
@@ -123,6 +124,7 @@ test("the track never pushes the header past its width", async () => {
       stdout: stdout as unknown as NodeJS.WriteStream,
       stdin: new FakeStdin() as unknown as NodeJS.ReadStream,
       patchConsole: false,
+      interactive: true,
       debug: true,
     });
     await new Promise((r) => setTimeout(r, 80));

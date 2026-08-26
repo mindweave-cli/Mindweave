@@ -45,6 +45,7 @@ function rowsOf(block: Block): string[] {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin,
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   // Read BEFORE unmount, not after — Ink 7 writes a final blank frame on unmount,

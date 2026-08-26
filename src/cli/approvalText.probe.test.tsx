@@ -30,7 +30,7 @@ function fakeStream() {
 
 function frame(node: React.ReactElement): string {
   const { frames, stream } = fakeStream();
-  const app = render(node, { stdout: stream, patchConsole: false });
+  const app = render(node, { stdout: stream, patchConsole: false, interactive: true });
   app.unmount();
   return frames.join("");
 }

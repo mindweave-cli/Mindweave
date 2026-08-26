@@ -29,7 +29,7 @@ function frame(node: React.ReactElement): string {
     off: () => {},
     removeListener: () => {},
   } as unknown as NodeJS.WriteStream;
-  const app = render(node, { stdout: stream, patchConsole: false });
+  const app = render(node, { stdout: stream, patchConsole: false, interactive: true });
   app.unmount();
   return out.join("");
 }

@@ -116,7 +116,7 @@ async function msPerReRender(blocks: Block[], frames: number): Promise<number> {
     );
   }
 
-  const instance = render(<Harness />, { stdout: stdout as never, stdin, patchConsole: false, debug: true });
+  const instance = render(<Harness />, { stdout: stdout as never, stdin, patchConsole: false, interactive: true, debug: true });
   await finished;
   instance.unmount();
 

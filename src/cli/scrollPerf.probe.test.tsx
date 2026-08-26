@@ -129,7 +129,7 @@ async function scrollMs(blockCount: number, opts: { maxFps: number; virtual: boo
         scroller.set = s;
       }}
     />,
-    { stdout: stdout as never, patchConsole: false, maxFps: opts.maxFps },
+    { stdout: stdout as never, patchConsole: false, interactive: true, maxFps: opts.maxFps },
   );
 
   // Let the mount settle so `onReady` has run and the first frames are past.

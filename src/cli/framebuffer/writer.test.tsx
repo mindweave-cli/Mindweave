@@ -74,6 +74,7 @@ async function bothScreens(makeNode: (tick: number) => React.ReactElement, steps
       stdout: plain as unknown as NodeJS.WriteStream,
       stdin: fakeStdin(),
       patchConsole: false,
+      interactive: true,
       debug: true,
     });
     app.unmount();
@@ -94,6 +95,7 @@ async function bothScreens(makeNode: (tick: number) => React.ReactElement, steps
       stdout: fb as unknown as NodeJS.WriteStream,
       stdin: fakeStdin(),
       patchConsole: false,
+      interactive: true,
       debug: true,
     });
     app.unmount();
@@ -199,6 +201,7 @@ test("an unchanged re-render puts ZERO bytes on the terminal", async () => {
     stdout: fb as unknown as NodeJS.WriteStream,
     stdin: fakeStdin(),
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   first.unmount();
@@ -208,6 +211,7 @@ test("an unchanged re-render puts ZERO bytes on the terminal", async () => {
     stdout: fb as unknown as NodeJS.WriteStream,
     stdin: fakeStdin(),
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   second.unmount();
@@ -242,7 +246,7 @@ test("one changed character costs a fraction of what Ink would have written", as
           <Text key={i}>{i === 4 && tick === 1 ? "row 4: CHANGED content here          " : r}</Text>
         ))}
       </Box>,
-      { stdout: counting as unknown as NodeJS.WriteStream, stdin: fakeStdin(), patchConsole: false, debug: true },
+      { stdout: counting as unknown as NodeJS.WriteStream, stdin: fakeStdin(), patchConsole: false, interactive: true, debug: true },
     );
     app.unmount();
   }
@@ -270,6 +274,7 @@ test("a resize repaints in full rather than diffing against a re-wrapped screen"
     stdout: fb as unknown as NodeJS.WriteStream,
     stdin: fakeStdin(),
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   first.unmount();
@@ -281,6 +286,7 @@ test("a resize repaints in full rather than diffing against a re-wrapped screen"
     stdout: fb as unknown as NodeJS.WriteStream,
     stdin: fakeStdin(),
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   second.unmount();
@@ -295,6 +301,7 @@ test("a resize repaints in full rather than diffing against a re-wrapped screen"
     stdout: plain as unknown as NodeJS.WriteStream,
     stdin: fakeStdin(),
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   ref.unmount();
@@ -378,6 +385,7 @@ test("a dynamic component driven by state matches Ink throughout", async () => {
     stdout: fb as unknown as NodeJS.WriteStream,
     stdin: fakeStdin(),
     patchConsole: false,
+    interactive: true,
     debug: true,
   });
   await done;
@@ -391,7 +399,7 @@ test("a dynamic component driven by state matches Ink throughout", async () => {
       <Text>{"=".repeat(STEPS + 1)}</Text>
       <Text dimColor>stable footer</Text>
     </Box>,
-    { stdout: plain as unknown as NodeJS.WriteStream, stdin: fakeStdin(), patchConsole: false, debug: true },
+    { stdout: plain as unknown as NodeJS.WriteStream, stdin: fakeStdin(), patchConsole: false, interactive: true, debug: true },
   );
   ref.unmount();
   const intended = new Screen(W, H);

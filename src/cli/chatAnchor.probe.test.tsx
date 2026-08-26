@@ -77,7 +77,7 @@ function rowsOf(lines: number, frameHeight: number, chatRows: number): string[] 
         </Box>
       </Box>
     </Box>,
-    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, debug: true },
+    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, interactive: true, debug: true },
   );
   // Read BEFORE unmount, not after — Ink 7 writes a final blank frame on unmount,
   // which would otherwise be mistaken for the real last frame.
@@ -203,7 +203,7 @@ function renderProse(columns: number): number {
   const text = Array.from({ length: 40 }, (_, i) => `word${i}`).join(" ");
   const instance = render(
     <BlockView block={{ kind: "assistant", id: 1, done: true, text }} columns={columns} />,
-    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false },
+    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, interactive: true },
   );
   instance.unmount();
   const frame = stdout.frames.at(-1) ?? "";
@@ -241,7 +241,7 @@ function rowsOfNoStatus(lines: number, frameHeight: number, chatRows: number): s
         <Box flexShrink={0}><Text>TIPLINE</Text></Box>
       </Box>
     </Box>,
-    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, debug: true },
+    { stdout: stdout as unknown as NodeJS.WriteStream, stdin, patchConsole: false, interactive: true, debug: true },
   );
   const last = stdout.frames[stdout.frames.length - 1] ?? "";
   instance.unmount();

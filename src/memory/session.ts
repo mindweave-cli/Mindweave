@@ -267,7 +267,18 @@ export async function createSession(
     listSessions(cwd),
   ]);
   const id = randomUUID();
-  const extra = carryRoots.filter((r) => r !== cwd && existsSync(r));
+  // Canonicalised BEFORE comparing. `cwd` has already been through canonicalRoot, so a
+  // raw string comparison misses the primary root arriving in another spelling — an 8.3
+  // short path, a symlinked temp directory, different drive-letter case — and adds it a
+  // second time. CI caught exactly that: its temp directory canonicalises differently
+  // from the path handed in, so the workspace came back with the same folder twice.
+  const carried = await Promise.all(carryRoots.map((r) => canonicalRoot(r)));
+  const seenRoot = new Set([cwd]);
+  const extra = carried.filter((r) => {
+    if (seenRoot.has(r) || !existsSync(r)) return false;
+    seenRoot.add(r);
+    return true;
+  });
   const toolContext = freshToolContext(cwd, governance, [cwd, ...extra]);
   // So the session tools can exclude this conversation from "your past sessions".
   toolContext.sessionId = id;
