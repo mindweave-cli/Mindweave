@@ -145,3 +145,6 @@ vite.config.ts.timestamp-*
 # Per-session agent state written into the user's own project (approved plan,
 # and anything else the session persists). Runtime state, not source.
 .mindweave/
+
+# Draft announcement, kept outside the repository until it is published.
+ANNOUNCEMENT.md
