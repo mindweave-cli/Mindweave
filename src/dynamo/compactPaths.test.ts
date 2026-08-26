@@ -79,11 +79,13 @@ test("a compaction does not report the cache break it caused itself", async () =
   assert.ok(!activity.some((line) => /cache/i.test(line)), `no cache warning, got: ${activity.join(" | ")}`);
 });
 
-test("a successful compaction re-arms the approach warning", async () => {
-  const s = session({ compactWarned: true, compactFailures: 2 });
-  await compactNow(s);
-  assert.equal(s.compactWarned, false, "the next approach to the bar warns again");
-  assert.equal(s.compactFailures, 0, "a clean compaction resets the breaker");
+test("a successful compaction resets the failure breaker", () => {
+  // Without this a session that failed twice early stays two-thirds of the way to
+  // giving up for the rest of its life.
+  const s = session({ compactFailures: 2 });
+  return compactNow(s).then(() => {
+    assert.equal(s.compactFailures, 0, "a clean compaction did not reset the breaker");
+  });
 });
 
 test("compaction is reported to the caller", async () => {
@@ -140,14 +142,6 @@ test("the circuit breaker says so when it gives up", () => {
   // a message meant to be noticed becomes noise the user filters out.
   assert.match(guard, /if \(!session\.compactGaveUpTold\)/, "guarded so it fires once");
   assert.match(guard, /session\.compactGaveUpTold = true/, "and latched, or it fires every step");
-});
-
-test("the approach warning is model-anchored and fires once", () => {
-  const body = engineSource.match(/async function maybeCompact\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
-  assert.ok(body, "maybeCompact not found — did it get renamed?");
-  assert.match(body, /warnBarFor\(autoBar\)/, "the warning bar follows the model, not a fixed number");
-  assert.match(body, /session\.compactWarned = true/, "latched, or it repeats every step");
-  assert.match(body, /!session\.compactWarned/, "and guarded on the latch");
 });
 
 test("both ways a provider refuses an over-long request share one remedy", () => {

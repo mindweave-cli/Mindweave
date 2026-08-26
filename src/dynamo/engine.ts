@@ -61,7 +61,6 @@ import {
 import { loadPlanArtifact, completePlanArtifact, renderPlanBlock, planDivergenceStop } from "./planArtifact.js";
 import {
   autoCompactThreshold,
-  warnBarFor,
   microCompactThreshold,
   cacheLikelyCold,
   clearIsWorthIt,
@@ -1008,13 +1007,6 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     // Say that a restore point exists. It was made silently, so `/undo` was a feature
     // you had to already know about — and the moment to learn it is the moment there is
     // something to undo, not after you have lost it.
-    const sealed = session.toolContext.checkpoints?.list()[0];
-    if (sealed && (session.toolContext.checkpoints?.list().length ?? 0) > before) {
-      options.onActivity?.(
-        `Checkpoint sealed · ${sealed.files} file${sealed.files === 1 ? "" : "s"} · /undo restores it`,
-        { context: true },
-      );
-    }
   }
 
   // The turn's model↔tool loop. Kept as a closure so the try/finally above owns
@@ -1076,9 +1068,6 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     const print = prefixPrint(session.modelConfig.model, request.system, request.tools ?? [], request.messages);
     const broke = session.prefixPrint ? diffPrefix(session.prefixPrint, print) : null;
     session.prefixPrint = print;
-    if (broke) {
-      options.onActivity?.(`prompt cache reset — ${broke.detail}`, { context: true });
-    }
 
     // Shed the oldest whole rounds and retry, ONCE per turn. Shared by both ways a
     // provider can refuse an over-long conversation, because the remedy is identical
@@ -1956,17 +1945,6 @@ async function maybeCompact(session: Session, options: RespondOptions): Promise<
       // Silent by design — trimming stale context is background machinery.
     }
   }
-  // Say it is coming, once, before it happens. Compaction rewrites the conversation,
-  // and arriving with no notice is how a user ends up wondering why the model forgot
-  // the middle of their session. Cleared by a successful compaction so the next
-  // approach warns again.
-  if (!session.compactWarned && used() >= warnBarFor(autoBar) && used() < autoBar) {
-    session.compactWarned = true;
-    options.onActivity?.(
-      `context is ${Math.round((used() / autoBar) * 100)}% of the way to a compaction`,
-      { context: true },
-    );
-  }
 
   if (used() < autoBar) return;
 
@@ -2120,7 +2098,6 @@ async function autocompact(session: Session, options: RespondOptions): Promise<v
  */
 async function finishCompaction(session: Session, options: RespondOptions, before: number): Promise<void> {
   session.compactFailures = 0; // a clean compaction resets the breaker
-  session.compactWarned = false; // and the approach warning can fire again next time
 
   await restoreAfterCompaction(session);
 

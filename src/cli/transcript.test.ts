@@ -437,26 +437,39 @@ test("the budget is the stated number of sentences", () => {
   assert.equal(trimNarration(four).split(/(?<=[.!?])\s+/).length, NARRATION_LINES);
 });
 
-test("a turn shows ONE line of narration, not one per tool call", () => {
-  // Measured on a real session AFTER the two-sentence cut was in: 24 prose blocks for
-  // 23 tool calls, and the same identifiers coming round in four of them. Short blocks
-  // are still a wall when there are two dozen of them. The tool rows already show what
-  // is happening; a sentence in front of each adds nothing.
+test("the model is allowed to talk between tool calls, on every step", () => {
+  // This was once capped at ONE block per turn, to stop a 23-call turn printing 24
+  // prose blocks. The cap could not tell a repetitive model from a quiet one, so
+  // against a sparing model it only guaranteed silence: a long turn showed the user
+  // nothing at all between the request and the answer, and the tool looked hung.
   const s = run([
     { type: "user", text: "go" },
     { type: "token", delta: "Let me read the backend pieces." },
     { type: "toolStart", toolId: "1", name: "read_file", arg: "a.ts", action: "read", group: false },
     { type: "toolEnd", toolId: "1", ok: true },
-    { type: "token", delta: "I have everything I need. Now the settings." },
+    { type: "token", delta: "That was not it. Checking the settings." },
     { type: "toolStart", toolId: "2", name: "read_file", arg: "b.ts", action: "read", group: false },
     { type: "toolEnd", toolId: "2", ok: true },
-    { type: "token", delta: "Still need one more thing." },
-    { type: "toolStart", toolId: "3", name: "read_file", arg: "c.ts", action: "read", group: false },
-    { type: "toolEnd", toolId: "3", ok: true },
   ]);
   const narration = [...s.committed, ...s.tail].filter((b) => b.kind === "assistant");
-  assert.equal(narration.length, 1, "one line per turn, however many tool calls it takes");
-  assert.match((narration[0] as { text: string }).text, /read the backend pieces/, "the FIRST line is the one kept");
+  assert.equal(narration.length, 2, "the model went quiet after its first line");
+  assert.match((narration[1] as { text: string }).text, /Checking the settings/);
+});
+
+test("each line of narration is still bounded, so it cannot become a wall", () => {
+  // Removing the per-turn cap does not license a paragraph per step. The per-block
+  // trim is what keeps a long turn readable.
+  const s = run([
+    { type: "user", text: "go" },
+    { type: "token", delta: "One. Two. Three. Four. Five." },
+    { type: "toolStart", toolId: "1", name: "read_file", arg: "a.ts", action: "read", group: false },
+    { type: "toolEnd", toolId: "1", ok: true },
+  ]);
+  const narration = [...s.committed, ...s.tail].filter((b) => b.kind === "assistant");
+  assert.equal(narration.length, 1);
+  const text = (narration[0] as { text: string }).text;
+  assert.match(text, /One. Two./, "the opening sentences were not kept");
+  assert.ok(!text.includes("Five"), `narration was not trimmed: ${text}`);
 });
 
 test("the final reply is never suppressed, however much narration came before", () => {

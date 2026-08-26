@@ -245,18 +245,16 @@ function sealAssistant(s: TranscriptState, asReply: boolean): TranscriptState {
   const clean = sanitizeStreamText(s.raw);
 
   // `asReply` is false exactly when a tool call follows this text, so this is narration
-  // between steps. ONE line of it per TURN, not per call.
+  // between steps. It is TRIMMED to a couple of sentences and otherwise left alone.
   //
-  // Trimming each block to two sentences fixed the block and not the wall: a turn that
-  // took 23 tool calls still printed 24 blocks, and the same names came round in four
-  // of them ("I have everything I need", then more exploring, then it again). The tool
-  // rows are the progress indicator — they show what is happening, in order, as it
-  // happens. A sentence in front of each one adds nothing the user did not just watch.
-  //
-  // Nothing is lost that matters: anything worth saying survives into the final reply,
-  // which is never suppressed, and the model still receives its own full text.
-  const suppressed = !asReply && s.narrated;
-  const text = asReply ? clean : suppressed ? "" : trimNarration(clean);
+  // It used to be capped at one block per TURN, which was aimed at a real problem: a
+  // 23-call turn printed 24 blocks and said the same thing in four of them. But the cap
+  // is the wrong instrument, because it cannot tell a repetitive model from a quiet one.
+  // Against a model that narrates sparingly it does nothing but guarantee silence for the
+  // rest of a long turn, which is exactly how the tool came to look like it had stopped
+  // responding. The per-block trim already bounds the wall; the cap only bounded the
+  // conversation.
+  const text = asReply ? clean : trimNarration(clean);
 
   let next: TranscriptState = { ...s, openAsstId: null, raw: "" };
   if (text) next = patchTail(next, id, { text, done: true });

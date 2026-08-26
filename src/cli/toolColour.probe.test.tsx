@@ -127,7 +127,7 @@ test("a shell command is distinguishable from its output", async () => {
   // else, which loses against a screenful of equally plain machine text.
   const frame = await frameOf(
     <ToolLine
-      name="Executed shell command"
+      name="Run"
       status="ok"
       action="run"
       detail={"$ npm run build\nsome output\n✓ Exit code 0"}

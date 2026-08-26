@@ -29,7 +29,7 @@ export const ACTIVE_FORM: Record<string, string> = {
   Search: "Searching",
   Glob: "Finding",
   List: "Listing",
-  "Executed shell command": "Executing shell command",
+  Run: "Running",
   Map: "Mapping",
   Fetch: "Fetching",
   Shell: "Checking",

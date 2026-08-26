@@ -418,16 +418,13 @@ export function App() {
     setBgTick((t) => t + 1);
     const mgr = session.current?.toolContext.backgroundShells;
     for (const { info: sh, kind } of mgr?.takeUiEvents() ?? []) {
-      if (kind === "ready") {
-        addTool(`shell #${sh.id} (${clipCmd(sh.command)}) is up`);
-        continue;
-      }
-      const verb =
-        sh.status === "killed"
-          ? sh.stoppedBy === "user"
-            ? "stopped by you"
-            : "killed"
-          : `finished — exit ${sh.exitCode}`;
+      // A shell reaching "ready" says nothing the tool row did not already say when it
+      // backgrounded the command, and being killed at the user's request is not news
+      // either — they asked for it. A command that DIED ON ITS OWN is news, because
+      // nothing else on screen would tell them their dev server had fallen over.
+      if (kind === "ready") continue;
+      if (sh.status === "killed" && sh.stoppedBy === "user") continue;
+      const verb = sh.status === "killed" ? "killed" : `finished — exit ${sh.exitCode}`;
       addTool(`shell #${sh.id} (${clipCmd(sh.command)}) ${verb}`, { error: sh.status !== "killed" && sh.exitCode !== 0 });
     }
   }
@@ -619,7 +616,9 @@ export function App() {
         // never get released. Nudging pump() here costs nothing when there's
         // nothing held (it's a no-op on an empty queue) and closes that gap.
         pump();
-        note("stopped.");
+        // No "stopped." line. The spinner stops, the turn ends and the prompt comes
+        // back — the screen already answers the keypress, and saying it again is one
+        // more line of the app talking about itself.
       }
     },
     { isActive: busy && overlay === null },

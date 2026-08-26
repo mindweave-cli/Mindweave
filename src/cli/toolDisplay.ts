@@ -14,7 +14,7 @@ const DISPLAY_NAME: Record<string, string> = {
   edit: "Update",
   write_file: "Write",
   search: "Search",
-  run_command: "Executed shell command",
+  run_command: "Run",
   outline: "Map",
   definition: "Map",
   references: "Map",
@@ -204,17 +204,23 @@ export function toolDisplay(name: string, args: Record<string, unknown>): ToolDi
     return { name: display, arg: str(args.pattern) || str(args.files) || str(args.path) || undefined, kind };
   }
   if (name === "run_command") {
-    // NO arg: the command goes on its own row inside the block (see ToolLine's
-    // ShellLines), where it is never truncated. As a header argument it was clipped
-    // to 48 characters, and a real command line is longer than that far more often
-    // than not, so the part that said what it did was the part that got cut.
+    // The command goes in the HEADER, like every other row's subject: `Run(npm test)`
+    // beside `Write(app.ts)` and `Read(index.ts)`. It used to be a bare title —
+    // "Executed shell command" — with the command on a `$` row below it, which read as
+    // a sentence in a column of verb-noun names and took three rows to say what the
+    // others say in one.
     //
-    // Only when the model asked for one. The default is invisible on purpose — a
-    // marker on every command would say nothing, and this one exists precisely to
-    // explain a row that is allowed to take longer than usual.
+    // Passed WHOLE, not clipped. The old 48-character clip here is what forced the
+    // command onto its own row in the first place; ToolLine fits the header to the
+    // real terminal width and only trims when it genuinely does not fit, and the `$`
+    // row comes back for exactly that case.
+    //
+    // The timeout marker appears only when the model asked for one. A marker on every
+    // command would say nothing; this exists to explain a row allowed to take longer.
     const t = typeof args.timeout === "number" && Number.isFinite(args.timeout) ? args.timeout : undefined;
     return {
       name: display,
+      arg: str(args.command) || undefined,
       kind,
       ...(t ? { meta: `[Timeout: ${Math.round(t / 1000)}s]` } : {}),
     };

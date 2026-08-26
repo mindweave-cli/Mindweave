@@ -472,14 +472,13 @@ function backgroundedResult(id: number, command: string, lead: string, notify: N
           `output; use kill_shell(${id}) to stop it.`;
   return {
     output: `${lead}. ${tail}`,
-    summary: `bg shell #${id}: ${clip(command)}`,
     // UI-only, never sent to the model (`tail` above already told IT the real
-    // notification policy) — just the command itself and which shell it landed
-    // in, the same "$ command" convention run_command's own foreground detail
-    // uses. Previously absent entirely, so a backgrounded command's row showed
-    // nothing under it at all.
-    detail: outputDetail(`$ ${command}\nBackgrounded as shell #${id}`),
-    detailKind: "shell" as const,
+    // notification policy). A backgrounded command has produced NO output yet, so
+    // there is nothing to put on the output rail — which is what this used to do,
+    // rendering Mindweave's own note as if the command had printed it. It is a
+    // one-line verdict on the call, which is what the ⎿ branch is for, and it now
+    // reads the same way a write's "whole file · 19 lines" does.
+    summary: `Backgrounded as shell #${id}`,
   };
 }
 

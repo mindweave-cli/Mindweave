@@ -74,7 +74,7 @@ export function ToolLine({ name, arg, status, action, summary, detail, detailKin
       </Box>
       {status !== "running" && branchLines.length > 0 ? (
         detailKind === "shell" ? (
-          <ShellLines lines={branchLines} columns={columns} errored={errored} />
+          <ShellLines lines={branchLines} columns={columns} errored={errored} headerHasCommand={!!arg && arg === shownArg} />
         ) : (
           <BranchLines lines={branchLines} columns={columns} errored={errored} diff={detailKind === "diff"} />
         )
@@ -124,27 +124,46 @@ function BranchLines({
 }
 
 /**
- * A shell command's block: the command, then its output on a rail, then the outcome.
+ * A shell command's block: its output on a rail, then the outcome.
  *
- *   ● Executed shell command
- *       $ npm run build
+ *   ● Run(npm run build)
  *       │ > tsc && vite build
  *       ✓ Exit code 0
  *
- * The command gets its own row so it is never truncated — inline in the header it was
- * cut at 48 characters, which for a real command line meant losing the half that said
- * what it did. Output sits on a dim rail so it reads as quoted machine output rather
- * than as something Mindweave said, and the outcome hangs off the rail because it is a
- * verdict on the command, not more of its output.
+ * The command itself lives in the HEADER, like every other row's subject. It used to
+ * sit on its own `$` row under a bare "Executed shell command" title, because as a
+ * header argument it was clipped to 48 characters and a real command line is longer
+ * than that more often than not — so the half that said what it did was the half that
+ * got cut. The clip is gone: the header is fitted to the real terminal width, and the
+ * `$` row comes back only when even that could not show the command whole.
  *
- * The three zones are told apart by the prefixes the tool wrote (`$ ` and `✓`/`✖`), the
+ * Output sits on a dim rail so it reads as quoted machine output rather than as
+ * something Mindweave said, and the outcome hangs off the rail because it is a verdict
+ * on the command, not more of its output. A command with NO output yet (one that was
+ * backgrounded) has no rail at all — it reports through the ordinary ⎿ branch, the way
+ * a write reports "whole file · 19 lines".
+ *
+ * The zones are told apart by the prefixes the tool wrote (`$ ` and `✓`/`✖`), the
  * same convention the diff block uses for `+ `/`- `.
  */
-function ShellLines({ lines, columns, errored }: { lines: string[]; columns: number; errored: boolean }) {
+function ShellLines({
+  lines,
+  columns,
+  errored,
+  headerHasCommand,
+}: {
+  lines: string[];
+  columns: number;
+  errored: boolean;
+  /** The header already shows the command in full, so the `$` row would repeat it. */
+  headerHasCommand: boolean;
+}) {
   const content = Math.max(8, columns - BRANCH_INDENT - 2);
+  // Only when the header had to trim it away. A command that fits is said once.
+  const shown = headerHasCommand ? lines.filter((l) => !l.startsWith("$ ")) : lines;
   return (
     <Box flexDirection="column">
-      {lines.map((line, i) => {
+      {shown.map((line, i) => {
         const command = line.startsWith("$ ");
         const outcome = line.startsWith("✓") || line.startsWith("✖");
         const railed = !command && !outcome;

@@ -294,9 +294,6 @@ export interface Session {
    * entry. See `sessionMemoryCompact.ts`.
    */
   sessionMemoryEntries?: number;
-  /** Whether the user has been warned that context is close to the compaction bar.
-   *  Cleared by a successful compaction, so the warning can fire again next time. */
-  compactWarned?: boolean;
   /** Whether the user has been told autocompact gave up for this session. Told once. */
   compactGaveUpTold?: boolean;
   /**
