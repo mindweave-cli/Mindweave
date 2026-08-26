@@ -66,7 +66,7 @@ test("the markup tier is isolated too — it had no guard of any kind before", {
  * it. That premise is a fact about V8, not about this code, and it does not hold
  * everywhere: Node 22 cannot compile the OCaml grammar inside an 8 MB heap and dies,
  * which is the condition being contained, while Node 20 fits it and returns a result.
- * CI found that, one runtime green and the other red on the same commit.
+ * The same commit therefore passes on one runtime and fails on the other.
  *
  * Where the crash does not happen there is nothing to contain, and asserting the
  * containment anyway tests the runtime rather than the code. So the premise is checked
