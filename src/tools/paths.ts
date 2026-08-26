@@ -23,8 +23,9 @@ import type { ToolContext } from "./types.js";
  *
  * This is not exotic: Windows generates a short name for any component over eight
  * characters, so it happens to every user whose account name is longer than that.
- * A CI runner (`runneradmin`) hit it immediately while a developer account (`niman`)
- * never could, which is exactly the kind of difference this function exists to erase.
+ * An eleven-character account name such as a CI runner's `runneradmin` hits it on the
+ * first path it builds, while a short one never can — which is exactly the kind of
+ * difference between two machines that this function exists to erase.
  *
  * There is no `.native` on the promises API, so the callback form is promisified.
  */
