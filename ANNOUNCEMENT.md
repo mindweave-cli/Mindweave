@@ -56,6 +56,21 @@ error rows, and skimming past them is how you miss the ones that count. Those co
 are now silent. Real news stays loud: a command that failed, a write that was refused, a
 path that does not exist.
 
+**Commands take their arguments, and two new ones.** `/model` and `/think` accept
+the choice inline instead of opening a picker and discarding what you typed, and
+`/compact` takes a focus for the summary. A near miss is refused with the real options
+rather than resolved to the closest one, because choosing a model has a cost attached.
+`/clear` starts a fresh conversation without leaving the folder, and `/init` has the
+model write MINDWEAVE.md, the file read into context on every turn that nothing had
+ever been able to create.
+
+**`/mcp add` and `/mcp remove` were dead and now work.** The guard that routed them
+looked correct and held a stray control byte where an escape belonged, so it could
+never match anything typed at a keyboard: every `/mcp add` silently opened the
+server-health view instead, while the command advertised itself in its own help text.
+The code behind it was right the whole time; only the route to it was broken. Command
+routing is now data rather than a pattern, and tested.
+
 **You can take back a message you queued.** Typing while Mindweave is working
 queues what you send, and until now that was a one-way door: the message was going
 out whether you still wanted it or not. Press up, or escape, and the whole queue
