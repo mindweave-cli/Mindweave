@@ -9,7 +9,13 @@ Mindweave lands on npm and the numbering resets.
 
 ## Unreleased
 
-Work since v1.9.9, not yet given a version.
+Everything since v1.9.9 (2026-08-09), covering 69 commits made between 16 and 26
+August. Not yet given a version number.
+
+It is a large stretch of work and the sections below are ordered by what a user would
+notice, not by when it happened: two commands that never ran, two new ones, the queue
+becoming reversible, an interface that stopped narrating itself, and underneath all of
+it eleven more model providers and a rebuilt terminal.
 
 ### /mcp add and /mcp remove never ran
 
