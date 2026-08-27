@@ -51,6 +51,12 @@ export interface KeyManagerProps {
   onRemove: (row: KeyRow) => void;
   onClose: () => void;
   active?: boolean;
+  /**
+   * Open straight on this provider instead of the provider list. Set when the manager is
+   * reached by picking a provider that has no key: the pick is already made, so showing
+   * the list again and asking for it a second time is the pick wasted.
+   */
+  startProvider?: ProviderRow | null;
 }
 
 export function KeyManager({
@@ -64,8 +70,18 @@ export function KeyManager({
   onRemove,
   onClose,
   active = true,
+  startProvider = null,
 }: KeyManagerProps) {
-  const [mode, setMode] = useState<Mode>({ kind: "providers" });
+  const [mode, setMode] = useState<Mode>(() => {
+    // Same drill-in the provider list does on Enter: an empty provider goes straight to
+    // the field, one with keys goes to its key list.
+    if (startProvider) {
+      const slot = nextSlot(startProvider);
+      if (startProvider.count === 0 && slot !== null) return { kind: "enter", provider: startProvider, slot, replacing: false };
+      return { kind: "keys", provider: startProvider };
+    }
+    return { kind: "providers" };
+  });
   const [sel, setSel] = useState(0);
   const [value, setValue] = useState("");
   const [shown, setShown] = useState<string | null>(null);

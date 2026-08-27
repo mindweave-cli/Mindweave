@@ -84,6 +84,51 @@ test("no key value is on screen until it is asked for", () => {
   assert.doesNotMatch(screen(), /sk-full-secret/, "a full key is shown without being asked for");
 });
 
+test("startProvider on an empty provider opens straight on the key field", () => {
+  // Reached by picking a keyless provider in /provider: the pick is made, so the field
+  // to add its key must appear, not the provider list asking to pick again.
+  const gemini = PROVIDERS[2]!;
+  const out = frame(
+    <KeyManager
+      providers={PROVIDERS}
+      keysOf={() => []}
+      nextSlot={() => 1}
+      reveal={() => ""}
+      width={64}
+      onActivate={() => {}}
+      onSave={() => {}}
+      onRemove={() => {}}
+      onClose={() => {}}
+      active={false}
+      startProvider={gemini}
+    />,
+  );
+  assert.match(out, /Add a Gemini key/, "did not open on the key field for the chosen provider");
+  assert.match(out, /paste, then press Enter/, "the input field is not shown");
+  assert.doesNotMatch(out, /Anthropic/, "the provider list is shown again instead of the field");
+});
+
+test("startProvider on a provider with keys opens on that provider's key list", () => {
+  const deepseek = PROVIDERS[0]!;
+  const out = frame(
+    <KeyManager
+      providers={PROVIDERS}
+      keysOf={() => DEEPSEEK_KEYS}
+      nextSlot={() => 3}
+      reveal={() => ""}
+      width={64}
+      onActivate={() => {}}
+      onSave={() => {}}
+      onRemove={() => {}}
+      onClose={() => {}}
+      active={false}
+      startProvider={deepseek}
+    />,
+  );
+  assert.match(out, /DeepSeek · 2 keys/, "did not open on the chosen provider's key list");
+  assert.doesNotMatch(out, /Anthropic/, "the provider list is shown instead of the chosen provider");
+});
+
 test("the actions offered depend on the key, and adding never runs out", () => {
   const active = DEEPSEEK_KEYS[0]!;
   const spare = DEEPSEEK_KEYS[1]!;

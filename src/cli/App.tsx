@@ -2005,6 +2005,11 @@ export function App() {
           providers={providerRows()}
           keysOf={(p) => keyRowsFor(p)}
           nextSlot={(p) => nextSlotFor(p)}
+          startProvider={
+            pendingSwitch.current
+              ? providerRows().find((p) => p.apiKeyEnv === pendingSwitch.current!.apiKeyEnv) ?? null
+              : null
+          }
           width={width}
           reveal={(row) => keysFor(row.apiKeyEnv).find((k) => k.slot === row.slot)?.value ?? ""}
           onActivate={(row) => {
@@ -2027,7 +2032,12 @@ export function App() {
             note(`removed ${row.label} key ${row.slot} ${row.hint}.`);
             setKeysTick((n) => n + 1);
           }}
-          onClose={() => setKeysOpen(false)}
+          onClose={() => {
+            // Closing without saving abandons any provider switch that was waiting on a
+            // key, so it cannot finish later when an unrelated key is added.
+            pendingSwitch.current = null;
+            setKeysOpen(false);
+          }}
         />
       );
     }
