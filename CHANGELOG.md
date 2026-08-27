@@ -3,6 +3,21 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.0.2 (2026-08-27): key and provider fixes
+
+Choosing a provider with `/provider` that has no key yet now opens straight on the field
+for that provider's key. It used to reopen the full provider list, so the provider just
+chosen had to be picked a second time before the key could be typed.
+
+A key added or changed through `/key` or `/provider` is written to `~/.mindweave/.env`.
+When that file already held the variable written with an `export` prefix, or indented,
+the update could not find the existing line and wrote a second one below it. The config
+reader accepts both of those forms and keeps the first value it reads, so the old key won
+again on the next launch and the change looked lost. The line is now found the way the
+reader reads it, so an update replaces it in place and a removal takes it away. Removing a
+key no longer leaves a blank line behind.
+
+
 ## v2.0.1 (2026-08-27): GLM-5.3 and GLM-5.3-Flash are now supported
 
 GLM-5.3 and GLM-5.3-Flash are offered by `/model`. They were left out when the driver
@@ -21,7 +36,8 @@ from another model is corrected instead of being sent.
 ## Mindweave 1 (2026-08-27), tagged `mindweave-1`
 
 Everything since v1.9.9 (2026-08-09), covering 69 commits made between 16 and 27
-August. The package version is unchanged; this release is named rather than numbered.
+August. This release is named rather than numbered; the package version at the tag is
+2.0.0.
 
 It is a large stretch of work and the sections below are ordered by what a user would
 notice, not by when it happened: two commands that never ran, two new ones, the queue
