@@ -3,7 +3,7 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
-## v2.0.1 (2026-08-27): two more GLM models
+## v2.0.1 (2026-08-27): GLM-5.3 and GLM-5.3-Flash are now supported
 
 GLM-5.3 and GLM-5.3-Flash are offered by `/model`. They were left out when the driver
 was written because they existed only behind a subscription with no per-token rate, and

@@ -44,13 +44,6 @@ reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed
 
 macOS and Linux support is coming soon.
 
-## Latest news
-
-Known UI bug: when adding a key via the `/provider` command, the expected input field
-does not appear. Instead, a new provider selection menu opens, forcing you to reselect
-the provider you already chose. The key is then saved, but the flow is redundant and
-confusing. A fix is in progress.
-
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
 cd Mindweave
