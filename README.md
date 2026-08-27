@@ -1,4 +1,4 @@
-<h1 align="center">Mindweave</h1>
+<h1 align="center">Mindweave (mwcode)</h1>
 
 <p align="center">
   A fast, model-adaptive, terminal-native AI coding agent.<br>
