@@ -45,7 +45,7 @@ reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed
 MacOs and Linux will come soon!
 
 
-LATEST NEWS - SHORT 
+## LATEST NEWS - SHORT 
 
 UI Bug - When you try to add a key through /provider instead of opening the space to write it opens a new menu which you than choose the provider which you choose at the beginning and than the key is saved. - Getting fixed soon!
 
