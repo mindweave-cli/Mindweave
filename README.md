@@ -42,15 +42,14 @@ the agent maintains across sessions, and a long list of things that were quietly
 Requires **Windows** and **Node.js 20+**. macOS and Linux are not supported yet, and the
 reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed over.
 
-MacOs and Linux will come soon!
+macOS and Linux support is coming soon.
 
+## Latest news
 
-## LATEST NEWS - SHORT 
-
-UI Bug: When adding a key via the /provider command, the expected input field does not appear. Instead, a new provider selection menu opens, forcing the user to reselect the provider they already chose. The key is then saved, but the flow is redundant and confusing. A fix is in progress. ⚓
-
-
-
+Known UI bug: when adding a key via the `/provider` command, the expected input field
+does not appear. Instead, a new provider selection menu opens, forcing you to reselect
+the provider you already chose. The key is then saved, but the flow is redundant and
+confusing. A fix is in progress.
 
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave

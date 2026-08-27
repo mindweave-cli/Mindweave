@@ -3,7 +3,7 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
-## v2.0.1 (2026-08-27): DeepSeek can search the web
+## v2.0.1 (2026-08-27): two more GLM models
 
 GLM-5.3 and GLM-5.3-Flash are offered by `/model`. They were left out when the driver
 was written because they existed only behind a subscription with no per-token rate, and
@@ -18,7 +18,7 @@ from another model is corrected instead of being sent.
 
 ---
 
-## Mindweave 1 (2026-08-27), tagged `mindweave-1` BIG PATCH 
+## Mindweave 1 (2026-08-27), tagged `mindweave-1`
 
 Everything since v1.9.9 (2026-08-09), covering 69 commits made between 16 and 27
 August. The package version is unchanged; this release is named rather than numbered.
