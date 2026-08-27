@@ -7,10 +7,10 @@ Mindweave lands on npm and the numbering resets.
 
 ---
 
-## Unreleased
+## Mindweave 1 (2026-08-27), tagged `mindweave-1`
 
-Everything since v1.9.9 (2026-08-09), covering 69 commits made between 16 and 26
-August. Not yet given a version number.
+Everything since v1.9.9 (2026-08-09), covering 69 commits made between 16 and 27
+August. The package version is unchanged; this release is named rather than numbered.
 
 It is a large stretch of work and the sections below are ordered by what a user would
 notice, not by when it happened: two commands that never ran, two new ones, the queue

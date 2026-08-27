@@ -27,6 +27,16 @@ It is built lean on purpose. Most of a coding agent's context budget goes on sca
 the model never needed. Mindweave keeps prompts thin and leaves the room for the model to
 reason about your code.
 
+## Mindweave 1
+
+This is Mindweave 1, tagged `mindweave-1`. Everything in it is here and works from a
+clone; the npm package and the website follow shortly. Until then, install from source
+with the steps below.
+
+What landed in it is in the [changelog](CHANGELOG.md): thirteen model providers, a
+rebuilt terminal interface, reworked prompt caching and token accounting, project notes
+the agent maintains across sessions, and a long list of things that were quietly wrong.
+
 ## Install
 
 Requires **Windows** and **Node.js 20+**. macOS and Linux are not supported yet, and the
