@@ -19,7 +19,7 @@ import { FirstRunFrame, FIRST_RUN_TIPS } from "./FirstRunFrame.js";
 import { stripMouse } from "../mouse.js";
 import { useState } from "react";
 import { useInput } from "ink";
-import type { SetupRow, SetupView } from "../keySetup.js";
+import { initialRow, type SetupRow, type SetupView } from "../keySetup.js";
 
 /** Rows visible at once, so the screen fits a small terminal. */
 /**
@@ -57,7 +57,7 @@ export interface KeySetupProps {
 }
 
 export function KeySetup({ view, rows, version, envPath, docsUrl, onSaveKey, onContinue, active = true, onCancel }: KeySetupProps) {
-  const [sel, setSel] = useState(() => firstUnset(view));
+  const [sel, setSel] = useState(() => initialRow(view));
   const [entering, setEntering] = useState<SetupRow | null>(null);
   const [value, setValue] = useState("");
 
@@ -199,12 +199,6 @@ export function KeySetup({ view, rows, version, envPath, docsUrl, onSaveKey, onC
       </Box>
     </FirstRunFrame>
   );
-}
-
-/** Land on the first provider without a key — see keySetup.initialRow. */
-function firstUnset(view: SetupView): number {
-  const next = view.rows.findIndex((r) => !r.ready);
-  return next === -1 ? 0 : next;
 }
 
 /** Scroll the window so the selection stays inside it. */

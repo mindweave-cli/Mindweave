@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 import { activeSlot, keyHint, keysFor, nextFreeSlot, slotVar } from "./keyStore.js";
 import { globalEnvPath, hasApiKey, loadConfig, removeApiKey, saveApiKey, useApiKey } from "./bootstrap.js";
 
@@ -109,6 +110,40 @@ test("a config that predates slots still works, and is migrated once", () => {
   assert.equal(keysFor(V).length, 2);
   assert.ok(readFileSync(globalEnvPath(), "utf8").includes(`${slotVar(V, 1)}=legacy-key`), "not migrated to a slot");
 });
+
+// Set up an empty machine, then seed the global env file the way a person might have
+// written it by hand, and load it. Returns nothing — the point is what is in process.env
+// and on disk afterwards.
+function seeded(initial: string): void {
+  process.env.MINDWEAVE_STATE_DIR = mkdtempSync(join(tmpdir(), "keystore-seed-"));
+  for (const k of Object.keys(process.env)) if (k.startsWith(V)) delete process.env[k];
+  loadConfig(mkdtempSync(join(tmpdir(), "keystore-seed-proj-")));
+  writeFileSync(globalEnvPath(), initial);
+  loadConfig(process.cwd()); // re-read now that the file exists
+}
+
+// A key can be written into the global file the way a person writes env files: with an
+// `export` prefix, or indented. The reader accepts both, so the writer has to find those
+// lines too — otherwise an update appends a second line and the stale one wins next launch.
+for (const [shape, initial] of [
+  ["export VAR=", `export ${V}=old-key\n`],
+  ["indented VAR=", `   ${V}=old-key\n`],
+  ["plain VAR=", `${V}=old-key\n`],
+] as const) {
+  test(`updating a key written as "${shape}" replaces it, and it stays replaced after a restart`, () => {
+    seeded(initial);
+    assert.equal(process.env[V], "old-key", "the reader did not load the seeded key");
+
+    saveApiKey(V, "new-key");
+    assert.equal(process.env[V], "new-key", "the new key is not live this session");
+
+    // Relaunch: a fresh process re-reads only the file.
+    for (const k of Object.keys(process.env)) if (k.startsWith(V)) delete process.env[k];
+    loadConfig(process.cwd());
+    assert.equal(process.env[V], "new-key", "the update was lost — the stale line won on restart");
+    assert.doesNotMatch(readFileSync(globalEnvPath(), "utf8"), /old-key/, "the old key is still on disk");
+  });
+}
 
 test("a key hint shows the END of a key, never the start", () => {
   // The first characters are a provider prefix shared by all of a user's keys: it would

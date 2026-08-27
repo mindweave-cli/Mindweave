@@ -109,7 +109,7 @@ export function hasApiKey(envVar: string): boolean {
  * come back on the next launch.
  */
 function writeEnvVar(envVar: string, value: string | null): void {
-  const NEWLINE = String.fromCharCode(10);
+  const NL = String.fromCharCode(10);
   const dir = globalConfigDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const path = globalEnvPath();
@@ -119,18 +119,23 @@ function writeEnvVar(envVar: string, value: string | null): void {
   } catch {
     /* no file yet */
   }
-  const pattern = new RegExp(`^\s*${envVar}=.*$`, "m");
+  // Find the variable's line the way applyEnvFile READS it: leading spaces or tabs, and
+  // an optional `export ` prefix, are both accepted there. A writer that matched neither
+  // would fail to find a line the reader had loaded, append a second one, and let the
+  // stale line win on the next launch — a key updated in the app but not on disk. Only
+  // spaces and tabs, never `\s`, so the match cannot run across a line break.
+  const body = `(?:export[ \\t]+)?${envVar}=`;
   let next: string;
   if (value === null) {
-    const NL = String.fromCharCode(10);
-    next = pattern.test(existing)
-      ? existing.replace(pattern, "").replace(new RegExp(NL + "{3,}", "g"), NL + NL)
-      : existing;
+    // Take the trailing newline with the line, then collapse any blank run left behind.
+    const remove = new RegExp(`^[ \\t]*${body}.*(?:\\r?\\n|$)`, "m");
+    next = existing.replace(remove, "").replace(new RegExp(`${NL}{3,}`, "g"), NL + NL);
   } else {
     const line = `${envVar}=${value}`;
-    next = pattern.test(existing)
-      ? existing.replace(pattern, line)
-      : (existing ? existing.replace(/\s*$/, NEWLINE) : "") + line + NEWLINE;
+    const replace = new RegExp(`^[ \\t]*${body}.*$`, "m");
+    next = replace.test(existing)
+      ? existing.replace(replace, line)
+      : (existing ? existing.replace(/\s*$/, NL) : "") + line + NL;
   }
   writeFileSync(path, next, { mode: 0o600 });
 }
