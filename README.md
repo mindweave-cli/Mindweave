@@ -29,7 +29,7 @@ reason about your code.
 
 ## Mindweave 1
 
-This is Mindweave 1, tagged `mindweave-1`. Everything in it is here and works from a
+This is Mindweave 1 which is finally out, tagged `mindweave-1`. Everything in it is here and works from a
 clone; the npm package and the website follow shortly. Until then, install from source
 with the steps below.
 
