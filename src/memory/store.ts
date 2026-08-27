@@ -139,6 +139,9 @@ export async function saveSession(session: Session): Promise<boolean> {
       firstPrompt: clip(firstUserText(session.transcript)),
       lastPrompt: clip(lastUserText(session.transcript)),
       entryCount: session.transcript.length,
+      // Unconditional: a session with no model recorded is one whose behaviour cannot
+      // be compared against any other.
+      ...(session.modelConfig?.model ? { model: session.modelConfig.model } : {}),
       ...(extraRoots.length > 0 ? { extraRoots } : {}),
       // Only once something has actually been spent, so a session that never ran a turn
       // does not carry a row of zeroes claiming to be a measurement.

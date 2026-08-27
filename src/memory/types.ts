@@ -103,6 +103,17 @@ export interface SessionMeta {
   firstPrompt: string;
   lastPrompt: string;
   entryCount: number;
+  /**
+   * Which model answered in this session.
+   *
+   * Recorded deliberately rather than inferred. It used to exist only inside callLog
+   * entries, which are written only when a session actually spent something, so most
+   * sessions carried no attribution at all and questions of the form "did behaviour
+   * change, or did the model change?" could not be answered from what was on disk.
+   * The last model configured wins: a session that switches provider mid-way is rare
+   * and callLog still holds the per-call detail for that case.
+   */
+  model?: string;
   /** Extra roots added via `/include` (absolute paths, excluding the primary cwd).
    *  Restored on resume so a multi-root workspace survives across sessions. */
   extraRoots?: string[];

@@ -317,3 +317,29 @@ test("repair does not swallow a real user message typed during a tool run", asyn
   assert.deepEqual(fixed.map((e) => e.role), ["assistant", "tool", "user"]);
   assert.ok(fixed.some((e) => e.content === "actually stop"));
 });
+
+test("a saved session records which model answered", async () => {
+  // Attribution used to be a side effect of cost logging: the model lived only inside
+  // callLog entries, which are written only when a session actually spent something.
+  // Most sessions therefore carried none, and the question "did the behaviour change,
+  // or did the model change?" had no answer in anything on disk.
+  const cwd = "/proj/model-recorded";
+  const s = makeSession(cwd, "sess-model", [{ role: "user", content: "hi" }]);
+  s.modelConfig = { ...s.modelConfig, model: "acme-v4-pro" as never };
+  assert.equal(await saveSession(s), true);
+
+  const list = await listSessions(cwd);
+  assert.equal(list.length, 1);
+  assert.equal(list[0]!.model, "acme-v4-pro", "the session does not say which model answered");
+});
+
+test("the model is recorded even when the session spent nothing", async () => {
+  // The whole point: a session with no call log is exactly the one that used to be
+  // unattributable, and those are the short sessions worth comparing.
+  const cwd = "/proj/model-nospend";
+  const s = makeSession(cwd, "sess-quiet", [{ role: "user", content: "hi" }]);
+  assert.equal(await saveSession(s), true);
+  const meta = (await listSessions(cwd))[0]!;
+  assert.equal(meta.model, "deepseek-v4-flash");
+  assert.ok(!meta.callLog, "this session has no call log, which is the case that mattered");
+});
