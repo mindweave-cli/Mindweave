@@ -213,6 +213,16 @@ an added folder. Two ways round the file protections were closed: a deny list th
 ignored case, so `.ENV` walked past a rule written for `.env`, and a floor that missed
 `prod.env` and `.envrc`.
 
+### A saved session says which model answered it
+
+The model is written into the session record. It was previously visible only inside the
+per-call cost breakdown, which is kept only once a session has spent something, so most
+sessions carried no attribution at all.
+
+It earns its place for the same reason the cost breakdown does. Without it, a question
+of the form "did this behave differently, or was it a different model?" cannot be
+settled from anything on disk.
+
 ### Durability
 
 A long session holds together across a summary. A provider blip is survived rather than
