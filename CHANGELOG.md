@@ -2,12 +2,23 @@
 
 Notable changes to Mindweave. Dates are release dates.
 
-The 1.x line is the build-in-the-open phase. The next milestone is Release 1, when
-Mindweave lands on npm and the numbering resets.
+
+## v2.0.1 (2026-08-27): DeepSeek can search the web
+
+GLM-5.3 and GLM-5.3-Flash are offered by `/model`. They were left out when the driver
+was written because they existed only behind a subscription with no per-token rate, and
+a driver that cannot describe what a call costs should not offer the call. They are on
+the pay-per-token endpoint now, so they are listed with real prices.
+
+Both of them think unconditionally: the provider documents no way to turn reasoning off
+on either. Every other model on this driver can, so the reasoning menu now branches
+rather than offering a setting that would be refused, and a configuration carried over
+from another model is corrected instead of being sent.
+
 
 ---
 
-## Mindweave 1 (2026-08-27), tagged `mindweave-1`
+## Mindweave 1 (2026-08-27), tagged `mindweave-1` BIG PATCH 
 
 Everything since v1.9.9 (2026-08-09), covering 69 commits made between 16 and 27
 August. The package version is unchanged; this release is named rather than numbered.
@@ -102,17 +113,6 @@ Whether a given model can actually read an image is a fact the driver declares r
 than something assumed. Point a picture at one that cannot and Mindweave says so,
 instead of sending the message with the image quietly dropped.
 
-### Two more models on the GLM driver
-
-GLM-5.3 and GLM-5.3-Flash are offered by `/model`. They were left out when the driver
-was written because they existed only behind a subscription with no per-token rate, and
-a driver that cannot describe what a call costs should not offer the call. They are on
-the pay-per-token endpoint now, so they are listed with real prices.
-
-Both of them think unconditionally: the provider documents no way to turn reasoning off
-on either. Every other model on this driver can, so the reasoning menu now branches
-rather than offering a setting that would be refused, and a configuration carried over
-from another model is corrected instead of being sent.
 
 ### The project's notes grew three layers
 
