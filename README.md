@@ -42,6 +42,8 @@ the agent maintains across sessions, and a long list of things that were quietly
 Requires **Windows** and **Node.js 20+**. macOS and Linux are not supported yet, and the
 reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed over.
 
+MacOs and Linux will come soon!
+
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
 cd Mindweave
