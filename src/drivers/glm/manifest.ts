@@ -11,22 +11,30 @@
  * not share prices, and the Coding Plan carries models with no published per-token
  * rate at all. This driver targets the international pay-per-token endpoint.
  *
- * v1 ships four models spanning the price ladder, and deliberately not the long
+ * The lineup spans the price ladder and deliberately not the long
  * tail: Z.ai still serves the whole 4.5 series, several `-air`/`-x` variants and a
- * vision line, all superseded for this purpose by what is listed below. GLM-5.3 is
- * also absent — it exists, but only through the Coding Plan subscription, with no
- * per-token rate to quote, so offering it here would promise billing this driver
- * cannot describe.
+ * vision line, all superseded for this purpose by what is listed below.
+ *
+ * GLM-5.3 and GLM-5.3-Flash were once absent from here because they existed only
+ * through the Coding Plan, with no per-token rate to quote. They are on the
+ * pay-per-token endpoint now, so they are listed with real prices.
+ *
+ * BOTH 5.3 MODELS THINK UNCONDITIONALLY. Z.ai documents `thinking.type` as accepting
+ * only `enabled`, and 5.3's `reasoning_effort` has no off value. Every other model
+ * here can have thinking turned off, so the ladder below branches on it rather than
+ * offering a rung that would be refused.
  */
 import type { DriverManifest, Effort, ModelChoice, ModelConfig, ModelId, ModelPrice, ThinkLevel } from "../types.js";
 
+export const GLM_53 = "glm-5.3";
+export const GLM_53_FLASH = "glm-5.3-flash";
 export const GLM_52 = "glm-5.2";
 export const GLM_5 = "glm-5";
 export const GLM_47 = "glm-4.7";
 export const GLM_47_FLASHX = "glm-4.7-flashx";
 
 /** The model used when nothing is saved and no env override is set. */
-export const DEFAULT_MODEL = GLM_52;
+export const DEFAULT_MODEL = GLM_53;
 
 /**
  * The models offered by `/model`. First entry is this provider's default, which is
@@ -38,8 +46,10 @@ export const DEFAULT_MODEL = GLM_52;
  * are a real ladder below it rather than the sensible middle.
  */
 export const MODELS: ModelChoice[] = [
-  { id: GLM_52, label: "GLM-5.2", description: "the flagship, with a reasoning dial — the default" },
-  { id: GLM_5, label: "GLM-5", description: "the previous flagship, a little cheaper" },
+  { id: GLM_53, label: "GLM-5.3", description: "the flagship, three reasoning depths — the default" },
+  { id: GLM_53_FLASH, label: "GLM-5.3 Flash", description: "most of the flagship, a fraction of the price" },
+  { id: GLM_52, label: "GLM-5.2", description: "the previous flagship, with a reasoning dial" },
+  { id: GLM_5, label: "GLM-5", description: "older, a little cheaper again" },
   { id: GLM_47, label: "GLM-4.7", description: "strong value for everyday work" },
   { id: GLM_47_FLASHX, label: "GLM-4.7 FlashX", description: "very cheap and quick, for simple work" },
 ];
@@ -50,8 +60,9 @@ export const MODELS: ModelChoice[] = [
  * parameter they do not know.
  */
 export function takesEffort(model: ModelId): boolean {
-  return model === GLM_52;
+  return model === GLM_52 || alwaysThinks(model);
 }
+/** * Models whose thinking cannot be switched off. * * Offering them an "answer directly" rung would build a menu entry that produces a * request the provider refuses. The ladder and `normalize` both read this. */export function alwaysThinks(model: ModelId): boolean {  return model === GLM_53 || model === GLM_53_FLASH;}
 
 /**
  * The reasoning levels offered by `/think`.
@@ -66,6 +77,20 @@ export function takesEffort(model: ModelId): boolean {
  * a switch that is wired to the same place as the one above it.
  */
 export function thinkLevels(model: ModelId): ThinkLevel[] {
+  // GLM-5.3: three documented depths, and no way to answer without reasoning. The
+  // lightest rung is still thinking, so it is not labelled as though it skips it.
+  if (model === GLM_53) {
+    return [
+      { label: "Light", description: "reasons briefly — fastest", thinking: true, effort: "low" },
+      { label: "Thinking", description: "think first, then answer", thinking: true, effort: "high" },
+      { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
+    ];
+  }
+  // GLM-5.3 Flash documents one effort value and no way to disable thinking, so it
+  // gets one honest rung rather than a menu of switches wired to the same place.
+  if (model === GLM_53_FLASH) {
+    return [{ label: "Thinking", description: "always reasons — this model cannot skip it", thinking: true, effort: "max" }];
+  }
   if (takesEffort(model)) {
     return [
       { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" },
@@ -87,6 +112,10 @@ export function thinkLevels(model: ModelId): ThinkLevel[] {
  * targets international, so these are the figures that apply to it.
  */
 const PRICES: Record<string, ModelPrice> = {
+  // Standard rates, NOT the launch promotion that halves Flash until 2026-09-09: a
+  // meter that quotes a discount is wrong the day it ends, and wrong quietly.
+  [GLM_53]: { cacheHit: 0.26, cacheMiss: 1.4, output: 4.4 },
+  [GLM_53_FLASH]: { cacheHit: 0.03, cacheMiss: 0.15, output: 0.5 },
   [GLM_52]: { cacheHit: 0.26, cacheMiss: 1.4, output: 4.4 },
   [GLM_5]: { cacheHit: 0.2, cacheMiss: 1, output: 3.2 },
   [GLM_47]: { cacheHit: 0.11, cacheMiss: 0.6, output: 2.2 },
@@ -139,7 +168,9 @@ export function bufferedOutputTokens(_model: ModelId): number {
  */
 export function normalize(config: ModelConfig): ModelConfig {
   const model: ModelId = PRICES[config.model] ? config.model : DEFAULT_MODEL;
-  const thinking = config.thinking === true;
+  // Forced on where the provider allows nothing else, so a config carried over from
+  // another model cannot produce a request this one refuses.
+  const thinking = alwaysThinks(model) ? true : config.thinking === true;
   const effort: Effort = takesEffort(model) ? config.effort : "high";
   return { model, thinking, effort: snapToOfferedRung(model, thinking, effort) };
 }

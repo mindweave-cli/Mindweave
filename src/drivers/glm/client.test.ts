@@ -17,7 +17,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildBody, toStop } from "../openaiCompat/wire.js";
 import { cacheSplit, extraStop, glmProvider, reasoningFields } from "./client.js";
-import { GLM_47, GLM_47_FLASHX, GLM_5, GLM_52, MODELS, normalize, takesEffort, thinkLevels } from "./manifest.js";
+import {
+  alwaysThinks,
+  DEFAULT_MODEL,
+  GLM_47,
+  GLM_47_FLASHX,
+  GLM_5,
+  GLM_52,
+  GLM_53,
+  GLM_53_FLASH,
+  MODELS,
+  normalize,
+  price,
+  takesEffort,
+  thinkLevels,
+} from "./manifest.js";
 import type { Effort, ModelRequest } from "../types.js";
 
 const base: ModelRequest = { system: "SYSTEM", messages: [] };
@@ -166,8 +180,72 @@ test("switching between any two models leaves a config the target accepts", () =
 });
 
 test("an unknown model id falls back rather than reaching the wire", () => {
-  assert.equal(normalize({ model: "glm-imaginary", thinking: true, effort: "high" }).model, GLM_52);
+  // Against DEFAULT_MODEL rather than a named id, so moving the default does not
+  // leave this asserting yesterday's flagship.
+  assert.equal(normalize({ model: "glm-imaginary", thinking: true, effort: "high" }).model, DEFAULT_MODEL);
   for (const model of ALL) {
     assert.equal(normalize({ model, thinking: true, effort: "high" }).model, model, `${model} was coerced away`);
   }
+});
+
+// ── The 5.3 pair: reasoning that cannot be switched off ───────────────────────
+
+test("the 5.3 models are offered, and the flagship leads", () => {
+  assert.ok(ALL.includes(GLM_53), "GLM-5.3 is not in the lineup");
+  assert.ok(ALL.includes(GLM_53_FLASH), "GLM-5.3 Flash is not in the lineup");
+  assert.equal(MODELS[0]!.id, GLM_53, "the current flagship must be the default this provider lands on");
+});
+
+test("neither 5.3 model is offered a rung that turns thinking off", () => {
+  // Z.ai documents `thinking.type` as accepting only `enabled`, and 5.3's
+  // reasoning_effort has no off value. A "Standard — answer directly" rung would be a
+  // menu entry that builds a request the provider refuses.
+  for (const id of [GLM_53, GLM_53_FLASH]) {
+    const off = thinkLevels(id).filter((l) => !l.thinking);
+    assert.deepEqual(off, [], `${id} offers a rung with thinking off: ${JSON.stringify(off)}`);
+    assert.ok(alwaysThinks(id), `${id} is not marked as always thinking`);
+  }
+});
+
+test("asking a 5.3 model to stop thinking is corrected, not sent", () => {
+  // A config carried over from another model must not produce an illegal request.
+  for (const id of [GLM_53, GLM_53_FLASH]) {
+    const n = normalize({ model: id, thinking: false, effort: "low" });
+    assert.equal(n.thinking, true, `${id} was left with thinking off`);
+    assert.ok(
+      thinkLevels(id).some((l) => l.effort === n.effort),
+      `${id} normalized to an effort its own ladder does not offer: ${n.effort}`,
+    );
+  }
+});
+
+test("the older models can still answer without thinking", () => {
+  // The rule above is specific to 5.3, not a change to the whole provider.
+  for (const id of [GLM_52, GLM_5, GLM_47, GLM_47_FLASHX]) {
+    assert.ok(!alwaysThinks(id), `${id} was wrongly marked as always thinking`);
+    assert.equal(normalize({ model: id, thinking: false, effort: "high" }).thinking, false);
+  }
+});
+
+test("GLM-5.3 offers its three documented depths, Flash offers the one it has", () => {
+  assert.deepEqual(thinkLevels(GLM_53).map((l) => l.effort), ["low", "high", "max"]);
+  assert.equal(thinkLevels(GLM_53_FLASH).length, 1, "a menu of switches wired to the same place");
+});
+
+test("both 5.3 models take the effort dial", () => {
+  assert.ok(takesEffort(GLM_53));
+  assert.ok(takesEffort(GLM_53_FLASH));
+});
+
+test("every model in the lineup has a real price", () => {
+  // A model offered without one silently bills at the default model's rate, which is
+  // the wrong number reported confidently.
+  const fallback = price(GLM_53);
+  for (const id of ALL) {
+    const p = price(id);
+    if (id === GLM_53) continue;
+    if (id === GLM_52) continue; // genuinely the same rate as the flagship
+    assert.notDeepEqual(p, fallback, `${id} has no price of its own and fell back to the default`);
+  }
+  assert.deepEqual(price(GLM_53_FLASH), { cacheHit: 0.03, cacheMiss: 0.15, output: 0.5 });
 });

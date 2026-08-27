@@ -46,7 +46,7 @@ class FakeStdin extends EventEmitter {
 }
 
 /** The banner's title row, escapes stripped, sampled at each of `atMs`. */
-async function rows(busy: boolean, atMs: number[]): Promise<string[]> {
+async function rows(busy: boolean, windowMs: number): Promise<string[]> {
   const stdout = new FakeStdout();
   const instance = render(
     <Box flexDirection="column">
@@ -60,25 +60,30 @@ async function rows(busy: boolean, atMs: number[]): Promise<string[]> {
       debug: true,
     },
   );
+  // Collect DISTINCT banner rows over a window rather than sampling at fixed instants.
+  // A fixed sample encodes the speed of the machine: too early and the row is empty,
+  // which quietly satisfies "the frames are identical" and "the row fits the width".
+  // Those are the assertions that most need a real frame to mean anything.
   const seen: string[] = [];
-  let last = 0;
-  for (const at of atMs) {
-    await new Promise((r) => setTimeout(r, at - last));
-    last = at;
-    const frame = stdout.frames.at(-1) ?? "";
-    seen.push(
-      frame
-        .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
-        .split(/\r?\n/)
-        .find((r) => r.includes("Mindweave")) ?? "",
-    );
+  const deadline = Date.now() + windowMs;
+  while (Date.now() < deadline) {
+    for (const frame of stdout.frames.splice(0)) {
+      const row =
+        frame
+          .replace(new RegExp(String.fromCharCode(27) + "\\[[0-9;?]*[A-Za-z]", "g"), "")
+          .split(/\r?\n/)
+          .find((r) => r.includes("Mindweave")) ?? "";
+      if (row && row !== seen[seen.length - 1]) seen.push(row);
+    }
+    await new Promise((r) => setTimeout(r, 10));
   }
   instance.unmount();
+  assert.ok(seen.length > 0, "no banner rendered at all, so nothing below tests anything");
   return seen;
 }
 
 test("the shuttle sits AFTER the name", async () => {
-  const [row] = await rows(true, [80]);
+  const [row] = await rows(true, 300);
   const name = row!.indexOf("Mindweave");
   const track = row!.search(/[─━╾╼]/);
   assert.ok(name >= 0, "the name did not render");
@@ -89,14 +94,15 @@ test("idle is a still track and never moves", async () => {
   // Also the cost check: identical frames over a second means no timer is running.
   // An animation that ticks while nothing is happening is the expensive kind of bug,
   // because it looks like general sluggishness rather than like itself.
-  const [a, b, c] = await rows(false, [80, 500, 1000]);
+  const still = await rows(false, 1000);
+  const [a] = still;
   assert.match(a!, /─{6}/, "idle should be a plain light track");
-  assert.equal(a, b, "the idle banner changed on its own");
-  assert.equal(b, c, "the idle banner changed on its own");
+  // One distinct row across a full second is what "no timer is running" looks like.
+  assert.equal(new Set(still).size, 1, `the idle banner changed on its own: ${JSON.stringify(still)}`);
 });
 
 test("working, it actually travels", async () => {
-  const seen = await rows(true, [80, 220, 360, 500]);
+  const seen = await rows(true, 600);
   const tracks = seen.map((r) => r.match(/[─━╾╼]{6}/)?.[0] ?? "");
   assert.ok(tracks.every(Boolean), `no track found in ${JSON.stringify(seen)}`);
   assert.ok(new Set(tracks).size > 2, `the shuttle barely moved: ${JSON.stringify(tracks)}`);
@@ -106,7 +112,7 @@ test("it moves in HALF cells, which is what makes it smooth", async () => {
   // A shuttle that only ever lands on whole columns hops. The half-heavy glyphs are the
   // in-between positions, and their absence would mean the animation is half as smooth
   // as it looks in the sketch.
-  const seen = await rows(true, [80, 150, 220, 290, 360, 430]);
+  const seen = await rows(true, 600);
   assert.ok(
     seen.some((r) => /[╾╼]/.test(r)),
     `never landed on a half cell: ${JSON.stringify(seen.map((r) => r.match(/[─━╾╼]{6}/)?.[0]))}`,

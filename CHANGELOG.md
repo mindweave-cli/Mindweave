@@ -90,22 +90,29 @@ Matching also became case-insensitive. Windows and macOS filesystems are, so `.e
 `.ENV` are one file, and a case-sensitive comparison let the second spelling past a rule
 written with the first.
 
-### DeepSeek can read images
+### An image can reach any model that reads one
 
-`deepseek-v4-flash-vision-exp` shipped on 2026-08-21 and is now offered by `/model`.
-It reads images; the other two DeepSeek models still do not, and pointing a picture at
-one of those still says so rather than sending the message without it.
+The shared transport used by eleven providers had no way to send an image at all. The
+field carrying one was ours, spread onto the request untouched, so a provider saw an
+unknown key and the bytes never left the machine. A request built that way looks
+perfectly well formed, which is why nothing caught it. That transport emits proper
+multimodal content now, and every provider on it inherits that.
 
-Adding it exposed a gap underneath. The shared transport used by eleven providers had
-no way to send an image at all: the field carrying one was our own, spread onto the
-request untouched, so a provider saw an unknown key and the bytes never left the
-machine. A request built that way looks perfectly well formed. That transport now emits
-proper multimodal content, which every provider on it inherits.
+Whether a given model can actually read an image is a fact the driver declares rather
+than something assumed. Point a picture at one that cannot and Mindweave says so,
+instead of sending the message with the image quietly dropped.
 
-The model is offered without a reasoning ladder. DeepSeek documents the request shape,
-the formats and the image budget for it, and says nothing about reasoning effort. This
-driver has already shipped a reasoning level the API does not accept once, so an
-unverified one is not advertised again.
+### Two more models on the GLM driver
+
+GLM-5.3 and GLM-5.3-Flash are offered by `/model`. They were left out when the driver
+was written because they existed only behind a subscription with no per-token rate, and
+a driver that cannot describe what a call costs should not offer the call. They are on
+the pay-per-token endpoint now, so they are listed with real prices.
+
+Both of them think unconditionally: the provider documents no way to turn reasoning off
+on either. Every other model on this driver can, so the reasoning menu now branches
+rather than offering a setting that would be refused, and a configuration carried over
+from another model is corrected instead of being sent.
 
 ### The project's notes grew three layers
 
@@ -135,7 +142,7 @@ cache.
 
 Mindweave shipped the 1.x line with two. It now speaks to thirteen: DeepSeek, Anthropic,
 OpenAI, Gemini, xAI, Mistral, Groq, Cerebras, Qwen, Kimi, GLM, Meta and MiniMax, across
-45 models. Each family keeps its own driver, so a provider's quirks live with that
+47 models. Each family keeps its own driver, so a provider's quirks live with that
 provider and never leak into the shared core, and only the driver you are using is
 loaded. Mindweave also identifies itself to every provider now, rather than arriving
 anonymously.

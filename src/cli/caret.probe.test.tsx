@@ -60,8 +60,19 @@ class FakeStdin extends EventEmitter {
 
 const BAR = "│";
 
-/** Sample the prompt row at each of `atMs`, with escapes stripped. */
-async function beats(atMs: number[]): Promise<string[]> {
+/**
+ * Watch the prompt row for long enough to see the caret cycle, and return every
+ * DISTINCT value it took, in order.
+ *
+ * The earlier version sampled at fixed instants (120ms, 700ms, 1250ms) and asserted on
+ * whatever frame existed at each one. That encodes the speed of the machine running it:
+ * a stall longer than the gap to the next beat reads the wrong phase and the test fails
+ * on a difference it does not own. Watching a whole cycle asserts the same properties
+ * without depending on when anything happens.
+ */
+const BLINK_MS = 530;
+
+async function caretCycle(): Promise<string[]> {
   const stdout = new FakeStdout();
   const instance = render(<PromptInput onSubmit={() => {}} width={50} placeholder="type here" />, {
     stdout: stdout as unknown as NodeJS.WriteStream,
@@ -70,46 +81,65 @@ async function beats(atMs: number[]): Promise<string[]> {
     interactive: true,
     debug: true,
   });
+  const rowOf = (frame: string): string =>
+    frame
+      .replace(new RegExp(String.fromCharCode(27) + "\\[[0-9;?]*[A-Za-z]", "g"), "")
+      .split(/\r?\n/)
+      .find((r) => r.includes("type here")) ?? "";
+
+  // Two and a half blink periods: long enough that a full off-and-back-on cycle has
+  // happened even if the first frame lands late.
+  const deadline = Date.now() + BLINK_MS * 2.5;
   const seen: string[] = [];
-  let last = 0;
-  for (const at of atMs) {
-    await new Promise((r) => setTimeout(r, at - last));
-    last = at;
-    const frame = stdout.frames.at(-1) ?? "";
-    const row =
-      frame
-        .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
-        .split(/\r?\n/)
-        .find((r) => r.includes("type here")) ?? "";
-    seen.push(row);
+  while (Date.now() < deadline) {
+    for (const frame of stdout.frames.splice(0)) {
+      const row = rowOf(frame);
+      if (row && row !== seen[seen.length - 1]) seen.push(row);
+    }
+    await new Promise((r) => setTimeout(r, 10));
   }
   instance.unmount();
   return seen;
 }
 
-test("the caret is a bar, not a filled block", async () => {
-  const [first] = await beats([120]);
-  assert.ok(first?.includes(BAR), `no bar caret in ${JSON.stringify(first)}`);
-  // The block was drawn by inverting a cell, which leaves no character of its own —
-  // this is the shape check, and the blink test below is the behaviour one.
-  assert.match(first!, new RegExp(`>\\s*${BAR}type here`), "the caret is not sitting at the input position");
+test("the caret is a bar sitting at the input position, not a filled block", async () => {
+  // The box border is drawn with the same character, so "a bar appears somewhere" is
+  // true of every frame and proves nothing. What identifies the caret is a bar between
+  // the prompt marker and the text, present in some frames and absent in others.
+  const rows = await caretCycle();
+  const withCaret = new RegExp("> " + BAR + "type here");
+  // Blanked to a space rather than removed, which is why this is TWO spaces.
+  const without = new RegExp("> {2}type here");
+  assert.ok(
+    rows.some((r) => withCaret.test(r)),
+    `no caret between the marker and the text: ${JSON.stringify(rows.slice(0, 3))}`,
+  );
+  // A filled block was drawn by inverting a cell, which leaves no character of its own,
+  // so the off-beat and the on-beat would be identical once escapes are stripped.
+  assert.ok(
+    rows.some((r) => without.test(r)),
+    `the caret never left the row, so it is not a character of its own: ${JSON.stringify(rows.slice(0, 3))}`,
+  );
 });
 
 test("it goes off and comes back", async () => {
-  // 120ms is inside the first on-beat, 700ms inside the first off-beat, 1250ms back on.
-  // Three samples rather than two: one transition could be a first-render artefact,
-  // where returning proves it is a cycle.
-  const [on, off, again] = await beats([120, 700, 1250]);
-  const at = (row: string | undefined) => row?.indexOf("type here") ?? -1;
-  assert.ok(at(on) > 0, "nothing rendered on the first beat");
-  assert.notEqual(on, off, "the caret never turned off — it is not blinking");
-  assert.equal(on, again, "the caret turned off and did not come back");
+  // A transition on its own could be a first-render artefact. Returning to a value it
+  // already had is what proves a cycle rather than a one-way change.
+  const rows = await caretCycle();
+  const distinct = [...new Set(rows)];
+  assert.ok(distinct.length >= 2, `the caret never changed — it is not blinking: ${JSON.stringify(distinct)}`);
+  assert.ok(
+    rows.length > distinct.length,
+    `the caret changed but never returned to an earlier state: ${JSON.stringify(rows)}`,
+  );
 });
 
 test("turning off does not move the text", async () => {
   // The caret occupies a cell, so an off-beat that removed the cell instead of blanking
   // it would shift the whole line left twice a second. That is worse than no blink.
-  const [on, off] = await beats([120, 700]);
-  assert.equal(on!.length, off!.length, "the row changed width between beats");
-  assert.equal(on!.indexOf("type here"), off!.indexOf("type here"), "the text moved when the caret blinked");
+  const rows = await caretCycle();
+  const widths = new Set(rows.map((r) => r.length));
+  const positions = new Set(rows.map((r) => r.indexOf("type here")));
+  assert.equal(widths.size, 1, `the row changed width between beats: ${[...widths].join(", ")}`);
+  assert.equal(positions.size, 1, `the text moved when the caret blinked: ${[...positions].join(", ")}`);
 });

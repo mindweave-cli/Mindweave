@@ -20,13 +20,12 @@ Loading the OCaml grammar can exhaust V8 when the machine is already under memor
 pressure. Test runs are given heap headroom and the grammar-heavy files run in their own
 sequential phase, which holds, but the underlying cost of that grammar is unchanged.
 
-## The agent explores in more round trips than it needs
+## Some models look things up one at a time
 
-It tends to look things up one at a time rather than asking for everything it needs at
-once, and each round is a full model call. Repeated reads of the same content are now
-caught and refused, so a round costs less, but the shape is unchanged. This is partly
-model behaviour and partly prompt work, and it is measurable: `scripts/narration.mjs`
-reports it against a real session.
+A model that asks for several things at once finishes a task in fewer calls than one
+that asks for them one after another, and how much of that a model does is largely its
+own habit. Mindweave gives it the room to batch: reads take a list, search pages, and
+repeated reads of the same content are caught rather than re-sent.
 
 ## MCP has been driven against one real published server
 
