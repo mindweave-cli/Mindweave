@@ -148,3 +148,5 @@ vite.config.ts.timestamp-*
 
 # Draft announcement, kept outside the repository until it is published.
 ANNOUNCEMENT.md
+
+CLAUDE.md
