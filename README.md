@@ -47,7 +47,7 @@ MacOs and Linux will come soon!
 
 ## LATEST NEWS - SHORT 
 
-UI Bug - When you try to add a key through /provider instead of opening the space to write it opens a new menu which you than choose the provider which you choose at the beginning and than the key is saved. - Getting fixed soon!
+UI Bug: When adding a key via the /provider command, the expected input field does not appear. Instead, a new provider selection menu opens, forcing the user to reselect the provider they already chose. The key is then saved, but the flow is redundant and confusing. A fix is in progress.
 
 
 ```bash
