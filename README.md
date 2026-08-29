@@ -46,7 +46,15 @@ macOS and Linux support is coming soon.
 
 ## NEWS FLASH 
 
-Bug: /continue fails to cleanly restore context for interrupted tasks. The screenshot tool looping is just a symptom — the model can't find it due to broader continuation issues. Root causes identified. Fixes and other testing-discovered bugs coming soon.
+Bug: Task Continuation & Deferred Tools Issues
+
+When resuming an interrupted or closed task via /continue, the system fails to cleanly restore execution context. This manifests as the screenshot tool entering a loop the model cannot locate or properly reference the tool but this is only a symptom of a deeper problem.
+
+Root Cause: The deferred tools implementation in Mindweave removes tools from the request array entirely rather than keeping them available in a deferred state (as seen in other implementations where tools remain in the array and are simply deferred until searched). Once removed, these tools are never re-added, meaning the model permanently loses access to them after deferral.
+
+This fundamental architectural difference breaks tool availability during task continuation and is a primary contributor to the looping behavior and flow issues we're observing.
+
+Status: Multiple root causes have been identified. Fixes are in progress and will also address additional bugs uncovered during internal testing and agent evaluation.
 
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
