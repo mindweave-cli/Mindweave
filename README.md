@@ -44,6 +44,10 @@ reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed
 
 macOS and Linux support is coming soon.
 
+## NEWS FLASH 
+
+Bug: /continue fails to cleanly restore context for interrupted tasks. The screenshot tool looping is just a symptom — the model can't find it due to broader continuation issues. Root causes identified. Fixes and other testing-discovered bugs coming soon.
+
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
 cd Mindweave
