@@ -204,7 +204,12 @@ export function sensitiveCommandReason(command: string): string | null {
 // to catch the catastrophic mistake, not to police the shell.
 const CATASTROPHIC_PATTERNS: { test: RegExp; what: string }[] = [
   { test: /\brm\s+(-[a-z]*\s+)*-[a-z]*[rf][a-z]*\s+(-[a-z]+\s+)*(\/|~|\$HOME)(\s|$)/i, what: "recursively deleting the filesystem root or home directory" },
-  { test: /\b(mkfs|format)\b/i, what: "reformatting a disk" },
+  // Real disk-format commands only. `\bformat\b` matched the word anywhere, so every
+  // benign PowerShell display cmdlet — `Format-Table`, `Format-List`, `Format-Hex` — and
+  // even `git log --format=…` was refused as "reformatting a disk", blocking ordinary
+  // work. Now it catches `mkfs`, the CMD `format <drive>:` / `format /switch`, and the
+  // PowerShell cmdlets that actually erase a volume (`Format-Volume`, `Format-Disk`).
+  { test: /\bmkfs\b|\bformat\s+(?:[a-z]:|\/)|\bformat-(?:volume|disk)\b/i, what: "reformatting a disk" },
   { test: /\bdd\b[^\n]*\bof=\/dev\/(sd|nvme|disk|hd)/i, what: "overwriting a raw disk device" },
   { test: />\s*\/dev\/(sd|nvme|disk|hd)/i, what: "writing to a raw disk device" },
   { test: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, what: "a fork bomb" },
