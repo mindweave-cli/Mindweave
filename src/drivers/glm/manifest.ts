@@ -152,10 +152,18 @@ export function bufferedOutputTokens(_model: ModelId): number {
 }
 
 /**
- * Vision is deliberately NOT declared. Z.ai does serve vision, but through a
- * separate `glm-*v*` line rather than any model offered here. Declaring it would
- * mean core attaching bytes these ids cannot read.
+ * Which models can SEE an image.
+ *
+ * GLM-5.3-Flash is natively multimodal — Z.ai documents image (and video) input on its
+ * own id, sent the ordinary OpenAI-compat way (`image_url` content parts), which the
+ * shared transport already produces. So core may attach the bytes and the model reads
+ * them. Every other GLM model here is text-only: pointing an image at one still degrades
+ * before anything is sent, which is what core does with a false answer here. (The older
+ * `glm-*v*` vision line is separate and not offered by this driver.)
  */
+export function acceptsImages(model: ModelId): boolean {
+  return model === GLM_53_FLASH;
+}
 
 /**
  * Coerce a stored or unknown config onto a model this provider actually serves.
@@ -209,5 +217,6 @@ export const glmManifest: DriverManifest = {
   price,
   contextWindow,
   bufferedOutputTokens,
+  acceptsImages,
   normalize,
 };

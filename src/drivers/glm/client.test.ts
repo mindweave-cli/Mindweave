@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { buildBody, toStop } from "../openaiCompat/wire.js";
 import { cacheSplit, extraStop, glmProvider, reasoningFields } from "./client.js";
 import {
+  acceptsImages,
   alwaysThinks,
   DEFAULT_MODEL,
   GLM_47,
@@ -194,6 +195,15 @@ test("the 5.3 models are offered, and the flagship leads", () => {
   assert.ok(ALL.includes(GLM_53), "GLM-5.3 is not in the lineup");
   assert.ok(ALL.includes(GLM_53_FLASH), "GLM-5.3 Flash is not in the lineup");
   assert.equal(MODELS[0]!.id, GLM_53, "the current flagship must be the default this provider lands on");
+});
+
+test("only GLM-5.3 Flash sees images; the text-only models degrade", () => {
+  // Flash is natively multimodal (Z.ai serves image input on its own id), and the shared
+  // OpenAI-compat transport already sends `image_url` parts. The flagship GLM-5.3 and the
+  // older models are text-only, so core must degrade before attaching bytes they can't read.
+  assert.equal(acceptsImages(GLM_53_FLASH), true, "GLM-5.3 Flash is multimodal and must accept images");
+  assert.equal(acceptsImages(GLM_53), false, "plain GLM-5.3 is text-only");
+  assert.equal(acceptsImages(GLM_52), false, "GLM-5.2 is text-only");
 });
 
 test("neither 5.3 model is offered a rung that turns thinking off", () => {
