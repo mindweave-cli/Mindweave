@@ -8,7 +8,7 @@ process.env.FORCE_COLOR = "0";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
-import { render } from "ink";
+import { render, Box } from "ink";
 import { KeyManager } from "./components/KeyManager.js";
 import { actionsFor, countLabel, type KeyRow, type ProviderRow } from "./keyManager.js";
 
@@ -22,7 +22,15 @@ function frame(node: React.ReactElement): string {
     off: () => {},
     removeListener: () => {},
   } as unknown as NodeJS.WriteStream;
-  const app = render(node, { stdout: stream, patchConsole: false, interactive: true });
+  // KeyManager is content-only; the border is the shared menu box it renders inside (see
+  // PromptInput). Wrap it the same way here so /key is exercised as it actually appears —
+  // the same box the `/` command menu and every picker use.
+  const app = render(
+    <Box flexDirection="column" width={64} borderStyle="single" borderColor="gray" paddingX={1}>
+      {node}
+    </Box>,
+    { stdout: stream, patchConsole: false, interactive: true },
+  );
   app.unmount();
   return out.join("");
 }
@@ -144,4 +152,94 @@ test("the actions offered depend on the key, and adding never runs out", () => {
   // but the row says what it costs rather than refusing.
   assert.match(actionsFor(active, 1).join(" "), /only key/);
   assert.doesNotMatch(actionsFor(active, 2).join(" "), /only key/);
+});
+
+/**
+ * The shared menu box as PromptInput actually declares it: a FIXED height that never
+ * changes with what is inside, and clipped rather than grown. `frame` above lets the box
+ * shrink to its contents, which is the one thing that must not be assumed here — a panel
+ * that does not fill would still end on its hint in a box that shrank to meet it.
+ */
+function boxed(node: React.ReactElement, maxRows = 9): string {
+  const out: string[] = [];
+  const stream = {
+    write: (s: string) => void out.push(s),
+    columns: 76,
+    rows: 30,
+    on: () => {},
+    off: () => {},
+    removeListener: () => {},
+  } as unknown as NodeJS.WriteStream;
+  const app = render(
+    <Box
+      flexDirection="column"
+      width={64}
+      height={maxRows + 4}
+      borderStyle="single"
+      borderColor="gray"
+      paddingX={1}
+      overflow="hidden"
+    >
+      {node}
+    </Box>,
+    { stdout: stream, patchConsole: false, interactive: true },
+  );
+  app.unmount();
+  return out.join("");
+}
+
+test("every level fills the box and ends on the hint, so the footer never moves", () => {
+  // /key shares its box with the command list and the pickers, and that box is a FIXED
+  // height. A level that renders only as many rows as it has content leaves the hint
+  // floating wherever that content happened to end — a different place at each level, in a
+  // box whose size never changed. Filling to the box's height puts the hint on the bottom
+  // line every time, which is where the command list and every picker put theirs.
+  const deepseek = PROVIDERS[0]!;
+  const levels: Array<[string, React.ReactElement]> = [
+    [
+      "providers",
+      <KeyManager
+        providers={PROVIDERS}
+        keysOf={() => DEEPSEEK_KEYS}
+        nextSlot={() => 3}
+        reveal={() => "sk"}
+        width={64}
+        maxRows={9}
+        onActivate={() => {}}
+        onSave={() => {}}
+        onRemove={() => {}}
+        onClose={() => {}}
+        active={false}
+      />,
+    ],
+    [
+      "keys",
+      <KeyManager
+        providers={PROVIDERS}
+        keysOf={() => DEEPSEEK_KEYS}
+        nextSlot={() => 3}
+        reveal={() => "sk"}
+        width={64}
+        maxRows={9}
+        onActivate={() => {}}
+        onSave={() => {}}
+        onRemove={() => {}}
+        onClose={() => {}}
+        active={false}
+        startProvider={deepseek}
+      />,
+    ],
+  ];
+
+  const heights = new Set<number>();
+  for (const [name, node] of levels) {
+    const rows = boxed(node)
+      .replace(new RegExp(String.fromCharCode(27) + "\[[0-9;?]*[A-Za-z]", "g"), "")
+      .split(/\r?\n/)
+      .filter((r) => r.includes("│") || r.includes("┌") || r.includes("└"));
+    heights.add(rows.length);
+    const lastContent = rows[rows.length - 2] ?? "";
+    assert.match(lastContent, /Enter to choose/, `${name}: the hint is not on the box's bottom line`);
+  }
+  assert.equal(heights.size, 1, "the levels render at different heights inside a fixed box");
 });

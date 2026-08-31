@@ -14,7 +14,7 @@
  * above it. Editing keys: ←/→, Ctrl+A/E (home/end), Ctrl+U (kill line),
  * Backspace, and paste (inserted at the cursor).
  */
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { Box, Text, useInput } from "ink";
 import { inputView } from "../inputView.js";
 import { feedPasteChunk, initPasteState, type PasteState } from "../pasteAssembler.js";
@@ -187,6 +187,14 @@ interface PromptInputProps {
    *  scrolls with the cursor instead of growing, because the rows it would take
    *  come off the bottom of a fixed frame — where the tip line lives. */
   maxInputRows?: number;
+  /** A navigation/decision surface (a Picker) to show in the menu slot below the
+   *  input, in place of the command menu. While present the input box stays visible
+   *  but goes inert — the overlay owns the keys — so choosing an option keeps the same
+   *  frame instead of swapping the whole design out. */
+  overlay?: ReactNode;
+  /** A surface for this box is being opened: hold the frame so it never leaves the screen
+   *  between the command list closing and what it opened taking its place. */
+  opening?: boolean;
 }
 
 /** A literal newline, kept out of the key handler so the source has no escapes there. */
@@ -209,6 +217,8 @@ export function PromptInput({
   onMenuChange,
   onQueuePop,
   maxInputRows = DEFAULT_MAX_INPUT_ROWS,
+  overlay,
+  opening = false,
 }: PromptInputProps) {
   const [state, dispatch] = useReducer(reduce, INITIAL);
   const { value, cursor, histIdx, selected, draft } = state;
@@ -464,13 +474,20 @@ export function PromptInput({
         }
       }
     },
-    { isActive: !disabled },
+    { isActive: !disabled && !overlay },
   );
 
   const fieldWidth = Math.max(10, width - 6);
+  // The menu box's baseline height: a border (2) around a header (1), `maxMenuRows` item
+  // rows, and the hint (1). Used as a MINIMUM so the command list and every picker (which
+  // pad to `maxMenuRows`) land at exactly this height and never resize as you filter or
+  // switch, while a richer surface in the same box (the key manager, an approval) may grow
+  // past it rather than being clipped.
+  const menuBoxRows = maxMenuRows + 4;
 
   return (
     <Box flexDirection="column" width={width} flexShrink={0}>
+      {/* The chat input box — its own box, always separate from the menu below it. */}
       <Box
         flexDirection="column"
         width={width}
@@ -482,14 +499,45 @@ export function PromptInput({
         <Field
           value={value}
           cursor={cursor}
-          active={!disabled}
-          placeholder={placeholder}
+          active={!disabled && !overlay}
+          placeholder={overlay ? "" : placeholder}
           width={fieldWidth}
           maxRows={maxInputRows}
         />
       </Box>
 
-      {menu ? <SuggestionMenu matches={menu.items} selected={sel} width={width} mode={menu.mode} maxRows={maxMenuRows} /> : null}
+      {/* The ONE box for everything: the command menu, every picker, the key manager, an
+          approval prompt — they all render HERE, inside this single box below the input.
+          It appears ONLY when something is open, growing the footer upward so the input
+          rides up and the box sits beneath it; when it closes the box is gone and the input
+          drops back to the bottom, just as it was. The height is FIXED at `menuBoxRows` and
+          NEVER grows: every surface inside windows/pads its content to fit and scrolls when
+          there is more, so the box is one steady size no matter what it holds. */}
+      {overlay || menu || opening ? (
+        <Box
+          flexDirection="column"
+          width={width}
+          height={menuBoxRows}
+          flexShrink={0}
+          borderStyle="single"
+          borderColor="gray"
+          paddingX={1}
+          marginTop={1}
+          overflow="hidden"
+        >
+          {overlay ? (
+            overlay
+          ) : menu ? (
+            <SuggestionMenu matches={menu.items} selected={sel} width={width} mode={menu.mode} maxRows={maxMenuRows} />
+          ) : (
+            // `opening`: a command that opens a surface here was submitted, and the surface
+            // is a moment away. The frame is held open with an empty body so the transition
+            // from the command list to what it opens is a change of CONTENT inside one box
+            // that never leaves the screen.
+            <Box flexDirection="column" height={menuBoxRows - 2} />
+          )}
+        </Box>
+      ) : null}
     </Box>
   );
 }
@@ -515,8 +563,11 @@ function atTokenAt(value: string, cursor: number): { text: string; start: number
 /**
  * The dropdown of matching commands/skills shown below the input. It SCROLLS: a
  * sliding window keeps the highlighted row in view as ↑/↓ move past the visible
- * count, with `↑ N more` / `↓ N more` markers for what's hidden above/below — so a
- * long list (every command) is fully reachable, not capped at the first few.
+ * count, so a long list (every command) is fully reachable, not capped at the first
+ * few. The window is always the same number of rows, and no "N more" markers are
+ * shown, so the box stays one fixed height from the first item to the last: a marker
+ * that appeared only at the ends made the box taller mid-list and shifted the whole
+ * transcript above it by a row when the selection crossed into or out of an end.
  *
  * Bordered like the input box itself, not a bare list floating under it — same
  * treatment, same reason: it's the other place the user is choosing something,
@@ -539,34 +590,44 @@ function SuggestionMenu({
   const start = Math.min(Math.max(0, selected - (maxRows - 1)), Math.max(0, matches.length - maxRows));
   const shown = matches.slice(start, start + maxRows);
   const nameWidth = Math.min(18, Math.max(...shown.map((m) => m.name.length), 1));
-  const above = start;
-  const below = matches.length - (start + shown.length);
   const title = mode === "command" ? "Commands" : "Files";
   // The prefix ("› " / "  ") + the padded name, so the description column knows
   // exactly what's left. Without this Box the description had no width of its
   // own to truncate against — Yoga let a long one push past the row and wrap,
   // splitting a command's NAME onto its own line, one row later than where it
   // belonged. Confirmed with a bare Ink render before this fix went in.
-  const descWidth = Math.max(4, width - 2 - 2 - nameWidth);
+  //
+  // Widths subtract the enclosing box's chrome — border (2) + paddingX (2) = 4 — plus
+  // the 2-col prefix, so a truncated description ends INSIDE the border. Without the
+  // full subtraction a long line filled the row past the content area and wrapped,
+  // leaving a blank continuation row between items.
+  const rowWidth = width - 4;
+  const descWidth = Math.max(4, rowWidth - 2 - nameWidth);
+  // The parenthetical is the only place that says you can keep TYPING to narrow the
+  // list. Without it the arrows look like the only way through, and a long catalog
+  // reads as something to scroll rather than something to filter.
+  const header = (
+    <Box flexShrink={0}>
+      <Text bold>{title}</Text>
+      <Text dimColor>{" (type to filter, or use ↑/↓)"}</Text>
+    </Box>
+  );
+  const hint = mode === "command" ? "Tab completes · Esc dismisses" : "↑/↓ to select · Enter/Tab to complete · Esc dismisses";
+  // Blank rows padding the list up to `maxRows`, so the box is the SAME height whether it
+  // shows two matches or twelve. Fixed dimensions: the menu box never resizes as you
+  // filter down or switch to a shorter list — the surplus is empty space, not a smaller box.
+  const pad = Math.max(0, maxRows - shown.length);
+  // Content only — the surrounding box is the menu box in PromptInput. flexShrink:0 on
+  // every row is what makes App.tsx's maxRows cap reliable: without it Yoga compresses an
+  // overfull menu instead of respecting the cap computed so it wouldn't need to (confirmed
+  // with a bare Ink render, same as the chat viewport's rows — see App.tsx).
   return (
-    <Box flexDirection="column" width={width} flexShrink={0} borderStyle="single" borderColor="gray" paddingX={1} marginTop={1}>
-      {/* flexShrink:0 on every row here (not just the menu's own outer box) is
-          what makes App.tsx's maxRows cap actually reliable: without it, Yoga
-          can compress an overfull menu instead of respecting the cap that was
-          computed specifically so it wouldn't need to — confirmed the same way
-          the chat viewport's own flexShrink:0 rows were (see App.tsx). */}
-      {/* The parenthetical is the only place that says you can keep TYPING to narrow the
-          list. Without it the arrows look like the only way through, and a long catalog
-          reads as something to scroll rather than something to filter. */}
-      <Box flexShrink={0}>
-        <Text bold>{title}</Text>
-        <Text dimColor>{" (type to filter, or use ↑/↓)"}</Text>
-      </Box>
-      {above > 0 ? <Box flexShrink={0}><Text dimColor>{`  ↑ ${above} more`}</Text></Box> : null}
+    <>
+      {header}
       {shown.map((m, i) => {
         const active = start + i === selected;
         return (
-          <Box key={m.name} width={width - 2} flexShrink={0}>
+          <Box key={m.name} width={rowWidth} flexShrink={0}>
             <Text color={active ? "cyan" : undefined} bold={active}>
               {active ? "› " : "  "}
               {m.name.padEnd(nameWidth)}
@@ -577,11 +638,13 @@ function SuggestionMenu({
           </Box>
         );
       })}
-      {below > 0 ? <Box flexShrink={0}><Text dimColor>{`  ↓ ${below} more`}</Text></Box> : null}
+      {Array.from({ length: pad }).map((_, i) => (
+        <Box key={`pad${i}`} flexShrink={0}><Text> </Text></Box>
+      ))}
       <Box flexShrink={0}>
-        <Text dimColor>{mode === "command" ? "Tab completes · Esc dismisses" : "↑/↓ to select · Enter/Tab to complete · Esc dismisses"}</Text>
+        <Text dimColor>{hint}</Text>
       </Box>
-    </Box>
+    </>
   );
 }
 

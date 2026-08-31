@@ -57,6 +57,12 @@ export interface KeyManagerProps {
    * the list again and asking for it a second time is the pick wasted.
    */
   startProvider?: ProviderRow | null;
+  /**
+   * The shared menu box's item-row budget. The manager renders inside a box of FIXED height,
+   * so its list window is sized to fit (leaving a row for the title, one blank, and the hint)
+   * and scrolls when there are more — the box never grows.
+   */
+  maxRows?: number;
 }
 
 export function KeyManager({
@@ -71,7 +77,12 @@ export function KeyManager({
   onClose,
   active = true,
   startProvider = null,
+  maxRows = WINDOW,
 }: KeyManagerProps) {
+  // Rows for the list: the box holds maxRows+2 content rows; the title and the hint (which
+  // carries a blank top margin, so two rows) take three, leaving maxRows - 1 for the list
+  // (never fewer than 2). It scrolls when there are more; the box never grows.
+  const win = Math.max(2, Math.min(WINDOW, maxRows - 1));
   const [mode, setMode] = useState<Mode>(() => {
     // Same drill-in the provider list does on Enter: an empty provider goes straight to
     // the field, one with keys goes to its key list.
@@ -113,6 +124,11 @@ export function KeyManager({
   useInput(
     (input, key) => {
       if (key.escape) return back();
+      // Backspace and Delete step back exactly as Escape does. Deleting what you just chose
+      // is the instinctive way out, and while a list is showing there is nothing else those
+      // keys could mean; in the entry field they belong to the key being typed, and while a
+      // list is empty stepping back is the only thing left to do.
+      if ((key.backspace || key.delete) && mode.kind !== "enter") return back();
       if (mode.kind === "enter" || count === 0) return;
       if (key.upArrow) setSel((s) => (s - 1 + count) % count);
       else if (key.downArrow) setSel((s) => (s + 1) % count);
@@ -167,8 +183,11 @@ export function KeyManager({
   if (mode.kind === "enter") {
     return (
       <Panel
-        width={width}
         title={`${mode.replacing ? "Edit the" : "Add a"} ${mode.provider.label} key${mode.replacing ? ` (key ${mode.slot})` : ""}`}
+        rows={1}
+        maxRows={maxRows}
+        width={width}
+        hint="Enter to save · Esc to go back"
       >
         <Box flexShrink={0}>
           <Text bold color="cyan">{"  key "}</Text>
@@ -189,7 +208,6 @@ export function KeyManager({
             mask="*"
           />
         </Box>
-        <Hint>Enter to save · Esc to go back</Hint>
       </Panel>
     );
   }
@@ -197,8 +215,11 @@ export function KeyManager({
   if (mode.kind === "actions") {
     return (
       <Panel
-        width={width}
         title={`${mode.provider.label} · key ${mode.row.slot}  ${mode.row.hint}${mode.row.active ? "   ● active" : ""}`}
+        rows={actions.length + (shown ? 2 : 0)}
+        maxRows={maxRows}
+        width={width}
+        hint={shown ? "hidden again when you leave · Esc or ⌫ back" : "↑/↓ · Enter to choose · Esc or ⌫ back"}
       >
         {actions.map((a, i) => (
           <Row key={a} on={i === sel} n={i + 1} left={a} width={width} />
@@ -208,16 +229,23 @@ export function KeyManager({
             <Text color="yellow" wrap="truncate-end">{`  ${shown}`}</Text>
           </Box>
         ) : null}
-        <Hint>{shown ? "hidden again when you leave · Esc to go back" : "↑/↓ · Enter to choose · Esc to go back"}</Hint>
       </Panel>
     );
   }
 
   if (mode.kind === "keys") {
-    const start = windowStart(sel, count);
+    const start = windowStart(sel, count, win);
+    const addRow = canAdd && start + win > keys.length;
     return (
-      <Panel width={width} title={`${mode.provider.label} · ${countLabel(keys.length)}`}>
-        {keys.slice(start, start + WINDOW).map((r, i) => (
+      <Panel
+        title={`${mode.provider.label} · ${countLabel(keys.length)}`}
+        counter={position(sel, count, win)}
+        rows={Math.min(win, keys.length - start) + (addRow ? 1 : 0)}
+        maxRows={maxRows}
+        width={width}
+        hint="↑/↓ · Enter to choose · Esc or ⌫ back"
+      >
+        {keys.slice(start, start + win).map((r, i) => (
           <Row
             key={r.slot}
             on={start + i === sel}
@@ -229,18 +257,22 @@ export function KeyManager({
             width={width}
           />
         ))}
-        {canAdd && start + WINDOW > keys.length ? (
-          <Row on={sel === keys.length} n={keys.length + 1} left="Add a new key" width={width} />
-        ) : null}
-        <Hint>{more(start, keys.length)}↑/↓ · Enter to choose · Esc to go back</Hint>
+        {addRow ? <Row on={sel === keys.length} n={keys.length + 1} left="Add a new key" width={width} /> : null}
       </Panel>
     );
   }
 
-  const start = windowStart(sel, providers.length);
+  const start = windowStart(sel, providers.length, win);
   return (
-    <Panel width={width} title="Keys">
-      {providers.slice(start, start + WINDOW).map((p, i) => (
+    <Panel
+      title="Keys"
+      counter={position(sel, providers.length, win)}
+      rows={Math.min(win, providers.length - start)}
+      maxRows={maxRows}
+      width={width}
+      hint="↑/↓ · Enter to choose · Esc or ⌫ close"
+    >
+      {providers.slice(start, start + win).map((p, i) => (
         <Row
           key={p.id}
           on={start + i === sel}
@@ -251,15 +283,14 @@ export function KeyManager({
           width={width}
         />
       ))}
-      <Hint>{more(start, providers.length)}↑/↓ · Enter to choose · Esc to close</Hint>
     </Panel>
   );
 }
 
-/** "… 4 more · " when the window hides rows, so nothing is silently off the bottom. */
-function more(start: number, total: number): string {
-  const hidden = total - start - WINDOW;
-  return hidden > 0 ? `… ${hidden} more · ` : "";
+/** "  3 of 9" when the list is longer than its window, so nothing is silently off the
+ *  bottom. On the title row, where the pickers put it, and empty when everything fits. */
+function position(sel: number, total: number, size: number): string {
+  return total > size ? `  ${sel + 1} of ${total}` : "";
 }
 
 /** Scroll the window so the selection stays inside it. */
@@ -270,39 +301,55 @@ export function windowStart(sel: number, rowCount: number, size = WINDOW): numbe
 }
 
 /**
- * The bordered box the whole thing lives in.
- *
- * Same shape as the permission prompt: a single grey border, one padding column, and
- * `flexShrink={0}` on every row — without it Yoga compresses an overfull box instead of
- * leaving it at its real height, and the height is what the footer measurement depends on.
+ * The header + body of the manager, CONTENT ONLY. The bordered box around it is the ONE
+ * shared menu box in PromptInput (same box the `/` command menu and every picker use), so
+ * `/key` reads as the same surface — the box never changes, only what is inside it. Every
+ * row is `flexShrink={0}` so Yoga leaves the box at its real height (the footer measurement
+ * depends on it) instead of compressing an overfull one.
  */
-function Panel({ width, title, children }: { width: number; title: string; children: ReactNode }) {
+function Panel({
+  title,
+  counter = "",
+  rows,
+  maxRows,
+  hint,
+  width,
+  children,
+}: {
+  title: string;
+  /** Position in a list longer than the window, on the title row — see `Picker`. */
+  counter?: string;
+  /** Body rows `children` occupies, so the blank fill below them can be worked out. */
+  rows: number;
+  maxRows: number;
+  hint: string;
+  width: number;
+  children: ReactNode;
+}) {
+  // Fill the box out to its fixed height so the hint is pinned to the BOTTOM at every
+  // level. Without the fill a short list left the hint floating in the middle of a box
+  // whose size never changes, and each level put it somewhere else — the one line that
+  // should be in the same place every time. Title(1) + hint(2, its top margin included)
+  // is the three rows the body does not get, which is the command list's shape and every
+  // picker's: title, then rows, then the hint on the bottom line.
+  const pad = Math.max(0, maxRows - 1 - rows);
+  const inner = Math.max(12, width - 4);
   return (
-    <Box
-      flexDirection="column"
-      width={width}
-      flexShrink={0}
-      borderStyle="single"
-      borderColor="gray"
-      paddingX={1}
-      marginTop={1}
-    >
-      <Box flexShrink={0}>
+    <>
+      <Box flexShrink={0} width={inner}>
         <Text bold wrap="truncate-end">{title}</Text>
-      </Box>
-      <Box flexShrink={0}>
-        <Text> </Text>
+        {counter ? <Text dimColor>{counter}</Text> : null}
       </Box>
       {children}
-    </Box>
-  );
-}
-
-function Hint({ children }: { children: ReactNode }) {
-  return (
-    <Box flexShrink={0} marginTop={1}>
-      <Text dimColor wrap="truncate-end">{children}</Text>
-    </Box>
+      {Array.from({ length: pad }).map((_, i) => (
+        <Box key={`pad${i}`} flexShrink={0}>
+          <Text> </Text>
+        </Box>
+      ))}
+      <Box flexShrink={0} marginTop={1}>
+        <Text dimColor wrap="truncate-end">{hint}</Text>
+      </Box>
+    </>
   );
 }
 

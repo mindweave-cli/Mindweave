@@ -20,10 +20,11 @@
  * or compaction internals — it calls `respond()` / `compactNow()` and renders the
  * stream events they emit.
  */
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { isAbsolute, resolve } from "node:path";
 import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from "ink";
-import { compactNow, respond } from "../dynamo/engine.js";
+import { compactNow, contextUsed, respond } from "../dynamo/engine.js";
+import { contextPressure, sharpContextWindow } from "../dynamo/contextWindow.js";
 import { createSession, resumeSession, reloadProjectMemory } from "../memory/session.js";
 import { saveSession, listSessions } from "../memory/store.js";
 import { stopChassis } from "../alternator/lane.js";
@@ -79,6 +80,19 @@ import { DEFAULT_MODE, modeById, modeFromFlags, nextMode, type ModeId } from "./
 import { ApprovalChannel } from "./approvalChannel.js";
 
 const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
+
+/** Commands whose whole job is to open a surface in the box under the input. Written out
+ *  in full, because only a bare invocation opens anything: given an argument each of these
+ *  acts directly and there is no surface to hold the frame for. */
+const OVERLAY_COMMANDS = new Set([
+  "/continue",
+  "/key",
+  "/mcp",
+  "/model",
+  "/provider",
+  "/shells",
+  "/think",
+]);
 
 /**
  * The provider whose key we're missing, and what to tell the user about it.
@@ -292,6 +306,11 @@ export function App() {
   // An interactive overlay (session picker, model/think chooser, or an approval
   // prompt). When set, it owns the keyboard and the input box is hidden.
   const [overlay, setOverlay] = useState<Overlay | null>(null);
+
+  // Set while a command that opens one of those surfaces is on its way, so the box that
+  // holds them stays on screen for the gap between the command list closing and the
+  // surface appearing. See `OVERLAY_COMMANDS`.
+  const [opening, setOpening] = useState(false);
 
   // The approval channel handed to tools: a forbidden-path tool calls this to ask
   // the user Yes/No/other, and we render it as an overlay that resolves the promise.
@@ -1883,7 +1902,20 @@ export function App() {
     if (trimmed.length === 0 || busy || !ready) return;
 
     if (trimmed.startsWith("/")) {
-      await handleCommand(trimmed);
+      // Submitting clears the input, which closes the command list; the surface the command
+      // opens can only arrive after the work it does first (reading sessions, refreshing
+      // models). Between the two the box would have nothing to show and would unmount,
+      // taking its frame off the screen and putting it back a moment later. Marking the
+      // open here — synchronously, in the same update as the clear — holds the frame so
+      // only its CONTENTS change. Bare invocations only: with an argument these commands
+      // act directly and open nothing.
+      const opens = OVERLAY_COMMANDS.has(trimmed);
+      if (opens) setOpening(true);
+      try {
+        await handleCommand(trimmed);
+      } finally {
+        if (opens) setOpening(false);
+      }
       return;
     }
 
@@ -1993,8 +2025,10 @@ export function App() {
     ...mcpPrompts.map((p) => ({ name: promptCommand(p), description: p.description || `prompt from ${p.server}` })),
   ];
 
-  // While an overlay is open it replaces the input and owns the keyboard.
-  function buildOverlayView() {
+  // While an overlay is open it renders in the menu slot below the input and owns the
+  // keyboard; the input box itself stays visible but inert. `maxRows` is the App's
+  // height-safe row budget, shared with the command menu.
+  function buildOverlayView(maxRows: number) {
     // /key sits where the prompt sits, like every other thing that asks something. It
     // used to replace the whole screen for a list of three keys, which is the wrong
     // weight for changing a setting and leaves nothing to come back to.
@@ -2011,6 +2045,7 @@ export function App() {
               : null
           }
           width={width}
+          maxRows={maxRows}
           reveal={(row) => keysFor(row.apiKeyEnv).find((k) => k.slot === row.slot)?.value ?? ""}
           onActivate={(row) => {
             useApiKey(row.apiKeyEnv, row.slot);
@@ -2049,7 +2084,7 @@ export function App() {
         description: `${timeAgo(m.updatedAt)} · ${m.entryCount} msg${m.entryCount === 1 ? "" : "s"}`,
       }));
       return (
-        <Picker title="Continue which session?" items={items} width={width} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
+        <Picker title="Continue which session?" items={items} width={width} maxRows={maxRows} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
       );
     }
     if (overlay.kind === "resumeMode") {
@@ -2058,6 +2093,7 @@ export function App() {
           title={`Continue “${sessionTitle(overlay.meta)}” — how?`}
           items={RESUME_MODES}
           width={width}
+          maxRows={maxRows}
           onSelect={onOverlaySelect}
           onCancel={onOverlayCancel}
         />
@@ -2069,7 +2105,7 @@ export function App() {
         description: sh.status === "running" ? `running ${shellElapsed(sh)} — Enter to stop` : sh.status === "killed" ? "killed" : `exited ${sh.exitCode}`,
       }));
       return (
-        <Picker title="Background shells" items={items} width={width} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
+        <Picker title="Background shells" items={items} width={width} maxRows={maxRows} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
       );
     }
     if (overlay.kind === "mcp") {
@@ -2078,10 +2114,15 @@ export function App() {
         label: mcpLabel(srv),
         description: mcpDetail(srv, mgr?.blockedCountFor(srv.name) ?? 0),
       }));
-      return <Picker title="MCP servers" items={items} width={width} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />;
+      return <Picker title="MCP servers" items={items} width={width} maxRows={maxRows} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />;
     }
     if (overlay.kind === "provider") {
-      const active = providerOf(cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model).id;
+      const activeModel = cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model;
+      const active = providerOf(activeModel).id;
+      // The model actually running, by the name the model list calls it. The row for the
+      // provider you are already on otherwise says no more than any other row, leaving the
+      // one thing you came to check — what you are on right now — off the screen.
+      const activeLabel = modelLabel(activeModel);
       const providers = allProviders();
       const items = providers.map((p) => {
         const n = modelsOf(p).length;
@@ -2089,13 +2130,15 @@ export function App() {
         // Say up front which ones you can actually run — finding out at the next
         // request is the worse place to learn it.
         const key = hasApiKey(p.apiKeyEnv) ? "key set" : `needs ${p.apiKeyEnv}`;
-        return { label: p.label + (p.id === active ? "  ✓" : ""), description: `${models} · ${key}` };
+        const here = p.id === active ? ` · on ${activeLabel}` : "";
+        return { label: p.label + (p.id === active ? "  ✓" : ""), description: `${models} · ${key}${here}` };
       });
       return (
         <Picker
           title="Choose a provider"
           items={items}
           width={width}
+          maxRows={maxRows}
           initialIndex={Math.max(0, providers.findIndex((p) => p.id === active))}
           onSelect={onOverlaySelect}
           onCancel={onOverlayCancel}
@@ -2106,12 +2149,25 @@ export function App() {
       const id = cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model;
       // Only the current provider's models. Switching provider is /provider's job.
       const models = modelsOfProvider(id);
-      const items = models.map((m) => ({ label: m.label + (m.id === id ? "  ✓" : ""), description: m.description }));
+      // The two facts that decide the choice and are nowhere else on the screen: how much
+      // it can hold, and whether it can see an image you attach. They lead the description
+      // because the row truncates from the RIGHT — put behind the prose they would be the
+      // first thing cut on a narrow terminal, which is where they matter most.
+      const items = models.map((m) => {
+        const window = `${Math.round(sharpContextWindow(m.id) / 1000)}K`;
+        const vision = manifestForModel(m.id).acceptsImages?.(m.id) ?? false;
+        const facts = `${window}${vision ? " · vision" : ""}`;
+        return {
+          label: m.label + (m.id === id ? "  ✓" : ""),
+          description: m.description ? `${facts} · ${m.description}` : facts,
+        };
+      });
       return (
         <Picker
           title={`Choose a ${providerOf(id).label} model`}
           items={items}
           width={width}
+          maxRows={maxRows}
           initialIndex={Math.max(0, models.findIndex((m) => m.id === id))}
           onSelect={onOverlaySelect}
           onCancel={onOverlayCancel}
@@ -2128,20 +2184,22 @@ export function App() {
           title={`Reasoning for ${modelLabel(model)}`}
           items={items}
           width={width}
+          maxRows={maxRows}
           initialIndex={Math.max(0, levels.findIndex((l) => l.label === curLabel))}
           onSelect={onOverlaySelect}
           onCancel={onOverlayCancel}
         />
       );
     }
-    // approval — a plan, a Sentinel action, a forbidden-path lift. Bordered rather than
-    // listed: it interrupts the user's work and the answer commits them to something,
-    // so it should read as a stop, not as more output.
+    // approval — a plan, a Sentinel action, a forbidden-path lift. It interrupts the user's
+    // work and the answer commits them to something, so it reads as a stop; it renders in
+    // the same fixed menu box as everything else, the answers always visible.
     return (
       <ApprovalBox
         question={overlay.question}
         options={overlay.options}
         width={width}
+        maxRows={maxRows}
         onSelect={onOverlaySelect}
         onCancel={onOverlayCancel}
         {...(overlay.freeText ? { freeText: overlay.freeText } : {})}
@@ -2149,7 +2207,6 @@ export function App() {
       />
     );
   }
-  const overlayView = buildOverlayView();
 
   // Alt-screen owns every row, so the app decides for itself what is on screen.
   //
@@ -2211,7 +2268,24 @@ export function App() {
   // minimum and capped so a huge terminal doesn't show an ungainly wall.
   const menuBudget = frameHeight - BANNER_ROWS - MIN_CHAT_ROWS - FOOTER_BASE_ROWS - MENU_CHROME_ROWS;
   const maxMenuItems = Math.max(3, Math.min(12, menuBudget));
+  // Built here, after maxMenuItems, so a picker's contents respect the same row budget as
+  // the command menu and can never grow the footer past the screen. EVERY interactive
+  // surface — the pickers, the key manager, and the approval prompt — is content-only and
+  // renders inside the input's one menu box below the input line. There is no separate
+  // "boxed" overlay any more; the box is always the same, only its contents change.
+  const overlayView = buildOverlayView(maxMenuItems);
   const runningShells = session.current?.toolContext.backgroundShells?.running() ?? [];
+  // Proactive "a compaction is coming" notice: hidden until context crosses the warn bar
+  // (90% of the auto bar), then a single dim line of notice before the summarizing pass
+  // rewrites the conversation. Memoized on the size inputs so it costs nothing per
+  // keystroke — it only recomputes when the transcript grows, overhead is re-measured, or
+  // the model changes.
+  const ctxWarn = useMemo(() => {
+    const s = session.current;
+    if (!s) return null;
+    const p = contextPressure(contextUsed(s), s.modelConfig.model);
+    return p.warn ? p : null;
+  }, [session.current?.transcript.length, session.current?.contextOverhead?.tokens, session.current?.modelConfig.model]);
   // Where the transcript sits in the viewport, and how far it can travel. Extracted
   // to `chatAnchor.ts` so the rule is unit-tested rather than eyeballed — see there
   // for why a short transcript now rests ON the input box instead of stranding
@@ -2375,12 +2449,14 @@ export function App() {
           <QueuedBar queued={queued} />
         </Box>
 
+        {/* The input box is always here; an open overlay (a picker) renders in its
+            menu slot below it, so choosing something keeps the same frame instead of
+            swapping the whole input area out. */}
         <Box flexShrink={0} flexDirection="column">
-          {overlayView ? (
-            overlayView
-          ) : ready ? (
+          {ready ? (
             <PromptInput
               onSubmit={onSend}
+              opening={opening}
               disabled={false}
               placeholder={busy ? "type to queue a message…" : "say something…"}
               width={width}
@@ -2391,6 +2467,7 @@ export function App() {
               maxMenuRows={maxMenuItems}
               onMenuChange={onMenuChange}
               onQueuePop={popQueue}
+              overlay={overlayView}
             />
           ) : (
             <Box paddingX={1}>
@@ -2403,7 +2480,19 @@ export function App() {
             $ cmd1 • $ cmd2" line in exactly this spot while anything is
             backgrounded, with the tip explicitly absent until it's done — not
             a separate line above the input, and not shown alongside the tip. */}
-        {overlayView ? null : runningShells.length > 0 ? (
+        {ctxWarn ? (
+          // A compaction is near. This takes the line over the tip and the background bar:
+          // it is the one thing here the user needs BEFORE it happens, since the summarizing
+          // pass rewrites the conversation. Dim as it approaches, then a plain warning colour
+          // with the manual way out once it is about to fire on its own.
+          <Box flexShrink={0}>
+            {ctxWarn.percentLeft <= 5 ? (
+              <Text color="yellow">{"  context low · /compact to summarize now"}</Text>
+            ) : (
+              <Text dimColor>{`  ${ctxWarn.percentLeft}% until auto-compact`}</Text>
+            )}
+          </Box>
+        ) : !overlayView && runningShells.length > 0 ? (
           <Box flexShrink={0}>
             <BackgroundBar shells={runningShells} />
           </Box>
@@ -2703,6 +2792,11 @@ function StatusLine({
     // held for the whole turn (see workingVerb) so the line does not flicker between
     // words while the seconds tick.
     const secs = Math.floor((Date.now() - startedAt) / 1000);
+    // OUTPUT tokens for THIS task, estimated from what has streamed back. It is the task's
+    // own work: the re-sent conversation (the whole session's context, re-billed each tool
+    // round) is NOT counted here, because that is session overhead, not what this task
+    // did. Output is
+    // also the only thing that grows continuously while a turn runs, so it animates cleanly.
     const got = received();
     label = (
       <Text>
@@ -2715,16 +2809,15 @@ function StatusLine({
     // Settled receipt: elapsed time and the turn's real token cost, shown at once,
     // no count-up.
     //
-    // `billedTokens`, NOT `totalTokens`. The prompt is re-sent every tool round, so
-    // a per-call total counts the same text once per step and the figure grows with
-    // tool use rather than with work — a five-step turn over a 30K context read
-    // ~150K. Misses plus output counts each token exactly once.
-    // A `~` when the provider never reported what it served from cache, so the number
-    // is inferred rather than measured (Gemini's OpenAI-compatible endpoint is the
-    // case that forced this — see TaskUsage.estimated). Showing an inferred figure
-    // with the same authority as a measured one is what made a normal turn look like
-    // a runaway one.
-    const meter = usage ? ` · ${usage.estimated ? "~" : ""}${formatTokens(usage.billedTokens)} tokens` : "";
+    // OUTPUT tokens for the task, the same quantity the live line counted, so the receipt
+    // is where the count was going rather than a different measurement. It is the task's
+    // own generation — NOT `billedTokens`, which sums the re-sent conversation across every
+    // tool round and so reports the whole session's context re-read N times (a five-step
+    // turn over a 58K context read ~230K). That number is session overhead, not the task's
+    // work, and showing it made an ordinary turn look like a runaway one. How full the
+    // context is (and when compaction fires) is a separate measure — the last prompt's
+    // size — not this.
+    const meter = usage ? ` · ↓ ${formatTokens(usage.outputTokens)} tokens` : "";
     label = <Text bold> Worked for {fmtElapsed(Math.round(lastMs / 1000))}{meter}</Text>;
   }
 

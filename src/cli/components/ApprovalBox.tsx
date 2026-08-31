@@ -59,6 +59,12 @@ export interface ApprovalBoxProps {
   freeText?: { label: string; placeholder: string };
   /** Called instead of onSelect when the typed answer is submitted. */
   onSubmitText?: (text: string) => void;
+  /**
+   * The shared menu box's item-row budget. The box is a FIXED height, so the question is
+   * clipped to whatever rows are left once the answers and hint have their space — the
+   * answers always show, the box never grows.
+   */
+  maxRows?: number;
 }
 
 export function ApprovalBox({
@@ -70,6 +76,7 @@ export function ApprovalBox({
   active = true,
   freeText,
   onSubmitText,
+  maxRows = MAX_QUESTION_ROWS + MAX_CHOICES,
 }: ApprovalBoxProps) {
   const shown = options.slice(0, MAX_CHOICES);
   // The typed row sits at the end of the same list, so `sel === shown.length` means it.
@@ -108,21 +115,20 @@ export function ApprovalBox({
 
   // Inside the border: two frame columns and one padding column each side.
   const inner = Math.max(12, width - 4);
-  const questionRows = clipRows(question, inner, MAX_QUESTION_ROWS);
+  // The box holds maxRows+2 content rows; the answers (and freeText row), one blank above
+  // and below, and the hint take `rows + 3`, so the question gets whatever is left — always
+  // at least one line, never more than its own cap. The answers are never hidden.
+  const qMax = Math.max(1, Math.min(MAX_QUESTION_ROWS, maxRows - 1 - rows));
+  const questionRows = clipRows(question, inner, qMax);
 
+  // Content only — the border is the ONE shared menu box in PromptInput (the same box the
+  // `/` command menu, the pickers and the key manager use), so an approval reads as the
+  // same surface. It still reads as a stop because that box is bordered and the input above
+  // goes inert while it is open. flexShrink:0 on every row for the same reason the command
+  // palette has it: without it Yoga compresses an overfull box instead of leaving it at its
+  // real height, and the height is what the footer measurement depends on.
   return (
-    <Box
-      flexDirection="column"
-      width={width}
-      flexShrink={0}
-      borderStyle="single"
-      borderColor="gray"
-      paddingX={1}
-      marginTop={1}
-    >
-      {/* flexShrink:0 on every row, for the same reason the command palette has it:
-          without it Yoga compresses an overfull box instead of leaving it at its
-          real height, and the height is what the footer measurement depends on. */}
+    <>
       {questionRows.map((line, i) => (
         <Box key={`q${i}`} flexShrink={0}>
           <Text bold wrap="truncate-end">{line}</Text>
@@ -174,6 +180,6 @@ export function ApprovalBox({
             : `↑/↓ or 1-${shown.length} · Enter to choose · Esc to cancel`}
         </Text>
       </Box>
-    </Box>
+    </>
   );
 }

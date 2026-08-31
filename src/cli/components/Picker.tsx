@@ -32,6 +32,10 @@ interface PickerProps {
   initialIndex?: number;
   /** Hard ceiling on the title's rendered height. See MAX_TITLE_ROWS. */
   maxTitleRows?: number;
+  /** How many list rows may show at once — App computes this from the real frame
+   *  height so the bordered box never grows past the screen and tears. Falls back
+   *  to a small, always-safe count. */
+  maxRows?: number;
 }
 
 const MAX_VISIBLE = 10;
@@ -61,7 +65,11 @@ export function Picker({
   active = true,
   initialIndex = 0,
   maxTitleRows = MAX_TITLE_ROWS,
+  maxRows = MAX_VISIBLE,
 }: PickerProps) {
+  // Same window size as the command menu (App clamps maxRows to a safe ceiling), so the
+  // picker box and the command box are the SAME fixed height.
+  const visible = Math.max(1, maxRows);
   const [sel, setSel] = useState(Math.min(Math.max(0, initialIndex), Math.max(0, items.length - 1)));
 
   useInput(
@@ -69,39 +77,77 @@ export function Picker({
       if (key.upArrow) setSel((s) => (s - 1 + items.length) % items.length);
       else if (key.downArrow) setSel((s) => (s + 1) % items.length);
       else if (key.return) onSelect(sel);
-      else if (key.escape) onCancel();
+      // Esc closes, and so does Backspace/Delete: the input line above is empty, so a
+      // delete is the natural "take it back" — the same gesture that removes the `/` and
+      // closes the command menu. Without it the only way out was Esc, which is not
+      // discoverable when your instinct is to delete what you just chose.
+      else if (key.escape || key.backspace || key.delete) onCancel();
     },
     { isActive: active && items.length > 0 },
   );
 
   // A scrolling window so a long list never blows past the visible rows.
-  const start = Math.min(Math.max(0, sel - (MAX_VISIBLE - 1)), Math.max(0, items.length - MAX_VISIBLE));
-  const shown = items.slice(start, start + MAX_VISIBLE);
+  const start = Math.min(Math.max(0, sel - (visible - 1)), Math.max(0, items.length - visible));
+  const shown = items.slice(start, start + visible);
   const labelWidth = Math.min(40, Math.max(...items.map((i) => i.label.length), 1));
 
-  const titleRows = clipRows(title, width, maxTitleRows);
+  // Widths subtract the input box's chrome — border (2) + paddingX (2) = 4 — plus the
+  // 2-col prefix, so a truncated label/description ends INSIDE the border rather than
+  // overflowing the row and wrapping onto a blank continuation line.
+  const rowWidth = width - 4;
+  const descWidth = Math.max(4, rowWidth - 2 - labelWidth);
+  // Where you are in the list, on the title row. A window over a long list otherwise gives
+  // no sign that there is more of it, and the rows that used to say so were removed for
+  // changing the box's height as you reached the ends. A counter on a row that already
+  // exists says the same thing and cannot resize anything.
+  const counter = items.length > visible ? `  ${sel + 1} of ${items.length}` : "";
+  const titleRows = clipRows(title, Math.max(4, rowWidth - counter.length), maxTitleRows);
 
+  // Blank rows so title + list is a fixed count, matching the command menu's header(1) +
+  // maxRows. The box is then the SAME height as the command box and never resizes when a
+  // shorter list is shown — the surplus is empty space, not a smaller box.
+  const pad = Math.max(0, maxRows + 1 - titleRows.length - shown.length);
+
+  // Content only — the surrounding box is the ONE input box in PromptInput, shared with
+  // the input line, so opening this picker from the command menu swaps the box's
+  // contents rather than replacing the box. Same header treatment as the command menu:
+  // a plain bold label, not a loud colour, so every surface reads as one family. The
+  // description sits in its own fixed-width Box for the same reason as the command
+  // menu's — a bare Text has nothing to truncate against and wraps instead.
   return (
-    <Box flexDirection="column" width={width} marginTop={1}>
+    <>
       {titleRows.map((line, i) => (
-        <Text key={i} bold color="cyan" wrap="truncate-end">{line}</Text>
+        <Box key={`t${i}`} width={rowWidth} flexShrink={0}>
+          <Text bold wrap="truncate-end">{line}</Text>
+          {i === 0 && counter ? <Text dimColor>{counter}</Text> : null}
+        </Box>
       ))}
       {shown.map((item, i) => {
         const idx = start + i;
         const activeRow = idx === sel;
         return (
-          <Box key={idx} width={width - 1}>
+          <Box key={idx} width={rowWidth} flexShrink={0}>
             <Text color={activeRow ? "cyan" : undefined} bold={activeRow}>
               {activeRow ? "› " : "  "}
               {item.label.padEnd(labelWidth)}
             </Text>
             {item.description ? (
-              <Text dimColor wrap="truncate-end">{"  " + item.description}</Text>
+              <Box width={descWidth}>
+                <Text dimColor wrap="truncate-end">{"  " + item.description}</Text>
+              </Box>
             ) : null}
           </Box>
         );
       })}
-      <Text dimColor>{"  ↑/↓ move · Enter select · Esc cancel"}</Text>
-    </Box>
+      {Array.from({ length: pad }).map((_, i) => (
+        <Box key={`pad${i}`} flexShrink={0}><Text> </Text></Box>
+      ))}
+      <Box flexShrink={0}>
+        {/* Backspace goes back as well as Escape, and saying so is the only way that is
+            discoverable: the instinct on a screen you opened by mistake is to delete your
+            way out of it, and a hint that names only Escape reads as if nothing else works. */}
+        <Text dimColor>{"↑/↓ move · Enter select · Esc or ⌫ back"}</Text>
+      </Box>
+    </>
   );
 }

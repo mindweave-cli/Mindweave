@@ -312,15 +312,20 @@ test("a picker never grows past its row budget, however long its title", () => {
 // ── the approval box ─────────────────────────────────────────────────────────
 
 function approvalFrame(question: string, options: string[], width = 74): string {
+  // ApprovalBox is content-only now; the border is the shared menu box it renders inside
+  // (see PromptInput). Wrap it the same way here so the box's stop-reading border, spacing
+  // and clipping are all exercised together.
   return renderFrame(
-    <ApprovalBox
-      question={question}
-      options={options}
-      width={width}
-      onSelect={() => {}}
-      onCancel={() => {}}
-      active={false}
-    />,
+    <Box flexDirection="column" width={width} borderStyle="single" borderColor="gray" paddingX={1}>
+      <ApprovalBox
+        question={question}
+        options={options}
+        width={width}
+        onSelect={() => {}}
+        onCancel={() => {}}
+        active={false}
+      />
+    </Box>,
   );
 }
 
