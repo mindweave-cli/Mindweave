@@ -3,6 +3,91 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.1.0 (2026-08-31): one box for everything the prompt opens
+
+The sections below are ordered by what a user would notice: an interface that stops
+rebuilding itself every time a command opens something, a class of tool that could be
+found but never called, and a token figure that reported the session when it meant to
+report the task.
+
+### Every surface the prompt opens is the same box
+
+The command list, every picker, the key manager and an approval prompt all render in one
+box beneath the input, at a fixed size. Opening `/provider` from the command list used to
+replace one box with another, and moving between them changed the height of the footer,
+so the conversation above it jumped.
+
+The box is now held across the change. A command that opens one of these surfaces has
+work to do first, reading the sessions on disk or refreshing the model list, and the input
+clears the moment it is submitted; between the two there was a render with nothing to put
+in the box, so the box unmounted and its frame left the screen and came back. The frame is
+kept from the submit itself, and only its contents change.
+
+Nothing inside it resizes either. Each surface pads or scrolls to the box's height rather
+than growing, and the rows that used to say `↑ 8 more` are gone, since they appeared and
+disappeared as the ends of a list were reached and changed the height doing it. The
+position is on the title row instead, as `3 of 9`, which cannot resize anything. The hint
+line sits on the bottom row of the box at every level of every surface.
+
+### Backspace leaves what it opened
+
+Escape was the only way out of a picker or the key manager. Deleting what was just chosen
+is the instinctive way back, and a screen that ignores it reads as frozen. Backspace and
+Delete now step back one level wherever a list is showing, and the hint says so. Inside
+the field where a key is typed they still belong to the text.
+
+### The provider, model and key screens say more
+
+`/provider` names the model actually running on the provider you are on, which was the one
+thing the screen could not tell you. `/model` leads each row with the size of the model's
+context window and whether it can read an attached image, ahead of the prose, because the
+row truncates from the right and a narrow terminal is where those two facts matter most.
+
+### A tool that could be found could not be called
+
+Tools that are not advertised up front are discovered through `find_tools`. Finding one
+returned its schema but did not add it to the tools sent with the next request, and a
+model that will only call a function present in that list therefore could not use anything
+it found. Screenshots, and every other deferred tool, were unreachable on those models.
+
+`find_tools` now activates what it finds: the tool joins the advertised set for the rest
+of the session, is written to the session file, and comes back on resume. A forked session
+gets its own copy rather than sharing the parent's.
+
+### The live counter reports the task, not the session
+
+The figure beside the working line, and the receipt at the end of a turn, count the output
+of the task in front of you. The whole conversation is re-sent on every tool round, so a
+running billed total counts the session's context once per round and climbs into the
+hundreds of thousands for a task that produced a few pages. That number described the
+session, not the work.
+
+The context the model is holding is a separate measurement, and it is the one that decides
+when the conversation is summarized. It now has its own notice, which appears as the room
+runs out and says how much is left before that happens.
+
+### Background shells
+
+A list of shells that are still running no longer reads as an invitation to check again.
+The reply says that a finished shell announces itself, that a server's ordinary running
+state is not an event to wait for, and that the turn should end. A shell the user closed
+themselves is not reopened for two minutes, so closing something is not immediately undone.
+
+### Format-Table was refused as an attempt to reformat a disk
+
+The pattern guarding against destroying a filesystem matched the word `format` anywhere in
+a command, so PowerShell's display cmdlets — `Format-Table`, `Format-List`, `Format-Hex` —
+and even `git log --format=…` were blocked. It now matches `mkfs`, `format` applied to a
+drive or a switch, and the cmdlets that actually erase a volume.
+
+### GLM-5.3-Flash reads images
+
+The GLM driver declared no vision support, so an image attached while it was running was
+dropped before the request was built. GLM-5.3-Flash takes image input on its own id
+through the ordinary request shape, and is now declared as such. The other GLM models
+remain text-only, and an image pointed at one is still dropped rather than sent.
+
+
 ## v2.0.2 (2026-08-27): key and provider fixes
 
 Choosing a provider with `/provider` that has no key yet now opens straight on the field
