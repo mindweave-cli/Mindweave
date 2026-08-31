@@ -4,18 +4,16 @@
  * Shaped by how the best terminal agents do it, and by a previous attempt here that was
  * worse in a way worth recording.
  *
- * THE QUANTITY IS OUTPUT ONLY, estimated from the characters that have streamed back.
- * Not billed tokens, not the prompt, not the context. The previous version showed a
- * running BILLED total so the live figure and the end-of-turn receipt would agree, and
- * the reasoning was sound but the result was not: input is not a thing that ARRIVES, so
- * the moment a call went out the figure leapt by the size of the prompt and then sat
- * still. A number that jumps 20,000 and freezes is not a progress indicator, and worse,
- * it invited exactly the question it should answer — what were those tokens spent on? —
- * about tokens that were mostly served from cache and barely cost anything.
+ * THE QUANTITY IS OUTPUT ONLY, estimated from the characters that have streamed back, and
+ * accumulated across the whole task (reset only at task start). It is the task's OWN work.
+ * Not the prompt, not the context, not a billed total: the conversation is re-sent on every
+ * tool round, so a running billed figure counts the whole session's context once per round
+ * and reports the session, not the task — the very thing the display must not do.
  *
- * What streams is what moves. Output is the only quantity that grows continuously while
- * a turn runs, so it is the only honest thing to animate. The receipt afterwards is
- * where the turn's real cost belongs, and the two are different measurements on purpose.
+ * What streams is what moves. Output is the only quantity that grows continuously while a
+ * turn runs, so it is the only honest thing to animate; input does not "arrive". How full
+ * the context is — the last prompt's size, which drives compaction — is a separate measure,
+ * not this one.
  *
  * THE COUNTER IS EASED. Deltas arrive in lumps — a provider may deliver a whole sentence
  * in one chunk — so a counter that renders the raw total ticks in visible jerks. The

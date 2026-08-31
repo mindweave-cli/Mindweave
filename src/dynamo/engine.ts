@@ -1922,7 +1922,7 @@ async function sweepSessionMemory(session: Session, options: RespondOptions): Pr
  * direction — it under-counts for one call, which fires the bars early rather than
  * late, and the next call re-measures.
  */
-function contextUsed(session: Session): number {
+export function contextUsed(session: Session): number {
   const measured = session.contextOverhead;
   const overhead =
     measured && measured.model === session.modelConfig.model

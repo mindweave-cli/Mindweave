@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   warnBarFor,
+  contextPressure,
   sharpContextWindow,
   summaryReserveFor,
   autoCompactThreshold,
@@ -146,4 +147,24 @@ test("the approach warning sits below the bar and scales with the model", () => 
     assert.ok(warn > auto * 0.5, `but not so early it is meaningless (auto ${auto})`);
   }
   assert.ok(warnBarFor(299_000) - warnBarFor(107_000) > 0, "a bigger window gets more absolute room");
+});
+
+test("contextPressure warns only past the warn bar, and counts down room to the compaction", () => {
+  const model = "claude-sonnet-5";
+  const auto = autoCompactThreshold(model);
+  const warn = warnBarFor(auto);
+
+  // Comfortably under the warn bar: silent, and never surface a stale notice.
+  assert.equal(contextPressure(Math.round(auto * 0.5), model).warn, false);
+  assert.equal(contextPressure(warn - 1, model).warn, false);
+
+  // At and past the warn bar: the notice shows, and percentLeft is the room to the bar.
+  const atWarn = contextPressure(warn, model);
+  assert.equal(atWarn.warn, true);
+  assert.ok(atWarn.percentLeft > 0 && atWarn.percentLeft <= 100 - 90 + 1, `~10% left at the warn bar, got ${atWarn.percentLeft}`);
+
+  // As the auto bar is reached, the room runs out — 0% left, which is where the pass fires.
+  assert.equal(contextPressure(auto, model).percentLeft, 0);
+  assert.equal(contextPressure(auto + 50_000, model).percentLeft, 0, "never negative once over the bar");
+  assert.equal(contextPressure(auto, model).warn, true);
 });

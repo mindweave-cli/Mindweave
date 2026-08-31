@@ -80,6 +80,41 @@ test("a session that never called a model carries no empty log", async () => {
   }
 });
 
+test("a resumed session re-advertises the deferred tools it had already surfaced", async () => {
+  // Problem it guards: resume rebuilds a FRESH toolContext, so without persisting the
+  // activation set a continued session would strip a deferred tool the model had searched
+  // for and was mid-use of — and (for a strict function-calling model) it could no longer
+  // call it. The set must survive to disk and come back.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mw-activated-"));
+  try {
+    const first = await sessionIn(dir);
+    first.toolContext.activatedTools = new Set(["screenshot", "save_memory"]);
+    await saveSession(first);
+
+    const meta = (await listSessions(dir))[0]!;
+    assert.deepEqual([...(meta.activatedTools ?? [])].sort(), ["save_memory", "screenshot"], "the activation set did not reach disk");
+
+    const back = await resumeSession(dir, first.id);
+    assert.ok(back, "the session did not resume");
+    assert.ok(back.toolContext.activatedTools?.has("screenshot"), "resume dropped an activated tool");
+    assert.ok(back.toolContext.activatedTools?.has("save_memory"), "resume dropped an activated tool");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a session that never searched carries no activation list", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mw-activated-"));
+  try {
+    const s = await sessionIn(dir);
+    s.toolContext.activatedTools = new Set();
+    await saveSession(s);
+    assert.equal((await listSessions(dir))[0]!.activatedTools, undefined, "an empty set must not write a key");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("resuming a session keeps what it already spent", async () => {
   // The failure this guards is worse than forgetting. `resumeSession` rebuilt the session
   // without its spend, and the next save OVERWRITES the meta — so a continued session

@@ -154,6 +154,33 @@ export function warnBarFor(autoBar: number): number {
   return Math.round(autoBar * WARN_SHARE_OF_AUTO);
 }
 
+/** What to tell the user about how close a compaction is (pure). */
+export interface ContextPressure {
+  /** Show the notice at all — context has crossed the warn bar (90% of the auto bar). */
+  warn: boolean;
+  /**
+   * How much of the way to auto-compaction is LEFT, 0–100. At the warn bar this is ~10;
+   * it reaches 0 as the auto bar is hit and the summarizing pass runs. A percentage, not a
+   * token count, on purpose: the notice is about ROOM remaining, not spend.
+   */
+  percentLeft: number;
+}
+
+/**
+ * Turn a measured context size into the proactive "a compaction is coming" notice.
+ *
+ * Nothing shows until context crosses the warn bar (`warnBarFor`, 90% of the auto bar), so
+ * an ordinary session never sees it — it appears only for the turn or two of notice before
+ * the summarizing pass rewrites the conversation, which is the one thing a user should not
+ * meet by surprise. The arithmetic is the SAME auto bar the compaction decision runs on, so
+ * what the notice says and what actually happens cannot disagree.
+ */
+export function contextPressure(used: number, model: string): ContextPressure {
+  const auto = autoCompactThreshold(model);
+  const percentLeft = auto > 0 ? Math.max(0, Math.round(((auto - used) / auto) * 100)) : 0;
+  return { warn: used >= warnBarFor(auto), percentLeft };
+}
+
 /** Autocompact bar for a model, anchored to its driver's numbers. */
 export function autoCompactThreshold(model: string): number {
   return autoBarFor(sharpContextWindow(model), summaryReserveFor(model));
