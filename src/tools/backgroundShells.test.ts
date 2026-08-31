@@ -10,6 +10,8 @@ import {
   BackgroundShells,
   isInteractiveServerCommand,
   findRunningDuplicate,
+  findRecentUserClose,
+  REOPEN_COOLDOWN_MS,
   shouldWakeOnEnd,
   guessNotifyPolicy,
   detectPort,
@@ -341,6 +343,89 @@ test("findRunningDuplicate: nothing running means nothing to collide with", () =
   assert.equal(findRunningDuplicate([], "npm run tauri dev"), undefined);
 });
 
+// ── The reopen guard: don't relaunch an app the user just closed ─────────────
+
+function closed(
+  id: number,
+  command: string,
+  opts: { finishedAt: number; ready?: boolean; stoppedBy?: "user" | "agent"; status?: "exited" | "killed" },
+): ShellInfo {
+  return {
+    id,
+    command,
+    cwd: "/p",
+    status: opts.status ?? "exited",
+    exitCode: 0,
+    startedAt: 0,
+    finishedAt: opts.finishedAt,
+    notify: "on_failure",
+    ready: opts.ready ?? true,
+    ...(opts.stoppedBy ? { stoppedBy: opts.stoppedBy } : {}),
+  };
+}
+
+test("findRecentUserClose: an app that came up and was closed (no kill) is a recent user-close", () => {
+  const now = 1_000_000;
+  const shells = [closed(5, "npm run start", { finishedAt: now - 3000 })];
+  assert.equal(findRecentUserClose(shells, "npm run start", now)?.id, 5);
+  // Normalized like the duplicate check: whitespace and case don't matter.
+  assert.equal(findRecentUserClose(shells, "NPM  run   start", now)?.id, 5);
+});
+
+test("findRecentUserClose: an explicit user stop counts too", () => {
+  const now = 1_000_000;
+  const shells = [closed(5, "npm run start", { finishedAt: now - 3000, stoppedBy: "user", status: "killed" })];
+  assert.equal(findRecentUserClose(shells, "npm run start", now)?.id, 5);
+});
+
+test("findRecentUserClose: an app the AGENT killed is NOT a user-close (its own restart is fine)", () => {
+  const now = 1_000_000;
+  const shells = [closed(5, "npm run start", { finishedAt: now - 3000, stoppedBy: "agent", status: "killed" })];
+  assert.equal(findRecentUserClose(shells, "npm run start", now), undefined);
+});
+
+test("findRecentUserClose: a server that never came up is NOT blocked (the agent should be free to fix it)", () => {
+  const now = 1_000_000;
+  const shells = [closed(5, "npm run start", { finishedAt: now - 3000, ready: false })];
+  assert.equal(findRecentUserClose(shells, "npm run start", now), undefined);
+});
+
+test("findRecentUserClose: outside the cooldown it no longer blocks (a later restart is allowed)", () => {
+  const now = 1_000_000;
+  const shells = [closed(5, "npm run start", { finishedAt: now - REOPEN_COOLDOWN_MS - 1 })];
+  assert.equal(findRecentUserClose(shells, "npm run start", now), undefined);
+});
+
+test("findRecentUserClose: a still-running shell and a different command do not match", () => {
+  const now = 1_000_000;
+  assert.equal(findRecentUserClose([shell(5, "npm run start")], "npm run start", now), undefined, "running is caught by the duplicate guard, not this one");
+  assert.equal(findRecentUserClose([closed(5, "npm run start", { finishedAt: now - 3000 })], "npm run build", now), undefined);
+});
+
+test("run_command refuses to reopen an app the user just closed, then allows it once the agent kills its own restart", async () => {
+  // Short startup grace so "it came up" fires fast instead of after the 10s default.
+  const mgr = new BackgroundShells(50, 2_000);
+  const ctx = { cwd: process.cwd(), roots: [process.cwd()], reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+
+  // 1. A server the agent started comes up.
+  const child = spawn(NODE, ["-e", "setTimeout(()=>{}, 100000)"], { detached: DETACH });
+  const info = mgr.adopt(child, { command: "npm run start", cwd: process.cwd(), notify: "on_failure" });
+  await waitUntil(() => mgr.list().find((s) => s.id === info.id)!.ready, 10_000);
+
+  // 2. The USER closes it themselves — the process ends without a kill_shell.
+  const proc = (mgr as unknown as { shells: Map<number, { child: { kill(): void } | null }> }).shells.get(info.id)!;
+  proc.child!.kill();
+  await waitUntil(() => mgr.list().find((s) => s.id === info.id)!.status !== "running");
+
+  // 3. The agent tries to reopen the same command — refused, not relaunched.
+  const reopen = await runCommand.execute({ command: "npm run start", run_in_background: true }, ctx);
+  assert.equal(reopen.isError, true, `reopening a user-closed app must be refused, got: ${reopen.output}`);
+  assert.match(reopen.output, /not reopening|closed .* themselves/i, `got: ${reopen.output}`);
+  assert.equal(mgr.running().length, 0, "nothing should have been relaunched");
+
+  mgr.dispose();
+});
+
 // ── The policy is DECLARED, not guessed ─────────────────────────────────────
 
 test("the decision is keyed on the declared policy", () => {
@@ -560,6 +645,35 @@ test("the whole reported scenario, through run_command / shell_output / list_she
   const afterList = await shellsTool.execute({}, ctx);
   assert.match(afterList.output, /after it had come up|stopped by/, `list_shells must explain the stop, got: ${afterList.output}`);
 
+  mgr.dispose();
+});
+
+test("listing shells while one is running nudges against the poll loop and the never-finishes trap", async () => {
+  // The bug this closes: a model that checks "what's running" on a loop was never told to
+  // stop, and kept waiting for a dev server to "finish" — which never happens. The read
+  // path (by id) already nudges; the list path did not, so a poll via the list looped.
+  const mgr = new BackgroundShells();
+  const ctx = { cwd: process.cwd(), roots: [process.cwd()], reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const child = spawn(NODE, ["-e", "setTimeout(()=>{}, 100000)"], { detached: DETACH });
+  mgr.adopt(child, { command: "npm run start", cwd: process.cwd(), notify: "on_failure" });
+  await waitUntil(() => mgr.runningCount() === 1);
+
+  const listed = await shellsTool.execute({}, ctx);
+  assert.match(listed.output, /do NOT list this on a loop/i, `list must nudge against polling, got: ${listed.output}`);
+  assert.match(listed.output, /end your turn/i, `got: ${listed.output}`);
+  assert.match(listed.output, /never wait for one to "finish/i, `got: ${listed.output}`);
+  mgr.dispose();
+});
+
+test("listing shells with nothing running does not nudge — a finished list is a fact, not a poll", async () => {
+  const mgr = new BackgroundShells();
+  const ctx = { cwd: process.cwd(), roots: [process.cwd()], reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
+  const child = spawn(NODE, ["-e", "process.exit(0)"], { detached: DETACH });
+  mgr.adopt(child, { command: "echo done", cwd: process.cwd(), notify: "on_finish" });
+  await waitUntil(() => mgr.runningCount() === 0);
+
+  const listed = await shellsTool.execute({}, ctx);
+  assert.doesNotMatch(listed.output, /do NOT list this on a loop/i, `a settled list must not nudge, got: ${listed.output}`);
   mgr.dispose();
 });
 

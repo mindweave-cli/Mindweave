@@ -43,7 +43,7 @@ import { captureAfterCommand, looksReadOnly, snapshotBeforeCommand } from "./she
 import { canonicalRoot, relativize } from "./paths.js";
 import { outputDetail, withOutcome } from "./detail.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
-import { findRunningDuplicate, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
+import { findRunningDuplicate, findRecentUserClose, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
 import { fail, failQuietly } from "./results.js";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -230,6 +230,26 @@ export const runCommand: Tool = {
             `fresh start, call kill_shell(${dup.id}) first, then relaunch.`,
           isError: true,
           summary: `already running as shell #${dup.id}`,
+        };
+      }
+
+      // Reopen guard: don't relaunch an app the USER just closed. Without this, an agent
+      // that reopens a closed window turns into a loop — the user shuts their app, it comes
+      // straight back, they shut it again, and so on. The match is scoped to apps that came
+      // up and were closed WITHOUT a kill_shell (`findRecentUserClose`), so the agent's own
+      // kill-then-relaunch is untouched and a server that failed to start can still be
+      // retried. The cooldown lets a restart the user asks for later through.
+      const closed = findRecentUserClose(ctx.backgroundShells.list(), command, Date.now());
+      if (closed) {
+        const secs = closed.finishedAt ? Math.round((Date.now() - closed.finishedAt) / 1000) : 0;
+        return {
+          output:
+            `The user closed \`${clip(command)}\` themselves ${secs}s ago (shell #${closed.id}, after it had come up), ` +
+            `so I'm not reopening it. Reopening an app the user just shut turns into a loop where they keep closing ` +
+            `it and it keeps coming back. Leave it down. If it genuinely needs to be running, ask the user first and ` +
+            `let them decide — don't relaunch it on your own.`,
+          isError: true,
+          summary: `user closed #${closed.id} ${secs}s ago — not reopening`,
         };
       }
     }

@@ -170,6 +170,45 @@ export function findRunningDuplicate(
   return running.find((s) => norm(s.command) === target);
 }
 
+/** How long after a user closes an app a re-launch of the same command is refused. Long
+ *  enough to break the close→reopen loop that plays out over a turn or two; short enough
+ *  that a restart the user genuinely asks for a while later is not held back. */
+export const REOPEN_COOLDOWN_MS = 2 * 60 * 1000;
+
+/**
+ * Was `command` an app the USER just closed? (pure/tested)
+ *
+ * The loop this breaks: the user closes their app, an agent that ignores the "do not
+ * reopen" note fires run_command again, the user closes it again, and round it goes. A
+ * match here lets the tool refuse the re-launch instead of reopening what the user shut.
+ *
+ * The signal is "it came up, then ended, and the AGENT did not kill it" — `ready` and
+ * `stoppedBy !== "agent"`. That is deliberately the same fact `shouldWakeOnEnd` treats as
+ * the user stopping their own app. It leaves the agent's OWN restart flow (kill_shell then
+ * relaunch) untouched, because that ending is `stoppedBy: "agent"`; and it never blocks a
+ * server that failed to start (`ready` is false), which the agent should be free to fix.
+ * Matched on the normalized command within a cooldown, so a later, deliberate restart is
+ * not held back.
+ */
+export function findRecentUserClose(
+  shells: readonly ShellInfo[],
+  command: string,
+  now: number,
+  windowMs: number = REOPEN_COOLDOWN_MS,
+): ShellInfo | undefined {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const target = norm(command);
+  return shells.find(
+    (s) =>
+      s.status !== "running" &&
+      s.ready &&
+      s.stoppedBy !== "agent" &&
+      s.finishedAt !== null &&
+      now - s.finishedAt < windowMs &&
+      norm(s.command) === target,
+  );
+}
+
 /** Plain, serializable view of a background shell (what tools/UI see). */
 export interface ShellInfo {
   id: number;

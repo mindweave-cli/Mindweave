@@ -153,9 +153,22 @@ function listAll(ctx: ToolContext): ToolResult {
   const mgr = ctx.backgroundShells;
   const shells = mgr?.list() ?? [];
   if (shells.length === 0) return { output: "No background shells.", summary: "no background shells" };
+  const running = mgr!.runningCount();
+  // The same anti-poll discipline the read path (by `id`) enforces, but for the list. The
+  // events worth waking for — a task finishing, a server coming up, a server failing to come
+  // up — are PUSHED automatically, so re-listing on a loop is pure waste; and a server's
+  // normal stop is never reported, so waiting for one to "finish" waits forever. Without
+  // this a model that checks "what's running" repeatedly is told neither, and loops. Only
+  // attached while something is running: a finished list is a fact to read, not a poll.
+  const nudge =
+    running > 0
+      ? `\n[${running} still running. You are told automatically when there is something to act on — a ` +
+        "task finishing, a server coming up, or a failure to come up. A server's normal stop is NOT " +
+        'reported, so never wait for one to "finish." Do NOT list this on a loop — end your turn.]'
+      : "";
   return {
-    output: shells.map((s) => statusLine(s, ctx)).join("\n"),
-    summary: `${mgr!.runningCount()} running, ${shells.length} total`,
+    output: shells.map((s) => statusLine(s, ctx)).join("\n") + nudge,
+    summary: `${running} running, ${shells.length} total`,
   };
 }
 
