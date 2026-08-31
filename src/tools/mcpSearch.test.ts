@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { findTools } from "./mcpSearch.js";
+import { toolSchemas } from "./registry.js";
 import { McpManager } from "../mcp/manager.js";
 import type { ToolContext } from "./types.js";
 
@@ -55,6 +56,21 @@ test("with no servers it says so plainly and points back to built-ins", async ()
   const r = await findTools.execute({ query: "github" }, ctxWith());
   assert.equal(r.isError, undefined, "no servers is a normal answer, not an error");
   assert.match(r.output, /No MCP servers/);
+});
+
+test("searching a native tool ACTIVATES it, so it becomes advertised and callable", async () => {
+  // The whole point of the fix: a strict function-calling model can only call a tool that
+  // is in the request's tools array. find_tools must record what it surfaced so the tool
+  // is added there — a schema shown only in the result is not enough.
+  const ctx = { activatedTools: new Set<string>() } as unknown as ToolContext;
+  const r = await findTools.execute({ query: "screenshot" }, ctx);
+  assert.match(r.output, /screenshot/, "the search must surface the tool");
+  assert.ok(ctx.activatedTools!.has("screenshot"), "find_tools must activate the surfaced native tool");
+
+  // End to end: the very next tool list the engine builds with this ctx must now include
+  // screenshot, so the model can actually emit the call it was told it could make.
+  const names = (toolSchemas({ ctx }) as { name?: string; function?: { name?: string } }[]).map((s) => s.name ?? s.function?.name ?? "");
+  assert.ok(names.includes("screenshot"), "a searched tool must be advertised on the next request, or it is callable in name only");
 });
 
 test("when nothing is deferred it tells the model not to bother", async () => {

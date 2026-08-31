@@ -132,6 +132,12 @@ export interface SessionMeta {
   spend?: SessionSpend;
   /** Per-call token usage for this session, most recent last. See `CallUsage`. */
   callLog?: CallUsage[];
+  /**
+   * Deferred tools surfaced via `find_tools` during this session (ToolContext.activatedTools).
+   * Persisted so a resumed session re-advertises them — otherwise a continued session would
+   * strip a tool the model was mid-way through using, and it could no longer call it.
+   */
+  activatedTools?: string[];
 }
 
 /**

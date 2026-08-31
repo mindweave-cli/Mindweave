@@ -13,7 +13,6 @@
  *  - a tool whose subject matter can be absent is gated on the subject, not on a search.
  */
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { toolSchemas, TOOLS } from "./registry.js";
 import { DEFERRED_TOOLS, deferredToolsIndex, matchDeferred, renderToolSchema } from "./deferredNative.js";
@@ -131,20 +130,42 @@ test("discovery is append-only: a search hands over a callable schema", () => {
   }
 });
 
-test("the advertised list cannot be moved by anything a turn does", () => {
-  // The invariant, stated as an invariant: whatever happens in a session, the bytes the
-  // provider hashes are the same bytes. There is no longer an argument that could change
-  // them, which is stronger than remembering not to pass one.
+test("the advertised list moves ONLY when a deferred tool is activated, and only by that tool", () => {
+  // The list is stable across a turn that activates nothing: same bytes, so the provider's
+  // cached prefix survives. This is the common session, and it pays nothing.
   const a = JSON.stringify(toolSchemas({ ctx: freshCtx() }));
   const b = JSON.stringify(toolSchemas({ ctx: freshCtx() }));
   assert.equal(a, b);
 
-  // And structurally, because the behavioural check above passes trivially once the
-  // capability is gone: there must be no way to ASK for a deferred tool to be advertised.
-  // The old signature took an `activated` set, and every caller that passed one was
-  // buying a prefix rewrite it could not see.
-  const source = readFileSync(new URL("./registry.ts", import.meta.url), "utf8");
-  assert.ok(!/activated/.test(source), "toolSchemas can still be asked to advertise a deferred tool");
+  // Surfacing a deferred tool through find_tools adds THAT tool and nothing else — the one
+  // deliberate prefix change, paid once, so a strict function-calling model can actually
+  // call what it just searched for. Before this it could not: the schema was shown only as
+  // text and the tool was never in the request's `tools` array.
+  const withShot = freshCtx();
+  withShot.activatedTools = new Set(["screenshot"]);
+  const active = advertised(withShot);
+  assert.ok(active.includes("screenshot"), "an activated deferred tool must be advertised");
+  const base = advertised(freshCtx());
+  assert.deepEqual(active.filter((n) => n !== "screenshot").sort(), base.slice().sort(), "activation must add only the searched tool");
+
+  // Idempotent: the same activation set yields the same bytes, so re-searching an already
+  // active tool does not move the prefix again.
+  const active2 = advertised((() => { const c = freshCtx(); c.activatedTools = new Set(["screenshot"]); return c; })());
+  assert.deepEqual(active, active2);
+});
+
+test("an activated deferred tool still obeys the read-only filter", () => {
+  // Activation adds a tool to the CANDIDATE set; the read-only filter still runs. So a
+  // read-only sub-agent that inherited a non-read-only activation (replace_symbol_body,
+  // spawn_subagent, …) must still not be handed it — activation is not a permission bypass.
+  const writeTool = DEFERRED_TOOLS.find((t) => !t.readOnly);
+  assert.ok(writeTool, "expected at least one non-read-only deferred tool");
+  const ctx = freshCtx();
+  ctx.activatedTools = new Set([writeTool!.name]);
+  assert.ok(advertised(ctx).includes(writeTool!.name), "activated, so advertised in a normal turn");
+  const ro = (toolSchemas({ ctx, readOnlyOnly: true }) as { name?: string; function?: { name?: string } }[])
+    .map((s) => s.name ?? s.function?.name ?? "");
+  assert.ok(!ro.includes(writeTool!.name), `${writeTool!.name} is not read-only, so a read-only turn must not advertise it even when activated`);
 });
 
 test("a search for one tool does not hand over five others", () => {

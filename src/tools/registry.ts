@@ -99,18 +99,24 @@ export function toolSchemas(
   // happening, so they appear only in plan mode and are hidden the rest of the time.
   // A read-only sub-agent is not planning, so it does not get them either.
   //
-  // `deferred` is the third filter, and it has no escape hatch on purpose. Searching for
-  // a deferred tool used to add it to the advertised list for the rest of the session,
-  // which changed the `tools` bytes mid-session and invalidated the provider's whole
-  // cached prefix — tools, system AND messages — to save a few hundred tokens of schema.
-  // One search cost several times what the deferral saved. Discovery is append-only now:
-  // find_tools returns the full schema in its RESULT, which lands in the conversation and
-  // is cached from the next call onward, while this list never moves. Which is why this
-  // function takes no argument that could put a deferred tool back: the advertised bytes
-  // are a pure function of the session, not of what has happened in it.
+  // `deferred` is the third filter: a deferred tool is held back UNTIL the model has
+  // surfaced it through find_tools, which records it in `ctx.activatedTools`. From then on
+  // it is advertised like any other tool.
+  //
+  // Delivering the schema only in the search RESULT (an appended message) is not enough on
+  // its own: a strict function-calling model — every OpenAI-compatible provider (GLM,
+  // DeepSeek, Qwen, …) — only emits a tool call for a function that is actually in the
+  // request's `tools` array. A schema shown as text is callable in name only; the model
+  // reads it, "knows" it should use the tool, and cannot, so it stalls. Adding the tool
+  // here once activated is what makes it real. The cost is one prefix rebuild the first
+  // time each capability is used — deliberately paid, because a tool that cannot be called
+  // is worse than a cache miss. Activation is monotonic (the set only grows), so the
+  // rebuild happens once per capability, not once per call. Nothing activated → identical
+  // bytes to before, so the common session pays nothing.
+  const activated = opts.ctx?.activatedTools;
   const tools = (readOnly ? TOOLS.filter((tool) => tool.readOnly) : TOOLS)
     .filter((tool) => (tool.planOnly ? opts.planMode === true : true))
-    .filter((tool) => !tool.deferred)
+    .filter((tool) => !tool.deferred || (activated?.has(tool.name) ?? false))
     // `relevantWhen` needs the live session; with no ctx (a schema-shape test, a
     // count) the tool is shown, because hiding it would be a false negative about
     // what the registry contains.

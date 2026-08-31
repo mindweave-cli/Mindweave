@@ -450,6 +450,19 @@ test("guard flags catastrophic commands and allows ordinary ones", () => {
   assert.equal(catastrophicCommandReason("rm -rf ./build"), null); // local dir is fine
 });
 
+test("the disk-format guard catches real formatters but not PowerShell display cmdlets", () => {
+  // Real disk formats — still blocked.
+  assert.ok(catastrophicCommandReason("format C:"), "format C: must be caught");
+  assert.ok(catastrophicCommandReason("format /fs:ntfs /q D:"), "a switched format must be caught");
+  assert.ok(catastrophicCommandReason("Format-Volume -DriveLetter D"), "Format-Volume erases a volume");
+  assert.ok(catastrophicCommandReason("Format-Disk -Number 1"), "Format-Disk erases a disk");
+  // Benign — must NOT be refused (this is the bug that blocked the agent mid-task).
+  assert.equal(catastrophicCommandReason("Get-Process electron | Format-Table -AutoSize"), null);
+  assert.equal(catastrophicCommandReason("Get-Item x | Format-List"), null);
+  assert.equal(catastrophicCommandReason("Format-Hex file.bin"), null);
+  assert.equal(catastrophicCommandReason('git log --format="%H"'), null, "--format is not disk formatting");
+});
+
 // ── grep's description warns about silent exclusions; they must be real ───────
 // The failure this guards is a wrong CONCLUSION, not a crash: an empty result read as
 // "that string is not in this codebase" when the file was skipped or refused. The

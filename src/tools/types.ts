@@ -244,6 +244,20 @@ export interface ToolContext {
    */
   todos: TodoItem[];
   /**
+   * Deferred tools the model has surfaced through `find_tools` this session.
+   *
+   * A deferred tool's schema is not in the advertised list, to keep the cached prefix
+   * small. But a strict function-calling model (OpenAI-compat: GLM, DeepSeek, …) only
+   * emits a tool call for a function that is actually in the request's `tools` array —
+   * a schema shown only as text in a search RESULT is not callable, so the model reads
+   * it, "knows" it should use the tool, and cannot. Recording the search here lets
+   * `toolSchemas` add the tool to the advertised list from then on, at the cost of one
+   * prefix rebuild per capability. Monotonic; persisted in the session meta and restored
+   * on resume, so a continued session keeps what it had. A sub-agent gets its OWN copy
+   * (forkSession), so its searches never leak into the parent's list.
+   */
+  activatedTools?: Set<string>;
+  /**
    * The per-project governor (plain data): standing rules, the skill catalog, and
    * the forbidden deny-list. This is the SAME object as `session.governance` — the
    * engine renders the prompt from it while the tools read it (forbidden checks,

@@ -150,6 +150,11 @@ export async function saveSession(session: Session): Promise<boolean> {
       // totals above are identical whether a turn made one expensive call or six cheap
       // ones, and that difference is the whole answer.
       ...(session.callLog && session.callLog.length > 0 ? { callLog: session.callLog } : {}),
+      // Deferred tools the model surfaced this session, so a resume re-advertises them
+      // instead of stripping a tool it was mid-use of (see registry.toolSchemas).
+      ...(session.toolContext.activatedTools && session.toolContext.activatedTools.size > 0
+        ? { activatedTools: [...session.toolContext.activatedTools] }
+        : {}),
     };
     await writeFileAtomic(metaPath(session.cwd, session.id), JSON.stringify(meta, null, 2));
 

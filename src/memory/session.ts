@@ -143,6 +143,10 @@ function freshToolContext(cwd: string, governance: Governance, roots: string[]):
     backgroundShells: new BackgroundShells(),
     checkpoints: new Checkpoints(),
     todos: [],
+    // Deferred tools the model has surfaced via find_tools become callable from then on
+    // (registry.toolSchemas). Empty at start; grows as the model searches; restored from
+    // meta on resume.
+    activatedTools: new Set<string>(),
     // Same governance object as Session.governance — shared so mid-session edits
     // (a new rule, a new forbidden path) are visible to both the tools and the
     // engine's prompt without a reload.
@@ -180,6 +184,10 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
     ...p,
     reads: new Map(),
     todos: [],
+    // Its OWN activation set, seeded with the parent's so it can call what is already
+    // active. Without the copy the spread would share the parent's Set by reference, and a
+    // sub-agent's find_tools would silently change the parent's advertised list.
+    activatedTools: new Set(p.activatedTools),
     // Its own id, not the parent's. The spread carries `sessionId`, so a child asking
     // "which conversation am I?" answered with the parent's — harmless while nothing
     // writes session-scoped state from a child, and wrong the moment something does.
@@ -439,6 +447,11 @@ export async function resumeSession(
   // than claim nothing has happened.
   toolContext.checkpoints?.noteResumed();
   toolContext.sessionId = meta.id;
+  // Re-advertise the deferred tools this session had already surfaced, so a continued
+  // session keeps them callable instead of stripping a tool the model was mid-use of.
+  if (meta.activatedTools && meta.activatedTools.length > 0) {
+    toolContext.activatedTools = new Set(meta.activatedTools);
+  }
   attachMcp(toolContext, cwd);
   await seedProjectMemoryRead(toolContext, projectMemory);
   return {

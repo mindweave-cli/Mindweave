@@ -74,6 +74,11 @@ export const findTools: Tool = {
     // times what the deferral saved. Dispatch resolves against the registry, so a name
     // and a schema is everything the model needs. See deferredNative.renderToolSchema.
     const native = matchDeferred(query);
+    // Activate what was found: from now on these are added to the advertised tool list
+    // (registry.toolSchemas), so a strict function-calling model can actually emit the
+    // call. Without this the schema below is callable in name only — the model sees it and
+    // cannot invoke it, because it is not in the request's `tools` array.
+    for (const t of native) ctx.activatedTools?.add(t.name);
     const nativeBlock =
       native.length > 0
         ? `${native.length} of your own tool${native.length === 1 ? "" : "s"}, callable from now on:\n\n<functions>\n` +
