@@ -3,6 +3,23 @@
   "version": "2.1.0",
   "description": "Mindweave — a fast, model-adaptive terminal coding agent.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mindweave-cli/Mindweave.git"
+  },
+  "homepage": "https://github.com/mindweave-cli/Mindweave#readme",
+  "bugs": {
+    "url": "https://github.com/mindweave-cli/Mindweave/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "coding-agent",
+    "terminal",
+    "llm",
+    "mcp"
+  ],
   "type": "module",
   "bin": {
     "mindweave": "dist/index.js",
@@ -14,6 +31,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "install-global": "npm run build && npm link",
     "typecheck": "tsc --noEmit",
@@ -22,7 +40,7 @@
     "test:lang": "node --max-old-space-size=4096 --import tsx --import ./scripts/testState.mjs --test --test-concurrency=1 src/alternator/chassis/treesitter.test.ts src/alternator/chassis/treesitterIsolation.test.ts src/alternator/chassis/markup.test.ts src/alternator/chassis/treesitterLangs.test.ts src/alternator/chassis/treesitterLangs2.test.ts src/alternator/chassis/treesitterLangs3.test.ts src/alternator/chassis/treesitterLangs4.test.ts src/alternator/chassis/langBudget.test.ts"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
