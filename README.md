@@ -37,24 +37,26 @@ What landed in it is in the [changelog](CHANGELOG.md): thirteen model providers,
 rebuilt terminal interface, reworked prompt caching and token accounting, project notes
 the agent maintains across sessions, and a long list of things that were quietly wrong.
 
+## Deferred tools, fixed in v2.1.0
+
+Tools that are not advertised up front are found with `find_tools`. Finding one returned
+its schema without adding the tool to the list sent with the next request, and a model
+that will only call a function present in that list could not call what it had just been
+shown. Every deferred tool was unreachable on those models, and a session resumed with
+`/continue` had the same shape, because nothing recorded which tools had been activated.
+The screenshot tool was where it was most visible: it could be found, described, and never
+run, which read as the model looping over a tool it could not reach.
+
+`find_tools` now activates what it finds. The tool joins the advertised set for the rest
+of the session, is written to the session file and restored on resume, and a forked
+session receives its own copy. The rest of v2.1.0 is in the [changelog](CHANGELOG.md).
+
 ## Install
 
 Requires **Windows** and **Node.js 20+**. macOS and Linux are not supported yet, and the
 reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed over.
 
 macOS and Linux support is coming soon.
-
-## NEWS FLASH 
-
-Bug: Task Continuation & Deferred Tools Issues
-
-When resuming an interrupted or closed task via /continue, the system fails to cleanly restore execution context. This manifests as the screenshot tool entering a loop the model cannot locate or properly reference the tool but this is only a symptom of a deeper problem.
-
-Root Cause: The deferred tools implementation in Mindweave removes tools from the request array entirely rather than keeping them available in a deferred state (as seen in other implementations where tools remain in the array and are simply deferred until searched). Once removed, these tools are never re-added, meaning the model permanently loses access to them after deferral.
-
-This fundamental architectural difference breaks tool availability during task continuation and is a primary contributor to the looping behavior and flow issues we're observing.
-
-Status: Multiple root causes have been identified. Fixes are in progress and will also address additional bugs uncovered during internal testing and agent evaluation.
 
 ```bash
 git clone https://github.com/mindweave-cli/Mindweave
