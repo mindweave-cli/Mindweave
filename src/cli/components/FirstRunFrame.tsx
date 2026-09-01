@@ -39,7 +39,7 @@ export function FirstRunFrame({ rows, version, subtitle, tips, children }: First
   return (
     <Box flexDirection="column" height={rows} justifyContent={justify} paddingX={2}>
       <Box flexShrink={0}>
-        <Text bold color="yellow">Mindweave</Text>
+        <Text bold color="yellow">Mindweave 1</Text>
         <Text dimColor>{version}</Text>
       </Box>
       {subtitle ? (
