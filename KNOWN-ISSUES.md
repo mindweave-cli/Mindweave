@@ -36,7 +36,3 @@ Deliberately not being worked on right now: OAuth for remote servers (they repor
 `needs-auth` and stop), multi-round tool requests and elicitation, and attaching a
 resource yourself with `@`.
 
-## npm has a placeholder, not a release
-
-The `mindweave` package on npm is version `0.0.1`, published only to hold the name. It is
-not the agent. Install from source until the first real version ships.

@@ -29,9 +29,8 @@ reason about your code.
 
 ## Mindweave 1
 
-This is Mindweave 1 which is finally out, tagged `mindweave-1`. Everything in it is here and works from a
-clone; the npm package and the website follow shortly. Until then, install from source
-with the steps below.
+This is Mindweave 1 which is finally out, tagged `mindweave-1`. It is on npm, and the
+website is up. Install with the steps below.
 
 What landed in it is in the [changelog](CHANGELOG.md): thirteen model providers, a
 rebuilt terminal interface, reworked prompt caching and token accounting, project notes
@@ -59,6 +58,19 @@ reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed
 macOS and Linux support is coming soon.
 
 ```bash
+npm install -g mindweave
+```
+
+Then, in any project:
+
+```bash
+cd your-project
+mindweave          # or mw, for short
+```
+
+To build from source instead — for development, or to run an unreleased change:
+
+```bash
 git clone https://github.com/mindweave-cli/Mindweave
 cd Mindweave
 npm install
@@ -66,19 +78,10 @@ npm run build
 npm link          # makes the `mindweave` command available globally
 ```
 
-Then, in any project:
-
-```bash
-cd your-project
-mindweave
-```
-
 It asks for an API key on first launch and saves it to `~/.mindweave/.env`, so every
 project afterwards just works. `mindweave --help` covers the launch flags; everything
 else is configured inside a session.
 
-> The `mindweave` package on npm is a name placeholder, not a release. Install from
-> source until the first published version lands.
 
 ## What it can do
 
