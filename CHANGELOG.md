@@ -3,6 +3,15 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.1.3 (2026-09-01): the release name everywhere, including mid-turn
+
+The bar shown while a turn is running still read the raw package version. It is
+the one surface in the interface with no room to spare for a number nobody reads
+it for there — the exact version is a keystroke away through `--help`, and whether
+it is current is what the update-check note already answers. It reads the release
+name alone now, the same one the first-run screen and `--help` already lead with.
+
+
 ## v2.1.2 (2026-09-01): naming the release, and a quiet check for a newer one
 
 The first-run screen and `--help` both said only "Mindweave", with the bare package
