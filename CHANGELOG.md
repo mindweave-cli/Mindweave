@@ -80,6 +80,17 @@ a command, so PowerShell's display cmdlets — `Format-Table`, `Format-List`, `F
 and even `git log --format=…` were blocked. It now matches `mkfs`, `format` applied to a
 drive or a switch, and the cmdlets that actually erase a volume.
 
+### Starting without a terminal says so
+
+Mindweave draws an interactive screen and reads keystrokes, which needs a terminal to
+read from. Started without one, through a pipe, a redirect, or a wrapper that provides
+no console, it printed a stack trace through React and renderer internals, naming files
+inside node_modules and nothing that could be acted on. It then exited 0, so a script
+that ran it was told the run had succeeded.
+
+It now says what is missing and what to do, and exits non-zero. `--help` and
+`--version` are answered before any of this and still work wherever they are called.
+
 ### GLM-5.3-Flash reads images
 
 The GLM driver declared no vision support, so an image attached while it was running was
