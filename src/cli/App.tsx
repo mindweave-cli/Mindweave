@@ -51,6 +51,7 @@ import { completePath } from "./pathComplete.js";
 import { formatHelp } from "./help.js";
 import { hasApiKey, saveApiKey, removeApiKey, useApiKey, globalEnvPath, reloadConfig } from "./bootstrap.js";
 import { versionLabel, appVersion } from "./version.js";
+import { checkForUpdate } from "./updateCheck.js";
 import { PromptInput } from "./components/PromptInput.js";
 import { Picker } from "./components/Picker.js";
 import { ApprovalBox } from "./components/ApprovalBox.js";
@@ -558,6 +559,17 @@ export function App() {
       // Nothing can run at all: open setup, which is the screen for exactly that.
       void need;
       setSetupOpen(true);
+    });
+  }, []);
+
+  // A quiet, backgrounded check for a newer release — independent of session startup so a
+  // slow or unreachable registry can never delay the first prompt. checkForUpdate() is
+  // itself the one that fails silent on every network path; a note only appears when a
+  // genuinely newer version is confirmed.
+  useEffect(() => {
+    void checkForUpdate().then((latest) => {
+      if (!latest) return;
+      note(`update available: v${appVersion()} → v${latest} — npm install -g mindweave`);
     });
   }, []);
 
