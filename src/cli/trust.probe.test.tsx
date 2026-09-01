@@ -56,7 +56,11 @@ function frame(cwd: string) {
   app.unmount();
   // Whitespace collapsed: rendered text wraps at the terminal width, so a sentence the
   // screen shows perfectly well is split across lines in the frame.
-  return out.join("").replace(/\s+/g, " ");
+  // Colour first, then whitespace. Styling puts escape codes BETWEEN words, so a phrase
+  // the screen shows plainly does not match until they are gone; wrapping then splits
+  // sentences across rows, which the collapse undoes.
+  const ESC = String.fromCharCode(27);
+  return out.join("").replace(new RegExp(ESC + "\\[[0-9;?]*[A-Za-z]", "g"), "").replace(/\s+/g, " ");
 }
 
 test("the screen names the folder and what will happen in it", () => {

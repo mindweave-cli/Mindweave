@@ -32,7 +32,10 @@ function frame(node: React.ReactElement): string {
     { stdout: stream, patchConsole: false, interactive: true },
   );
   app.unmount();
-  return out.join("");
+  // Styled text is unfindable with the codes left in: colour sits between the characters
+  // of the very strings these tests look for.
+  const ESC = String.fromCharCode(27);
+  return out.join("").replace(new RegExp(ESC + "\\[[0-9;?]*[A-Za-z]", "g"), "");
 }
 
 const PROVIDERS: ProviderRow[] = [

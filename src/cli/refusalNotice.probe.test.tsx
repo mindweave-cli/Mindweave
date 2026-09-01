@@ -30,7 +30,11 @@ class FakeStdout extends EventEmitter {
   }
 }
 
-const ANSI = /\[[0-9;]*[A-Za-z]/g;
+const ESC = String.fromCharCode(27);
+// The ESC byte belongs in the pattern. Without it the bracket sequence was removed and
+// the escape itself stayed in the row, counting a column that nothing occupies, so a row
+// measured two wider than it draws wherever colour is switched on.
+const ANSI = new RegExp(ESC + "\\[[0-9;?]*[A-Za-z]", "g");
 
 /** Render one block and return its visible rows. */
 function rowsOf(block: Block): string[] {
