@@ -3,6 +3,34 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.1.1 (2026-09-01): a terminal it can read from, and a suite that passes on a clean clone
+
+Mindweave draws an interactive screen and reads keystrokes, which needs a terminal to
+read from. Started without one — through a pipe, a redirect, or a wrapper that provides
+no console — it printed a stack trace through React and renderer internals, naming files
+inside node_modules and nothing that could be acted on. It then exited 0, so a script
+that ran it was told the run had succeeded. It now says what is missing and what to do,
+and exits non-zero. `--help` and `--version` are answered before any of this and still
+work wherever they are called from.
+
+Three screen tests read rendered frames with the colour codes left in them. Styling sits
+between the characters of a phrase, so text the screen displays plainly was not found,
+and one test measured row width with the escape byte still counted, reporting rows two
+columns wider than they draw. They passed wherever colour happened to be off, which
+includes the integration runners, and failed in an ordinary terminal: a clone and
+`npm test` reported three failures the project's own checks never saw. The frames are
+read with the codes removed, so the result no longer depends on colour at all.
+
+Two test files were listed nowhere. The test script names its files one by one rather
+than matching a pattern, so a file that is not named is silently never run; the
+block-spacing probe and the working-verb tests, eight assertions between them, were
+present in the repository and providing no protection. Both run now.
+
+The contributing guide described a feature freeze ahead of a release that has already
+happened, so the first thing a prospective contributor read about the project's
+direction was out of date.
+
+
 ## v2.1.0 (2026-08-31): one box for everything the prompt opens
 
 The sections below are ordered by what a user would notice: an interface that stops
@@ -79,17 +107,6 @@ The pattern guarding against destroying a filesystem matched the word `format` a
 a command, so PowerShell's display cmdlets — `Format-Table`, `Format-List`, `Format-Hex` —
 and even `git log --format=…` were blocked. It now matches `mkfs`, `format` applied to a
 drive or a switch, and the cmdlets that actually erase a volume.
-
-### Starting without a terminal says so
-
-Mindweave draws an interactive screen and reads keystrokes, which needs a terminal to
-read from. Started without one, through a pipe, a redirect, or a wrapper that provides
-no console, it printed a stack trace through React and renderer internals, naming files
-inside node_modules and nothing that could be acted on. It then exited 0, so a script
-that ran it was told the run had succeeded.
-
-It now says what is missing and what to do, and exits non-zero. `--help` and
-`--version` are answered before any of this and still work wherever they are called.
 
 ### GLM-5.3-Flash reads images
 
