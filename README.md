@@ -10,7 +10,7 @@
   <a href="CHANGELOG.md">Changelog</a> &nbsp;•&nbsp;
   <a href="KNOWN-ISSUES.md">Known issues</a> &nbsp;•&nbsp;
   <a href="CONTRIBUTING.md">Contributing</a> &nbsp;•&nbsp;
-  <a href="https://x.com/mindweavecli">X</a>
+  <a href="https://x.com/mindweavecli">X</a>;
   <a href="https://mindweavedev.netlify.app/">Website</a>
 </p>
 
