@@ -3,6 +3,24 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.1.2 (2026-09-01): naming the release, and a quiet check for a newer one
+
+The first-run screen and `--help` both said only "Mindweave", with the bare package
+version beside it, naming neither the release most people would recognise it by.
+Both now lead with "Mindweave 1"; the exact version stays in parentheses for anyone
+who needs it. `--version` is unchanged: it stays one parseable line for a script,
+which is a different contract from a person reading `--help`.
+
+There was no way to know a newer release existed short of checking by hand. On
+startup, in the background, a session now reads the one version currently tagged
+latest on the registry — the same request `npm install` itself makes — and says so
+if it is newer than what is running. Nothing describing the session leaves the
+machine: no identifier, no payload, nothing that turns this into the telemetry the
+project promises it does not have. The check is cached for a day, fails silent on
+every path so a slow or unreachable registry can never delay the first prompt, and
+`MINDWEAVE_NO_UPDATE_CHECK` turns it off outright for anyone who would rather no
+request happen at all.
+
 ## v2.1.1 (2026-09-01): a terminal it can read from, and a suite that passes on a clean clone
 
 Mindweave draws an interactive screen and reads keystrokes, which needs a terminal to
