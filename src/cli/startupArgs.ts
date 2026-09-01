@@ -81,3 +81,27 @@ export function parseStartupArgs(argv: readonly string[]): Startup {
   }
   return { kind: "run" };
 }
+
+/**
+ * Whether there is a terminal to read keystrokes from.
+ *
+ * The UI puts stdin into raw mode to read a keypress. Where stdin is a pipe or a
+ * redirect there is no raw mode to enter, and the failure arrives from inside the
+ * renderer as a stack trace through React internals: it names none of the things a
+ * reader could act on, and the process still exits 0, so a script calling it reads
+ * success. Asked here as a plain question about the stream, so the entry point can
+ * say what is wrong and fail in a way a script can see.
+ */
+export function hasInteractiveInput(stdin: { isTTY?: boolean }): boolean {
+  return stdin.isTTY === true;
+}
+
+/** Shown when there is no terminal to read from. */
+export const NO_TERMINAL_MESSAGE = [
+  "Mindweave is an interactive terminal application and needs a terminal to read from.",
+  "Its input is a pipe or a redirect, so there is no keyboard to attach to.",
+  "",
+  "Run it in a terminal window, from the folder you want to work in.",
+  "--help and --version work anywhere.",
+  "",
+].join(String.fromCharCode(10));

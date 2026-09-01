@@ -16,7 +16,7 @@ import { createElement } from "react";
 import { App } from "./cli/App.js";
 import { loadConfig } from "./cli/bootstrap.js";
 import { sweepTempInBackground } from "./tools/tempSweep.js";
-import { parseStartupArgs } from "./cli/startupArgs.js";
+import { parseStartupArgs, hasInteractiveInput, NO_TERMINAL_MESSAGE } from "./cli/startupArgs.js";
 import { enterAltScreen } from "./cli/altScreen.js";
 import { TERMINAL_RESTORE } from "./cli/terminalRestore.js";
 import { instrumentStdout, flush as flushPerf, perf, perfEnabled } from "./cli/perfLog.js";
@@ -31,6 +31,15 @@ const startup = parseStartupArgs(process.argv.slice(2));
 if (startup.kind === "print") {
   process.stdout.write(startup.text + "\n");
   process.exit(0);
+}
+
+// Nothing below this point can run without a terminal to read from, and the failure
+// without one is a stack trace through React internals on a process that exits 0.
+// --help, --version and --reset-terminal are answered above, so they still work
+// wherever they are called from.
+if (!hasInteractiveInput(process.stdin)) {
+  process.stderr.write(NO_TERMINAL_MESSAGE);
+  process.exit(1);
 }
 if (startup.kind === "reset") {
   // Repairing a terminal a dead run left in mouse-reporting mode. Nothing else may run

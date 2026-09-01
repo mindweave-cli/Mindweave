@@ -8,7 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseStartupArgs, versionText, helpText } from "./startupArgs.js";
+import { parseStartupArgs, versionText, helpText, hasInteractiveInput, NO_TERMINAL_MESSAGE } from "./startupArgs.js";
 
 test("--version and -v ask to print, not to run", () => {
   for (const flag of ["--version", "-v"]) {
@@ -77,5 +77,23 @@ test("a near miss is not treated as the repair flag", () => {
   // Repairing when asked to start a session would look like a crash on launch.
   for (const arg of ["--reset", "--reset-term", "-r", "reset-terminal"]) {
     assert.equal(parseStartupArgs([arg]).kind, "run", arg);
+  }
+});
+
+test("a pipe is not a terminal to read from, and a terminal is", () => {
+  // The renderer needs raw mode on stdin. Without a terminal it fails from inside React
+  // with a reconciler stack trace, on a process that still exits 0 — so the caller is
+  // told the run succeeded. The entry point asks this first and stops.
+  assert.equal(hasInteractiveInput({ isTTY: true }), true);
+  assert.equal(hasInteractiveInput({ isTTY: false }), false, "a pipe is not a terminal");
+  assert.equal(hasInteractiveInput({}), false, "a stream that says nothing is not a terminal");
+});
+
+test("the no-terminal message says what to do, and names nothing internal", () => {
+  const m = NO_TERMINAL_MESSAGE;
+  assert.match(m, /terminal/i, "it does not say what is missing");
+  assert.match(m, /--help and --version work anywhere/, "it does not say what still works");
+  for (const leak of [/raw mode/i, /react/i, /ink/i, /node_modules/, /stack/i]) {
+    assert.doesNotMatch(m, leak, "the message repeats an internal detail the reader cannot act on");
   }
 });
