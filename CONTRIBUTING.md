@@ -73,11 +73,12 @@ That is the short version. The full statement of how this project is run, why th
 
 ### What we are working on next
 
-**Feature freeze, then Release 1.** v1.9.0 closed the core-hardening arc. Since then the
-work has been point releases driven by real use: v1.9.1 audited all 36 tools against their
-implementations, and v1.9.2 fixed how much the agent talks and how often it re-reads
-things it already has. Both are in the [changelog](CHANGELOG.md), and both came out of
-running the agent on an actual project rather than from reading code.
+**Point releases, driven by use.** Mindweave 1 is out, and the work since has been point
+releases rather than a march toward a milestone: an audit of every tool against its own
+implementation, a pass on how much the agent talks and how often it re-reads what it
+already has, and the defects that turned up behind both. They are in the
+[changelog](CHANGELOG.md), and they came out of running the agent on an actual project
+rather than from reading code.
 
 The method is deliberately unglamorous. Take something already shipped with passing tests,
 read it fresh on the assumption it is wrong, and go looking for the failure shapes this
