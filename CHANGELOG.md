@@ -22,7 +22,7 @@ which is a different contract from a person reading `--help`.
 
 There was no way to know a newer release existed short of checking by hand. On
 startup, in the background, a session now reads the one version currently tagged
-latest on the registry — the same request `npm install` itself makes and says so
+latest on the registry the same request `npm install` itself makes and says so
 if it is newer than what is running. Nothing describing the session leaves the
 machine: no identifier, no payload, nothing that turns this into the telemetry the
 project promises it does not have. The check is cached for a day, fails silent on
