@@ -7,9 +7,6 @@
 
 <p align="center">
   <a href="LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
-  <a href="CHANGELOG.md">Changelog</a> &nbsp;•&nbsp;
-  <a href="KNOWN-ISSUES.md">Known issues</a> &nbsp;•&nbsp;
-  <a href="CONTRIBUTING.md">Contributing</a> &nbsp;•&nbsp;
   <a href="https://x.com/mindweavecli">X</a> &nbsp;•&nbsp;
   <a href="zallinimann@gmail.com">Email</a> &nbsp;•&nbsp;
   <a href="https://mindweavedev.netlify.app/">Website</a>
