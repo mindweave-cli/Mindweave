@@ -48,6 +48,18 @@ const MAX_OPEN_DOCS = 300;
 /** Documents opened in a single `ensureProjectOpen` call, to bound its latency. */
 const OPEN_BATCH = 50;
 
+/**
+ * How long to keep asking a just-opened server for a symbol before believing its
+ * empty answer, in milliseconds between attempts.
+ *
+ * Backing off rather than polling evenly, because the common case is a server that is
+ * ready almost at once and the expensive case is one that is not. Six attempts, ~4.6s
+ * in total, paid once per server and only when nothing came back — a cold pyright on a
+ * loaded four-core machine takes seconds to index where a warm laptop takes
+ * milliseconds, which is why a fixed wait tuned on the laptop was never going to hold.
+ */
+const INDEX_RETRY_DELAYS = [100, 200, 400, 800, 1500, 1600];
+
 export interface LspSymbol {
   name: string;
   kind: SymbolKind;
@@ -107,11 +119,18 @@ export class LspManager {
       if (!session) continue;
       // A server like tsserver won't index a project until a file in it is
       // opened — open the project's files (bounded) before querying navto.
-      await this.ensureProjectOpen(session, spec);
+      const opened = await this.ensureProjectOpen(session, spec);
       try {
-        const res = (await this.request(session, "workspace/symbol", { query: name })) as
-          | RawSymbol[]
-          | null;
+        // `textDocument/didOpen` is a NOTIFICATION: it returns the moment it is
+        // written, while the server is still building its index. A
+        // `workspace/symbol` sent immediately after is answered honestly and
+        // emptily, which reaches the caller as "no such symbol" rather than "not
+        // indexed yet" — a wrong answer, silently, and then a fall back to
+        // tree-sitter that nobody asked for. Retried while an empty result is
+        // still plausibly a cold index, and ONLY when this call actually opened
+        // documents: on a warm session an empty answer is the real one, and
+        // waiting for it again would tax every miss.
+        const res = await this.querySymbols(session, name, opened > 0);
         for (const s of res ?? []) {
           if (s.name !== name) continue; // workspace/symbol is fuzzy; keep exact
           const loc = s.location;
@@ -394,9 +413,33 @@ export class LspManager {
 
   /** Open the noted files this server handles, so the project is loaded/indexed.
    *  Bounded per call AND across the session — see `filesToOpen`. */
-  private async ensureProjectOpen(session: Session, spec: ServerSpec): Promise<void> {
+  /** Opens what this query needs and reports HOW MANY it opened, which is what
+   *  tells `symbols` whether an empty result might just be a cold index. */
+  private async ensureProjectOpen(session: Session, spec: ServerSpec): Promise<number> {
+    let opened = 0;
     for (const path of filesToOpen(this.files, session.opened, spec.key)) {
+      const before = session.opened.size;
       await this.didOpen(session, path);
+      if (session.opened.size > before) opened++;
+    }
+    return opened;
+  }
+
+  /**
+   * `workspace/symbol`, retried while the index may still be filling.
+   *
+   * The delays back off and stop; the total is bounded and is paid at most once per
+   * server, on the first query after documents were opened. A server that has been
+   * asked and has nothing is answered on the first attempt — the retry exists for the
+   * server that has not finished reading yet, which is indistinguishable from it in
+   * the reply and distinguishable in time.
+   */
+  private async querySymbols(session: Session, name: string, mayBeCold: boolean): Promise<RawSymbol[] | null> {
+    const delays = mayBeCold ? INDEX_RETRY_DELAYS : [];
+    for (let attempt = 0; ; attempt++) {
+      const res = (await this.request(session, "workspace/symbol", { query: name })) as RawSymbol[] | null;
+      if ((res?.length ?? 0) > 0 || attempt >= delays.length) return res;
+      await new Promise((r) => setTimeout(r, delays[attempt]!));
     }
   }
 

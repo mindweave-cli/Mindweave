@@ -3,7 +3,21 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
-## v2.2.1 (2026-09-03): Muse Spark gets its reasoning dial back
+## v2.2.1 (2026-09-03): a symbol search that waits for the index, and Muse Spark's reasoning dial
+
+Asking for a symbol could return nothing while the answer was still being computed.
+Opening a document is a notification — it returns as soon as it is written, while the
+language server is still reading — so a symbol query sent immediately after was answered
+honestly and emptily. That reached the caller as "no such symbol" rather than "not
+indexed yet", and the fallback to tree-sitter that followed looked like a deliberate
+choice. The query is now retried while an empty answer might still be a cold index,
+bounded and paid at most once per server, and only when that call actually opened
+documents: on a server already asked and answered, an empty result is the real one.
+
+It showed up as a language server failing to resolve a Python symbol on a four-core
+machine while the same commit resolved it everywhere else, which is the shape this kind
+of race always takes — a wait tuned on a fast machine, holding until something slower
+runs it.
 
 Muse Spark has a reasoning dial and this driver said it did not. `reasoning_effort`
 accepts `minimal` through `xhigh` on Meta's Model API; nothing was sent, so every call
