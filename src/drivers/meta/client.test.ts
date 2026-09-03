@@ -25,11 +25,38 @@ import type { ModelRequest } from "../types.js";
 
 const base: ModelRequest = { system: "S", messages: [] };
 
-test("Muse Spark has no reasoning field — nothing is sent, ever", () => {
-  assert.deepEqual(reasoningFields(), {});
-  const body = buildBody(metaProvider, { ...base, model: { model: MUSE_SPARK_12, thinking: true, effort: "high" } });
+test("an effort is SENT on every call, because the model reasons whether we ask or not", () => {
+  // This driver once declared Muse Spark had no reasoning dial and sent nothing. The
+  // model reasons regardless, so what that bought was reasoning at a depth nobody
+  // chose, on every call, with nothing for the user to turn.
+  const body = buildBody(metaProvider, { ...base, model: { model: MUSE_SPARK_13, thinking: true, effort: "low" } });
+  assert.equal(body.reasoning_effort, "low");
+  // No `thinking` field: this API expresses the whole selection through the one
+  // parameter, and there is no off position to express.
   assert.equal("thinking" in body, false);
-  assert.equal("reasoning_effort" in body, false);
+  // A call that names no model still says what depth it wants.
+  assert.deepEqual(reasoningFields(undefined), { reasoning_effort: "high" });
+});
+
+test("no rung claims to skip reasoning, because `none` is a 400", () => {
+  for (const model of MODELS.map((m) => m.id)) {
+    const off = thinkLevels(model).filter((l) => !l.thinking);
+    assert.deepEqual(off, [], `${model} offers a rung the API refuses: ${JSON.stringify(off)}`);
+  }
+});
+
+test("a config from another provider is snapped onto a rung this API accepts", () => {
+  // `max` is the one the shared config carries and Meta has never heard of.
+  for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
+    const n = normalize({ model: MUSE_SPARK_13, thinking: false, effort });
+    assert.equal(n.thinking, true, `${effort} left thinking off on a model that cannot skip it`);
+    assert.ok(
+      thinkLevels(MUSE_SPARK_13).some((l) => l.effort === n.effort),
+      `${effort} normalized to a rung the ladder does not offer: ${n.effort}`,
+    );
+  }
+  assert.equal(normalize({ model: MUSE_SPARK_13, thinking: true, effort: "max" }).effort, "xhigh");
+  assert.equal(normalize({ model: MUSE_SPARK_13, thinking: true, effort: "medium" }).effort, "low");
 });
 
 test("the default is Standard, never the contributor tier — sharing your data is a choice, not a fallback", () => {
@@ -61,12 +88,15 @@ test("1.3 ships at 1.2's rates, so the newer model is not the dearer one", () =>
   assert.deepEqual(price(MUSE_SPARK_13_CONTRIBUTOR), price(MUSE_SPARK_12_CONTRIBUTOR));
 });
 
-test("thinking never turns on — there is no rung this provider's ladder offers for it", () => {
+test("thinking never turns off — it is not something this provider can be asked for", () => {
+  // The inverse of what this test used to assert, and the correction is the point:
+  // it pinned "thinking is always false" against a model that has never stopped
+  // reasoning, so the belief and the wire had been disagreeing from the start.
   for (const choice of MODELS) {
     for (const level of thinkLevels(choice.id)) {
-      assert.equal(level.thinking, false, choice.id);
+      assert.equal(level.thinking, true, choice.id);
     }
-    assert.equal(normalize({ model: choice.id, thinking: true, effort: "high" }).thinking, false, choice.id);
+    assert.equal(normalize({ model: choice.id, thinking: false, effort: "high" }).thinking, true, choice.id);
   }
 });
 

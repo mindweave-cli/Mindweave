@@ -5,19 +5,30 @@
  * surface, so the request shape, SSE framing, fragmented tool-call arguments and
  * cache-token reporting are all handled by the shared layer in
  * `../openaiCompat/wire.js`. This file supplies only the facts that differ, and
- * for Meta there is barely anything to supply — Muse Spark has no reasoning
- * parameter at all (see the manifest header).
+ * for Meta that is the reasoning dial: Muse Spark always reasons, and how deeply is
+ * the one thing a request gets to say (see the manifest header).
  */
-import type { ModelRequest, StreamOptions, StreamResult, Turn, TurnOptions } from "../types.js";
+import type { ModelConfig, ModelRequest, StreamOptions, StreamResult, Turn, TurnOptions } from "../types.js";
 import { compatStreamTurn, compatToolTurn, standardCacheSplit, type CompatProvider } from "../openaiCompat/wire.js";
 import { BUFFERED_OUTPUT_TOKENS, DEFAULT_MODEL } from "./manifest.js";
 
 const BASE_URL = process.env.MINDWEAVE_META_URL ?? "https://api.meta.ai/v1";
 
-/** Muse Spark takes no reasoning field of any kind — sending one would be an
- *  unrecognised parameter this API has never documented accepting. */
-export function reasoningFields(): Record<string, unknown> {
-  return {};
+/**
+ * Meta's reasoning field.
+ *
+ * `reasoning_effort` is ALWAYS sent. Muse Spark reasons whether or not the field is
+ * present — Meta's own reference says so plainly, and `none` is the one value it
+ * refuses with a 400 — so omitting it does not mean a direct answer, it means the
+ * model reasons at a depth nobody chose. Every internal call that never sets a model
+ * would otherwise pay for whatever that default happens to be.
+ *
+ * The manifest's ladder holds only values this API accepts, and `normalize` snaps a
+ * config from another provider onto one of them before it reaches here, so the value
+ * below is legal by construction rather than by a check.
+ */
+export function reasoningFields(config: ModelConfig | undefined): Record<string, unknown> {
+  return { reasoning_effort: config?.effort ?? "high" };
 }
 
 /** Meta reports its cache hit the standard OpenAI-compatible way, the same shape

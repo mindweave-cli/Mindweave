@@ -3,6 +3,19 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.2.1 (2026-09-03): Muse Spark gets its reasoning dial back
+
+Muse Spark has a reasoning dial and this driver said it did not. `reasoning_effort`
+accepts `minimal` through `xhigh` on Meta's Model API; nothing was sent, so every call
+reasoned at whatever depth the provider picks when the field is absent, with no way for
+anyone to steer it. `/think` now offers three depths, and the request always states one.
+
+There is still no rung that skips reasoning, because the model cannot: `none` is the one
+value the API refuses outright. A configuration carried over from a provider that can
+answer directly is corrected rather than sent, and so is `max`, which this API has never
+heard of.
+
+
 ## v2.2.0 (2026-09-03): a fourteenth provider, five new models, and a reasoning dial that was there all along
 
 Tencent's Hy models are available, through TokenHub's international endpoint with a

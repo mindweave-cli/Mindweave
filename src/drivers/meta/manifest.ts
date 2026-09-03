@@ -13,6 +13,12 @@
  * same superseded-tier rule every other driver here follows. 1.2 stays because a
  * saved config naming it must keep working and because its rates are unchanged.
  *
+ * MUSE SPARK ALWAYS REASONS. `reasoning_effort` takes `minimal` through `xhigh`, and
+ * `none` is refused with a 400. Omitting the field does not buy a direct answer — it
+ * buys reasoning at whatever depth Meta picks. This driver once declared the dial did
+ * not exist at all, which left every call reasoning at that default with nothing for
+ * the user to turn.
+ *
  * THE CONTRIBUTOR TIER. This is the one fact in this file worth reading twice. A
  * `-contributor` id is not a cheaper flag on the same model — it is a SEPARATE
  * model id whose price is roughly 12x lower than Standard in exchange for
@@ -57,13 +63,21 @@ export const MODELS: ModelChoice[] = [
 /**
  * The reasoning levels offered by `/think`.
  *
- * Muse Spark has no reasoning parameter at all in Meta's own API reference — not a
- * toggle, not an effort rung, nothing. One honest level, same shape as a model with
- * no dial elsewhere in this codebase (see xAI's non-`GROK_43` entries): offering a
- * switch wired to nothing would be worse than not offering one.
+ * Muse Spark reasons whether or not a request says so, and `reasoning_effort: "none"`
+ * is the one value Meta refuses with a 400 — so there is no rung that skips thinking,
+ * and none is offered. What the dial does control is depth: `minimal`, `low`,
+ * `medium`, `high` and `xhigh` are all accepted.
+ *
+ * Three of the five are listed. `minimal` and `low` differ by less than the choice
+ * costs a person reading a menu, and the same is true at the top of the range; a
+ * ladder is only useful if each rung is a decision someone can act on.
  */
 export function thinkLevels(_model: ModelId): ThinkLevel[] {
-  return [{ label: "Standard", description: "this model has no reasoning dial", thinking: false, effort: "high" }];
+  return [
+    { label: "Light", description: "reasons briefly — fastest", thinking: true, effort: "low" },
+    { label: "Thinking", description: "think first, then answer", thinking: true, effort: "high" },
+    { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "xhigh" },
+  ];
 }
 
 /**
@@ -115,21 +129,40 @@ export function bufferedOutputTokens(_model: ModelId): number {
  * bytes this path silently never sends.
  */
 
-/** The one effort rung this provider's single level uses. There is no ladder to
- *  clamp against — a model with no dial has nothing for `/think` to choose. */
-const EFFORTS: Effort[] = ["high"];
-
 /**
  * Coerce a stored or unknown config onto a model this provider actually serves.
  *
- * There is no per-model rule to enforce: no model here has a reasoning dial, so
- * thinking is always false and the effort is inert filler, present only because
- * the shared `ModelConfig` shape requires one.
+ * Thinking is forced ON, because it cannot be otherwise: a config carried over from a
+ * provider that can answer directly would ask this one for the one thing it refuses.
+ * The effort is snapped onto a rung the ladder above actually lists, which is what
+ * keeps the request legal — the shared `ModelConfig` carries `max`, and this API has
+ * never heard of it.
  */
 export function normalize(config: ModelConfig): ModelConfig {
   const model: ModelId = PRICES[config.model] ? config.model : DEFAULT_MODEL;
-  const effort: Effort = EFFORTS.includes(config.effort) ? config.effort : "high";
-  return { model, thinking: false, effort };
+  return { model, thinking: true, effort: snapToOfferedRung(config.effort) };
+}
+
+/**
+ * Move an effort onto the nearest rung the ladder offers. Ties break DOWNWARD: an
+ * unlisted setting resolves to the cheaper neighbour, because silently spending more
+ * of the user's money is the worse way to be wrong.
+ */
+function snapToOfferedRung(effort: Effort): Effort {
+  const ladder: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+  const offered = thinkLevels(DEFAULT_MODEL);
+  if (offered.some((l) => l.effort === effort)) return effort;
+
+  const want = ladder.indexOf(effort);
+  let best = offered[0]!;
+  for (const level of offered) {
+    const d = Math.abs(ladder.indexOf(level.effort) - want);
+    const bestD = Math.abs(ladder.indexOf(best.effort) - want);
+    if (d < bestD || (d === bestD && ladder.indexOf(level.effort) < ladder.indexOf(best.effort))) {
+      best = level;
+    }
+  }
+  return best.effort;
 }
 
 /** The cheap metadata half of this driver — see `index.ts` for the wire half. */
