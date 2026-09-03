@@ -3,6 +3,32 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.1.4 (2026-09-03): a first run that survives its own key, and tool rows that arrive one at a time
+
+Adding an API key on the setup screen and pressing Continue blanked the terminal. The
+screen that asks for a key returns before the rest of the interface is built, so the
+first render that reached the chat declared one more React hook than the render before
+it, which is a condition React treats as fatal and takes the whole interface down for.
+Starting Mindweave again looked fine, because a machine that already has a key never
+opens that screen, and the count never changes. The hook is declared above the screens
+that return early, and a test now fails if another one is added below them.
+
+Tool rows arrived in bursts. A turn read calmly, waited while the model composed, and
+then dropped five or eight rows and their comments into a single frame. Two things
+caused it. Calls issued together were revealed together: the reveal step assumed a
+call's result followed its own start, and when several ran at once it swallowed the
+whole batch into one paint. And the pause between blocks was measured from the last
+one revealed, so a model that had just spent a minute thinking produced no pause at
+all — the turns that most needed spacing were the ones that got none.
+
+Blocks now appear one to a beat, at the same tempo, whatever a turn contains and however
+much of it: two tools and eight hundred look the same. The pause is time added to
+whatever the model took, not a minimum since the last block, so the rhythm never becomes
+a report on how fast the provider is answering. Esc still releases everything held.
+`MINDWEAVE_REVEAL_GAP_MS` sets the interval, and `0` restores the previous behaviour of
+painting each block the moment it exists.
+
+
 ## v2.1.3 (2026-09-01): the release name everywhere, including mid-turn
 
 The bar shown while a turn is running still read the raw package version. It is

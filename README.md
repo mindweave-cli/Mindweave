@@ -9,7 +9,6 @@
   <a href="LICENSE">Apache 2.0</a> &nbsp;•&nbsp;
   <a href="https://x.com/mindweavecli">X</a> &nbsp;•&nbsp;
   <a href="https://mindweavedev.netlify.app/">Website</a>
-  
 </p>
 
 ---
@@ -26,37 +25,21 @@ It is built lean on purpose. Most of a coding agent's context budget goes on sca
 the model never needed. Mindweave keeps prompts thin and leaves the room for the model to
 reason about your code.
 
-For any questions or more email at zallinimann@gmail.com. 
+Questions are welcome at zallinimann@gmail.com.
 
 ## Mindweave 1
 
-This is Mindweave 1 which is finally out, tagged `mindweave-1`. It is on npm, and the
-website is up. Install with the steps below.
+Mindweave 1 is out, tagged `mindweave-1`. It is on npm, and the website is up. Install
+with the steps below.
 
 What landed in it is in the [changelog](CHANGELOG.md): thirteen model providers, a
 rebuilt terminal interface, reworked prompt caching and token accounting, project notes
 the agent maintains across sessions, and a long list of things that were quietly wrong.
 
-## Deferred tools, fixed in v2.1.0
-
-Tools that are not advertised up front are found with `find_tools`. Finding one returned
-its schema without adding the tool to the list sent with the next request, and a model
-that will only call a function present in that list could not call what it had just been
-shown. Every deferred tool was unreachable on those models, and a session resumed with
-`/continue` had the same shape, because nothing recorded which tools had been activated.
-The screenshot tool was where it was most visible: it could be found, described, and never
-run, which read as the model looping over a tool it could not reach.
-
-`find_tools` now activates what it finds. The tool joins the advertised set for the rest
-of the session, is written to the session file and restored on resume, and a forked
-session receives its own copy. The rest of v2.1.0 is in the [changelog](CHANGELOG.md).
-
 ## Install
 
 Requires **Windows** and **Node.js 20+**. macOS and Linux are not supported yet, and the
 reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed over.
-
-macOS and Linux support is coming soon.
 
 ```bash
 npm install -g mindweave

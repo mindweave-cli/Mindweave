@@ -17,13 +17,8 @@ test("every reveal in a long turn waits exactly the same beat", () => {
   // THE property. A decaying gap would pass a test that only checked the first two
   // reveals, so this walks a forty-block turn — deep enough that any decay curve or
   // budget cap would have tripped — and asserts the gap is identical throughout.
-  let now = 10_000;
   const waits: number[] = [];
-  for (let i = 0; i < 40; i++) {
-    const wait = revealWait({ now, lastRevealAt: now, flush: false });
-    waits.push(wait);
-    now += wait; // the reveal happens, and the next beat starts from there
-  }
+  for (let i = 0; i < 40; i++) waits.push(revealWait({ flush: false }));
   assert.deepEqual(
     [...new Set(waits)],
     [REVEAL_GAP_MS],
@@ -31,41 +26,56 @@ test("every reveal in a long turn waits exactly the same beat", () => {
   );
 });
 
-test("the gap is a MINIMUM since the last reveal, not an added sleep", () => {
-  // A model that thought for two seconds between calls has already paid most of the
-  // beat. Adding the full gap on top would punish exactly the turns that were
-  // already reading at the right pace.
-  // Kept as arithmetic rather than a fixed number so it stays honest whatever the beat
-  // is: time already spent counts toward it, and it never becomes an added sleep.
-  assert.equal(revealWait({ now: 5_000, lastRevealAt: 3_000, flush: false }), Math.max(0, REVEAL_GAP_MS - 2_000));
-  assert.equal(revealWait({ now: 5_000, lastRevealAt: 4_900, flush: false }), Math.max(0, REVEAL_GAP_MS - 100));
+test("the beat ADDS to the model's own thinking, it is not absorbed by it", () => {
+  // The correction. This used to subtract elapsed time, which meant a model that
+  // paused between calls produced no beat at all: the turns that already read calmly
+  // stayed calm, and the batches that actually needed spacing got nothing. It also
+  // made the rhythm a function of model speed, which is the one thing a reader should
+  // never be able to feel. However long the model just spent, the beat is still owed.
+  assert.equal(revealWait({ flush: false }), REVEAL_GAP_MS);
 });
 
-test("time already spent past the beat costs nothing, and never goes negative", () => {
-  assert.equal(revealWait({ now: 100_000, lastRevealAt: 3_000, flush: false }), 0);
-  assert.equal(revealWait({ now: 100_000, lastRevealAt: 0, flush: false }), 0);
+test("the beat is a real pause, so a burst cannot land in one paint", () => {
+  // Asserted as a floor rather than an exact number because the value is a question
+  // of feel and is env-tunable; what must not silently return is zero.
+  assert.ok(REVEAL_GAP_MS > 0, "the beat is back to zero: a concurrent burst will land in one paint again");
+  assert.ok(revealWait({ flush: false }) > 0, "two blocks arriving in the same instant must not reveal together");
 });
 
-test("the FIRST block of a turn is immediate", () => {
-  // Falls out of the same subtraction, and it is the difference between pacing and
-  // stalling: the gap before anything is on screen is DEAD time, which every latency
-  // study finds harmful, while the gap between blocks is occupied time, which is the
-  // condition the effect depends on. App resets lastRevealAt to 0 per turn.
-  assert.equal(revealWait({ now: Date.now(), lastRevealAt: 0, flush: false }), 0);
+test("a burst of eight spaces out instead of landing at once", () => {
+  // The shape of the actual complaint: eight rows that all finished within the same
+  // millisecond. Each waits its own beat, so the eighth is seven beats after the
+  // first rather than in the same frame.
+  let t = 0;
+  const revealedAt: number[] = [];
+  for (let i = 0; i < 8; i++) {
+    t += revealWait({ flush: false });
+    revealedAt.push(t);
+  }
+  assert.equal(revealedAt[7]! - revealedAt[0]!, REVEAL_GAP_MS * 7);
+  assert.equal(new Set(revealedAt).size, 8, "two rows shared a reveal instant");
+});
+
+test("the first block of a turn is paced like every other", () => {
+  // It used to be exempt, on the theory that a gap before anything is on screen is
+  // dead time. In practice the turn it follows is the model's thinking, which is
+  // already occupied time the reader watched — so the first block arriving on the
+  // beat reads as part of the same rhythm rather than as a stall.
+  assert.equal(revealWait({ flush: false }), REVEAL_GAP_MS);
 });
 
 test("Esc drops the beat to nothing", () => {
   // The user asking to see the rest outranks the rhythm, and it is the signposted
   // escape a long operation is required to have.
-  assert.equal(revealWait({ now: 1_000, lastRevealAt: 1_000, flush: true }), 0);
+  assert.equal(revealWait({ flush: true }), 0);
 });
 
-test("nothing is held back: content appears when it arrives", () => {
-  // The beat was three seconds, on a theory about perceived effort. Used in anger it
-  // read as an animation — words arriving with motion, the chat still moving after the
-  // work was done. Pinned at zero so bringing it back is a deliberate edit here.
-  assert.equal(REVEAL_GAP_MS, 0);
-  assert.equal(revealWait({ now: 1_000, lastRevealAt: 1_000, flush: false }), 0, "a burst is still held");
+test("a finished turn drains at the same beat as a running one", () => {
+  // Explicitly required: the queue must not speed up once the work is done. Nothing
+  // in the wait depends on whether the stream ended, so this is a pin against a
+  // future "drain faster at the end" optimisation, which would read as the interface
+  // getting impatient with itself.
+  assert.equal(revealWait({ flush: false }), revealWait({ flush: false }));
 });
 
 // ── narration gets its own beat ───────────────────────────────────────────────
@@ -86,8 +96,8 @@ test("whitespace is not narration", () => {
 
 test("once the turn has narrated, further text buys an EMPTY beat and is not paced", () => {
   // The budget is one narration line per turn, so a second block seals to nothing
-  // (sealAssistant's `suppressed`). Pausing for it would be three seconds of held
-  // screen with no block arriving at the end — a stall, which is the exact failure
-  // mode the occupied-time condition exists to avoid.
+  // (sealAssistant's `suppressed`). Pausing for it would be a held screen with no
+  // block arriving at the end — a stall, which is the exact failure mode the
+  // occupied-time condition exists to avoid.
   assert.equal(narrationPending({ openAsstId: 9, raw: "And now the other file.", narrated: true }), false);
 });

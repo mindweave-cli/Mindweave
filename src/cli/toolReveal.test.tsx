@@ -112,12 +112,17 @@ function screensDuring(queue: Action[]): string[] {
       groupOpen = false;
       continue;
     }
-    // A standalone call is held until its own result is queued behind it, then the
-    // pair lands as one frame.
+    // A standalone call is held until its own result is queued behind it, then that
+    // PAIR lands as one frame — the call and its own result, never the span between
+    // them. Concurrent calls all have their starts emitted before any of them
+    // finishes, so a contiguous span from the front would swallow the other calls'
+    // starts into this frame. Mirrors pump() in App.tsx.
     if (head.type === "toolStart" && !head.group) {
       const end = q.findIndex((x) => x.type === "toolEnd" && x.toolId === head.toolId);
       assert.notEqual(end, -1, "standalone tool held with a complete queue — it can never be revealed");
-      apply(q.splice(0, end + 1));
+      const endAction = q.splice(end, 1)[0]!;
+      const startAction = q.shift()!;
+      apply([startAction, endAction]);
       groupOpen = false;
       continue;
     }
@@ -195,6 +200,73 @@ test("a standalone tool arrives with its diff already under it, then settles its
   assert.match(ended, /Update\(runCommand\.ts\)/);
   assert.doesNotMatch(ended, /Updating/);
   assert.match(ended, /isInteractive/);
+});
+
+test("a batch of concurrent tools reveals one row at a time, never all at once", () => {
+  // The engine emits EVERY toolStart of a batch before running any of it, so when
+  // those calls run concurrently their results arrive behind the other calls' starts.
+  // Revealing a contiguous span from the front put all eight rows in one paint: the
+  // turn read calmly and then the whole batch appeared at once, with no way to follow
+  // what had happened. Each call is its own block and earns its own frame.
+  const N = 8;
+  const turn: Action[] = [{ type: "user", text: "check the drivers" }];
+  for (let i = 0; i < N; i++) {
+    turn.push({ type: "toolStart", toolId: "p" + i, name: "Read", arg: "driver" + i + ".ts", action: "read" });
+  }
+  for (let i = 0; i < N; i++) {
+    turn.push({ type: "toolEnd", toolId: "p" + i, ok: true, detail: "driver" + i + " body" });
+  }
+  turn.push({ type: "finishReply" });
+
+  const frames = screensDuring(turn);
+
+  // Count how many of the eight rows each frame introduced. Any frame that gains more
+  // than one is the batch landing together.
+  let seen = 0;
+  for (const f of frames) {
+    const now = turn.filter((a) => a.type === "toolStart" && f.includes(String((a as { arg?: string }).arg ?? ""))).length;
+    assert.ok(now - seen <= 1, `a frame gained ${now - seen} tool rows at once:
+${f}`);
+    if (now > seen) seen = now;
+  }
+  assert.equal(seen, N, `only ${seen} of ${N} rows ever appeared`);
+});
+
+test("the rhythm is the same whatever the turn contains, and however much of it", () => {
+  // The property, stated directly: what reaches the screen arrives one block at a
+  // time, at one tempo, whether the turn ran two tools or five hundred and whether
+  // the blocks around them are comments, notes or the reply. A reader following a
+  // turn should not be able to tell from the pacing whether the model worked step by
+  // step or fanned out — that is the model's business, not something the screen
+  // reports. Counts are walked rather than assumed because the failure this replaces
+  // only appeared past a certain width: two concurrent calls looked fine and eight
+  // landed in one paint.
+  for (const n of [2, 3, 5, 8, 40]) {
+    const turn: Action[] = [
+      { type: "user", text: "look at the drivers" },
+      { type: "note", text: "opening the driver folder" },
+    ];
+    for (let i = 0; i < n; i++) {
+      turn.push({ type: "toolStart", toolId: "u" + i, name: "Read", arg: "d" + i + ".ts", action: "read" });
+    }
+    for (let i = 0; i < n; i++) {
+      turn.push({ type: "toolEnd", toolId: "u" + i, ok: true, detail: "body of d" + i });
+    }
+    turn.push({ type: "note", text: "that is all of them" });
+    turn.push({ type: "finishReply" });
+
+    const frames = screensDuring(turn);
+    let seen = 0;
+    for (const f of frames) {
+      const now = turn.filter(
+        (a) => a.type === "toolStart" && f.includes(String((a as { arg?: string }).arg ?? "")),
+      ).length;
+      assert.ok(now - seen <= 1, `with ${n} tools a frame gained ${now - seen} rows at once:
+${f}`);
+      if (now > seen) seen = now;
+    }
+    assert.equal(seen, n, `with ${n} tools only ${seen} rows ever appeared`);
+  }
 });
 
 test("a sentence and the tool row it introduces never land in the same frame", () => {

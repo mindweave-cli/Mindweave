@@ -102,3 +102,39 @@ test("a key for ANY other provider opens the app too", () => {
     assert.ok(usableFallback(DEFAULT_MODEL, keys(p.apiKeyEnv)), `nothing runnable found for ${p.label}`);
   }
 });
+
+/**
+ * A React/Ink hook call. Named one by one rather than by the `use[A-Z]` convention: this
+ * file also calls plain helpers like `useApiKey` (make this stored key the live one),
+ * which follow the same spelling and are not hooks.
+ */
+const HOOK_CALL =
+  /(?:^|[^.\w])(useState|useEffect|useLayoutEffect|useMemo|useRef|useCallback|useReducer|useContext|useTransition|useDeferredValue|useSyncExternalStore|useImperativeHandle|useId|useInput|useApp|useStdin|useStdout|useStderr|useFocus|useFocusManager)\s*\(/;
+
+test("no hook is declared below the first-run gates in App.tsx", () => {
+  // The crash that took the first run down, as a source rule the next edit cannot miss.
+  //
+  // App returns EARLY for the trust gate and the key setup screen. A hook declared after
+  // those returns runs only on the renders that reach the chat, so the render right after
+  // the user pressed Continue had one MORE hook than the render before it — "Rendered more
+  // hooks than during the previous render", which unmounts the whole app. On screen that
+  // is the terminal going blank the moment a key is accepted, and a restart hides it: the
+  // second launch never opens the gate, so the count never changes.
+  //
+  // Rendering cannot catch this cheaply — it needs the full App driven through a gate — so
+  // the rule is enforced where it is written instead.
+  const src = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+  const lines = src.split(/\r?\n/);
+  const start = lines.findIndex((l) => l.includes("---- NO HOOKS BELOW THIS LINE ----"));
+  assert.notEqual(start, -1, "the marker above the first-run gates is gone — put it back");
+  const end = lines.findIndex((l, i) => i > start && l === "}");
+  const offenders = lines
+    .slice(start + 1, end)
+    .map((line, i) => ({ line, n: start + 2 + i }))
+    .filter(({ line }) => HOOK_CALL.test(line) && !line.trimStart().startsWith("//"));
+  assert.deepEqual(
+    offenders.map((o) => `App.tsx:${o.n}: ${o.line.trim()}`),
+    [],
+    "a hook below the gates changes the hook count when a gate closes — React crashes the app",
+  );
+});

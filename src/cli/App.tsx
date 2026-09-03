@@ -935,7 +935,7 @@ export function App() {
   // delay), then stamp the clock and carry on draining. Every paced path in pump()
   // goes through here, so the tempo is decided in exactly one place.
   function schedulePaced(reveal: () => void) {
-    const wait = revealWait({ now: Date.now(), lastRevealAt: lastRevealAt.current, flush: flush.current });
+    const wait = revealWait({ flush: flush.current });
     pumpTimer.current = setTimeout(() => {
       pumpTimer.current = null;
       reveal();
@@ -1009,15 +1009,31 @@ export function App() {
         // while we wait, and a group's burst can gain members in that window. A span
         // measured early would leave the stragglers behind to open a second group,
         // splitting one burst across two blocks.
-        let take: number;
         if (isNewGroup) {
-          take = 0;
+          // A group folds into ONE row ("Read 8 files"), so its whole burst is a single
+          // block and reveals together by design.
+          let take = 0;
           while (take < revealQ.current.length && isGroupMember(revealQ.current[take]!)) take++;
+          applyBatch(revealQ.current.splice(0, take));
         } else {
-          const end = revealQ.current.findIndex((x) => x.type === "toolEnd" && x.toolId === front.toolId);
-          take = end === -1 ? 1 : end + 1;
+          // This call and its OWN result — never the span between them. The engine emits
+          // every toolStart of a batch before running any of it, so when those calls run
+          // concurrently the matching end sits behind the other calls' starts. Taking a
+          // contiguous span from the front swallowed all of them into this one paint:
+          // eight rows appearing at once, however calm the beat before it was. Each of
+          // those calls is its own block and waits its own beat; only the pair is atomic,
+          // so a row still arrives carrying its result rather than sprouting one later.
+          const endIdx = revealQ.current.findIndex((x) => x.type === "toolEnd" && x.toolId === front.toolId);
+          if (endIdx === -1) {
+            applyBatch(revealQ.current.splice(0, 1));
+          } else {
+            // The end first: it sits at the higher index, so removing it cannot shift
+            // the start out from under the shift() that follows.
+            const endAction = revealQ.current.splice(endIdx, 1)[0]!;
+            const startAction = revealQ.current.shift()!;
+            applyBatch([startAction, endAction]);
+          }
         }
-        applyBatch(revealQ.current.splice(0, take));
         // Resolved either way — the action that closes the block follows next.
         groupOpen.current = false;
       });
@@ -1049,7 +1065,7 @@ export function App() {
     // (base prompt, tool schemas, project snapshot) at 1.25x rewrite cost.
     await reloadProjectMemory(s).catch(() => {});
     revealQ.current = [];
-    lastRevealAt.current = 0; // first reveal of the turn is immediate
+    lastRevealAt.current = 0;
     streamDone.current = false;
     flush.current = false;
     try {
@@ -1954,6 +1970,27 @@ export function App() {
     await streamRespond(s);
   }
 
+  // Proactive "a compaction is coming" notice: hidden until context crosses the warn bar
+  // (90% of the auto bar), then a single dim line of notice before the summarizing pass
+  // rewrites the conversation. Memoized on the size inputs so it costs nothing per
+  // keystroke — it only recomputes when the transcript grows, overhead is re-measured, or
+  // the model changes.
+  const ctxWarn = useMemo(() => {
+    const s = session.current;
+    if (!s) return null;
+    const p = contextPressure(contextUsed(s), s.modelConfig.model);
+    return p.warn ? p : null;
+  }, [session.current?.transcript.length, session.current?.contextOverhead?.tokens, session.current?.modelConfig.model]);
+
+  // ---- NO HOOKS BELOW THIS LINE ----
+  // The screens below return EARLY, so anything hooked after them runs on some renders
+  // and not others, and React counts hooks per render: the first render after a gate
+  // closes has one more than the last, which is a hard crash that takes the whole app
+  // down. It cost a real user their first run — they pasted a key, pressed Continue, and
+  // the screen vanished — because the compaction notice above used to be declared down
+  // in the chat layout. A gate is a return, not a branch; put new hooks above it.
+  // `firstRun.test.ts` fails if one appears below.
+
   // Key setup screen. Shown on first run, and again if the user switches to a
   // provider they haven't given a key for yet.
   // Asked BEFORE anything else, including the key prompt: agreeing to hand over a key is
@@ -2287,17 +2324,6 @@ export function App() {
   // "boxed" overlay any more; the box is always the same, only its contents change.
   const overlayView = buildOverlayView(maxMenuItems);
   const runningShells = session.current?.toolContext.backgroundShells?.running() ?? [];
-  // Proactive "a compaction is coming" notice: hidden until context crosses the warn bar
-  // (90% of the auto bar), then a single dim line of notice before the summarizing pass
-  // rewrites the conversation. Memoized on the size inputs so it costs nothing per
-  // keystroke — it only recomputes when the transcript grows, overhead is re-measured, or
-  // the model changes.
-  const ctxWarn = useMemo(() => {
-    const s = session.current;
-    if (!s) return null;
-    const p = contextPressure(contextUsed(s), s.modelConfig.model);
-    return p.warn ? p : null;
-  }, [session.current?.transcript.length, session.current?.contextOverhead?.tokens, session.current?.modelConfig.model]);
   // Where the transcript sits in the viewport, and how far it can travel. Extracted
   // to `chatAnchor.ts` so the rule is unit-tested rather than eyeballed — see there
   // for why a short transcript now rests ON the input box instead of stranding
