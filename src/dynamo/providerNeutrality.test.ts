@@ -55,6 +55,10 @@ const VENDOR_PREFIXES = [
   "llama-",
   "muse-spark-",
   "minimax-",
+  // Tencent's ids carry no vendor word at all — `hy3`, `hy4-preview` — so the prefix
+  // is the family name itself. Short, and deliberately anchored by `\b` below so it
+  // cannot match inside an ordinary word.
+  "hy",
   "gpt-oss-",
   "gpt-",
 ];

@@ -55,7 +55,7 @@ export const MODELS: ModelChoice[] = [
 ];
 
 /**
- * Whether a model takes the `reasoning_effort` dial. Only GLM-5.2 does; the rest
+ * Whether a model takes the `reasoning_effort` dial. GLM-5.2 and both 5.3 models do; the rest
  * have thinking as a plain on/off toggle, and sending them an effort would be a
  * parameter they do not know.
  */
@@ -77,19 +77,21 @@ export function takesEffort(model: ModelId): boolean {
  * a switch that is wired to the same place as the one above it.
  */
 export function thinkLevels(model: ModelId): ThinkLevel[] {
-  // GLM-5.3: three documented depths, and no way to answer without reasoning. The
-  // lightest rung is still thinking, so it is not labelled as though it skips it.
-  if (model === GLM_53) {
+  // Both 5.3 models: three documented depths — `low`, `high` and `max` — and no way to
+  // answer without reasoning. The lightest rung is still thinking, so it is not labelled
+  // as though it skips it.
+  //
+  // Flash was offered the top rung alone, on the reading that it documented a single
+  // effort value. It documents the same three, and `max` is only what it falls back to
+  // when nothing is passed. A model with no way down reasons at its deepest setting for
+  // every step of every turn, including the ones that are a file read, and the user has
+  // nothing to turn.
+  if (alwaysThinks(model)) {
     return [
       { label: "Light", description: "reasons briefly — fastest", thinking: true, effort: "low" },
       { label: "Thinking", description: "think first, then answer", thinking: true, effort: "high" },
       { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
     ];
-  }
-  // GLM-5.3 Flash documents one effort value and no way to disable thinking, so it
-  // gets one honest rung rather than a menu of switches wired to the same place.
-  if (model === GLM_53_FLASH) {
-    return [{ label: "Thinking", description: "always reasons — this model cannot skip it", thinking: true, effort: "max" }];
   }
   if (takesEffort(model)) {
     return [

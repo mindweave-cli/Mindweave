@@ -45,11 +45,27 @@ const PROTECTED_PATTERNS: { test: RegExp; what: string }[] = [
 ];
 
 /**
+ * The example counterpart of an env file, which is the opposite of a secret.
+ *
+ * `.env.example` and its spellings are committed to repositories on purpose: they list
+ * the variable NAMES a project needs, with the values left blank or filled with obvious
+ * placeholders, and they are the file a newcomer is told to copy. Refusing them withholds
+ * a project's own documentation about its configuration while protecting nothing —
+ * anything a real key sits in (`.env`, `.env.local`, `.env.production`, `prod.env`) is
+ * still matched by the patterns above.
+ *
+ * Anchored to the end of the name, so `.env.example.local` — a real file in some setups,
+ * holding real values — is not exempted by starting the same way.
+ */
+const ENV_EXAMPLE = /(^|\/)\.?env\.(example|sample|template|defaults|dist)$/i;
+
+/**
  * If `absPath` is a file the agent must never touch, return a short reason;
  * otherwise null. `absPath` may use either slash style.
  */
 export function protectedPathReason(absPath: string): string | null {
   const posix = absPath.split("\\").join("/");
+  if (ENV_EXAMPLE.test(posix)) return null;
   for (const { test, what } of PROTECTED_PATTERNS) {
     if (test.test(posix)) return what;
   }
@@ -146,7 +162,10 @@ export function excludedFromSearch(absPath: string): boolean {
 
 // Paths a shell command must not PRINT the contents of.
 const COMMAND_SENSITIVE: { needle: RegExp; what: string }[] = [
-  { needle: /(^|[\s"'`/\\=<])\.env\b/i, what: "an environment/secrets file" },
+  // The lookahead is the same exemption `ENV_EXAMPLE` makes for a path: printing
+  // `.env.example` is reading a project's own template, and a command that names it
+  // alongside ordinary files was being refused whole.
+  { needle: /(^|[\s"'`/\\=<])\.env\b(?!\.(example|sample|template|defaults|dist)\b)/i, what: "an environment/secrets file" },
   { needle: /(^|[\s"'`/\\=<])\.ssh\b/i, what: "an SSH key directory" },
   { needle: /\bid_(rsa|ed25519|ecdsa|dsa)\b/i, what: "a private SSH key" },
   { needle: /\.pem\b/i, what: "a private key file" },

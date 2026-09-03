@@ -69,8 +69,8 @@ else is configured inside a session.
 
 ## What it can do
 
-**13 providers, 47 models, one key.** DeepSeek, Anthropic, OpenAI, Gemini, xAI, Mistral,
-Groq, Cerebras, Qwen, Kimi, GLM, Meta and MiniMax. Each family gets its own driver so it
+**14 providers, 52 models, one key.** DeepSeek, Anthropic, OpenAI, Gemini, xAI, Mistral,
+Groq, Cerebras, Qwen, Kimi, GLM, Meta, MiniMax and Tencent. Each family gets its own driver so it
 runs at its best without bloating the shared core, and only the driver you are using is
 ever loaded. Switch with `/provider` and `/model`; the choice is remembered per project.
 Full list: [PROVIDERS.md](src/drivers/PROVIDERS.md).

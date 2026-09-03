@@ -31,7 +31,7 @@ import { runCommand } from "./runCommand.js";
 import { globDef } from "./glob.js";
 import { grepDef } from "./grep.js";
 import { MAX_ENTRIES, listDir } from "./listDir.js";
-import { protectedPathReason, catastrophicCommandReason } from "./guard.js";
+import { protectedPathReason, catastrophicCommandReason, sensitiveCommandReason } from "./guard.js";
 
 function freshCtx(): ToolContext {
   // CANONICALISED, because a real session is: session.ts pins every root through
@@ -699,4 +699,29 @@ test("per-environment secret files are on the hard floor, ordinary code is not",
   for (const p of ["D:/proj/src/environment.ts", "D:/proj/src/env.ts", "D:/proj/docs/secretsanta.md"]) {
     assert.equal(protectedPathReason(p), null, `${p} is ordinary code and must stay readable`);
   }
+});
+
+test("an env EXAMPLE file is documentation, not a secret", () => {
+  // The template a project commits so a newcomer knows which variables to set. It holds
+  // names and placeholders, and refusing it withheld a project's own account of its
+  // configuration while protecting nothing. A shell command was refused whole for
+  // naming one among ordinary files.
+  for (const p of [
+    "D:/proj/.env.example",
+    "D:/proj/.env.sample",
+    "D:/proj/env.example",
+    "D:/proj/.env.template",
+  ]) {
+    assert.equal(protectedPathReason(p), null, `${p} is a template and must stay readable`);
+  }
+  assert.equal(sensitiveCommandReason("Get-Content .env.example"), null);
+  assert.equal(sensitiveCommandReason("cat .env.example && cat README.md"), null);
+
+  // The live files are untouched by the exemption, including one that merely starts
+  // like a template.
+  for (const p of ["D:/proj/.env", "D:/proj/.env.local", "D:/proj/.env.example.local"]) {
+    assert.ok(protectedPathReason(p), `${p} can hold a real key and must stay refused`);
+  }
+  assert.ok(sensitiveCommandReason("cat .env"));
+  assert.ok(sensitiveCommandReason("cat .env.example; cat .env"), "the real file is still named");
 });

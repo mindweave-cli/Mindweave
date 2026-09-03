@@ -23,6 +23,7 @@
  */
 import type { DriverManifest, Effort, ModelChoice, ModelConfig, ModelId, ModelPrice, ThinkLevel } from "../types.js";
 
+export const FABLE_51 = "claude-fable-5-1";
 export const FABLE = "claude-fable-5";
 export const OPUS = "claude-opus-5";
 export const OPUS_48 = "claude-opus-4-8";
@@ -44,7 +45,8 @@ export const MODELS: ModelChoice[] = [
   { id: SONNET, label: "Claude Sonnet 5", description: "fast, strong at code — the default" },
   { id: OPUS, label: "Claude Opus 5", description: "deep reasoning for long, complex work" },
   { id: OPUS_48, label: "Claude Opus 4.8", description: "the previous Opus — proven and steady" },
-  { id: FABLE, label: "Claude Fable 5", description: "the toughest challenges, at the highest rate" },
+  { id: FABLE_51, label: "Claude Fable 5.1", description: "the toughest challenges, at the highest rate" },
+  { id: FABLE, label: "Claude Fable 5", description: "the previous Fable, at the same rate" },
   { id: HAIKU, label: "Claude Haiku 4.5", description: "cheapest and quickest, for simple work" },
 ];
 
@@ -86,6 +88,7 @@ const CURRENT = {
 const SURFACES: Record<string, ModelSurface> = {
   // Thinking is always on and any explicit `thinking` config is rejected — see
   // `client.ts`, which omits the field entirely for this model.
+  [FABLE_51]: { ...CURRENT, canDisableThinking: false },
   [FABLE]: { ...CURRENT, canDisableThinking: false },
   // Thinking may be turned off, but only at effort `high` or below.
   [OPUS]: { ...CURRENT, maxDisabledEffort: "high" },
@@ -165,6 +168,9 @@ export function thinkLevels(model: ModelId): ThinkLevel[] {
 const CACHE_WRITE_MULTIPLIER = 1.25;
 
 const PRICES: Record<string, ModelPrice> = {
+  // A quarter of Fable 5's cache read at the same input and output rate: 2.5% of base
+  // input, where every other model on this surface reads back at 10%.
+  [FABLE_51]: { cacheHit: 0.25, cacheMiss: 10, output: 50, cacheWrite: 10 * CACHE_WRITE_MULTIPLIER },
   [FABLE]: { cacheHit: 1, cacheMiss: 10, output: 50, cacheWrite: 10 * CACHE_WRITE_MULTIPLIER },
   [OPUS]: { cacheHit: 0.5, cacheMiss: 5, output: 25, cacheWrite: 5 * CACHE_WRITE_MULTIPLIER },
   [OPUS_48]: { cacheHit: 0.5, cacheMiss: 5, output: 25, cacheWrite: 5 * CACHE_WRITE_MULTIPLIER },

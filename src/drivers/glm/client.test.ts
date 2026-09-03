@@ -237,9 +237,14 @@ test("the older models can still answer without thinking", () => {
   }
 });
 
-test("GLM-5.3 offers its three documented depths, Flash offers the one it has", () => {
-  assert.deepEqual(thinkLevels(GLM_53).map((l) => l.effort), ["low", "high", "max"]);
-  assert.equal(thinkLevels(GLM_53_FLASH).length, 1, "a menu of switches wired to the same place");
+test("both 5.3 models offer all three documented depths", () => {
+  // `reasoning_effort` takes `low`, `high` and `max` on each of them, and `max` is what
+  // a request falls back to when the field is absent — not the only value accepted.
+  // Flash was offered the top rung alone, so a session on it reasoned at the deepest
+  // setting for every step of every turn with nothing for the user to turn down.
+  for (const id of [GLM_53, GLM_53_FLASH]) {
+    assert.deepEqual(thinkLevels(id).map((l) => l.effort), ["low", "high", "max"], `${id}'s ladder is wrong`);
+  }
 });
 
 test("both 5.3 models take the effort dial", () => {

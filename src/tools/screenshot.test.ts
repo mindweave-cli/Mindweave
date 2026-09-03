@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
 import { parseWindowList, type WindowInfo } from "./screenshotWin.js";
-import { pickWindow, listTitles, safeName, screenshot } from "./screenshot.js";
+import { pickWindow, listTitles, safeName, screenshot, needsApproval } from "./screenshot.js";
 
 function win(title: string, handle = "1", foreground = false): WindowInfo {
   return { handle, title, foreground };
@@ -176,4 +176,13 @@ test("off Windows, screenshot degrades before asking for anything", async (t) =>
 
 test("screenshot is offered as a read-only tool", () => {
   assert.equal(screenshot.readOnly, true);
+});
+
+test("only a guarded session is asked before a capture", () => {
+  // Auto-accept means auto-accept. A tool that prompted anyway made the mode a
+  // promise the app did not keep, and the user had to answer for every look at a
+  // window they had asked it to check.
+  assert.equal(needsApproval({ guarded: true }), true);
+  assert.equal(needsApproval({ guarded: false }), false);
+  assert.equal(needsApproval({}), false, "a context with no mode set is the default one");
 });

@@ -20,10 +20,14 @@
  *
  *  - **One window, never the screen.** There is no full-desktop mode. The blast
  *    radius of a mistake is one window instead of everything open.
- *  - **The user approves the specific window, by title, before anything is
- *    captured.** Not after, and not once for the session.
- *  - **No approval channel means no capture.** A context that cannot ask (a
- *    sub-agent, a non-interactive run) is refused rather than defaulted to yes.
+ *  - **In a guarded session the user approves the specific window, by title, before
+ *    anything is captured.** Not after, and not once for the session. In an
+ *    auto-accept session it captures without asking, like every other tool there:
+ *    a mode that exists to stop confirming is not a mode with one exception in it,
+ *    and the narrowness above is what makes that safe to say.
+ *  - **No approval channel means no capture, in any mode.** A context that cannot ask
+ *    (a sub-agent, a non-interactive run) is refused rather than defaulted to yes.
+ *    The channel is what marks a session the user is sitting in front of.
  *
  * ## Where the picture goes
  *
@@ -99,11 +103,25 @@ export function listTitles(windows: WindowInfo[]): string {
   return `Open windows:\n${lines.join("\n")}`;
 }
 
+/**
+ * Whether a capture has to be confirmed before it happens.
+ *
+ * The session's own flag decides, exactly as it does for every mutating tool: a guarded
+ * session asks, an auto-accept session does not. Prompting unconditionally made this the
+ * one action that interrupted a mode chosen to stop interrupting, which is how a mode
+ * stops being believed. What keeps that safe is the scope, not the prompt — one named
+ * window, never the screen, and never from a context that has nobody to ask.
+ */
+export function needsApproval(ctx: Pick<ToolContext, "guarded">): boolean {
+  return ctx.guarded === true;
+}
+
 export const screenshot: Tool = {
   name: "screenshot",
   deferred: true,
-  // An observation: it changes nothing about the project. The privacy gate below
-  // is explicit and runs whether or not the session is in a guarded mode.
+  // An observation: it changes nothing about the project. The privacy gate below is
+  // explicit, and like every other gate it is the session's mode that decides whether
+  // it asks.
   readOnly: true,
   description:
     "Take a picture of one open window and look at it. Use it to check that an app " +
@@ -111,8 +129,8 @@ export const screenshot: Tool = {
     "or to see a layout, a chart, or an error dialog for yourself. " +
     "Pass `window` with part of the window's title; leave it out to capture the window " +
     "the user is currently focused on. " +
-    "The user is asked to approve the specific window first, so call it when looking " +
-    "will genuinely tell you something, not as a routine check. " +
+    "It photographs whatever that window is showing, so call it when looking will " +
+    "genuinely tell you something, not as a routine check. " +
     "Windows only, one window at a time — the whole screen is never captured, and " +
     "nothing can be clicked or typed.",
   parameters: {
@@ -174,16 +192,20 @@ export const screenshot: Tool = {
     }
 
     const target = pick.window;
-    const choice = await ctx.requestApproval(
-      `Take a screenshot of "${target.title}"? The image is sent to the model.`,
-      ["Yes, capture it", "No"],
-    );
-    if (!choice.startsWith("Yes")) {
-      return degrade(
-        `The user declined the screenshot of "${target.title}". Do not ask again for the ` +
-          `same window; verify another way or ask them what they see.`,
-        "screenshot declined",
+    // The window is resolved BEFORE this either way, so the user is never asked about a
+    // capture that was never going to happen.
+    if (needsApproval(ctx)) {
+      const choice = await ctx.requestApproval(
+        `Take a screenshot of "${target.title}"? The image is sent to the model.`,
+        ["Yes, capture it", "No"],
       );
+      if (!choice.startsWith("Yes")) {
+        return degrade(
+          `The user declined the screenshot of "${target.title}". Do not ask again for the ` +
+            `same window; verify another way or ask them what they see.`,
+          "screenshot declined",
+        );
+      }
     }
 
     try {

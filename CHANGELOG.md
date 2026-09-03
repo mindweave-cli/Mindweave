@@ -3,6 +3,53 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.2.0 (2026-09-03): a fourteenth provider, five new models, and a reasoning dial that was there all along
+
+Tencent's Hy models are available, through TokenHub's international endpoint with a
+`TOKENHUB_API_KEY`. Hy3 leads the lineup and hy4-preview sits beside it: the preview
+costs about six times as much per input token, and a provider whose default is the
+expensive preview picks a bill on someone else's behalf. Both take a reasoning dial with
+a genuine off position — thinking off, brief, or full — and thinking is switched off
+explicitly rather than by omission, because the provider's own default is to reason and
+bill for it. An account on the mainland console, which serves the same weights under
+different model ids, sets `MINDWEAVE_TENCENT_URL` and picks the id that console lists.
+
+Claude Fable 5.1 and Muse Spark 1.3 are offered. Fable 5.1 costs what Fable 5 costs to
+send and reads back from cache at a quarter of the price — 2.5% of base input, where
+every other model on that surface reads back at 10%, which is most of the bill for a
+loop that re-sends its prefix on every step. Muse Spark 1.3 ships at 1.2's rates on both
+tiers and takes the default. The superseded models stay listed at their own prices, so a
+saved configuration naming one keeps working.
+
+GLM-5.3 Flash offers all three of its reasoning depths. It had one rung, pinned to the
+deepest setting, on the reading that it documented a single effort value; it documents
+`low`, `high` and `max`, and `max` is only what a request falls back to when the field is
+absent. A session on it therefore reasoned at its most expensive setting for every step
+of every turn — including the steps that were a file read — with nothing for the user to
+turn down. Thinking still cannot be switched off on that model, so no rung claims to.
+
+An `.env.example` file is no longer treated as a secret. It is committed on purpose, it
+holds variable names and placeholder values, and refusing it withheld a project's own
+account of its configuration while protecting nothing. A shell command naming one
+alongside ordinary files was refused whole. The live files — `.env`, `.env.local`,
+`.env.production`, `prod.env` — are unchanged, as is anything that merely begins like a
+template.
+
+Taking a screenshot no longer interrupts an auto-accept session. The capture asked for
+confirmation in every mode, which made one tool the exception to a mode chosen to stop
+confirming. A guarded session still approves the specific window by title before anything
+is captured, and a context with nobody to ask — a sub-agent, a non-interactive run — is
+still refused outright in every mode.
+
+Where a prompt cache broke, and why, can now be recorded. Setting `MINDWEAVE_CACHE_LOG`
+to a file writes one line per model call: which call, the gap since the previous one, how
+much of the prompt was served from cache, and which part of the request moved if any did.
+The detector behind it already ran on every call and its answer was discarded, so a break
+was still only findable by reading a session file after the fact. A zero cache hit with a
+reason named is a prefix that moved; a zero hit with nothing changed is a cache that
+expired, and the two want different fixes.
+
+
 ## v2.1.4 (2026-09-03): a first run that survives its own key, and tool rows that arrive one at a time
 
 Adding an API key on the setup screen and pressing Continue blanked the terminal. The

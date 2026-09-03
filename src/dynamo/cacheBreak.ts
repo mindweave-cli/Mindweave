@@ -1,5 +1,5 @@
 /**
- * cacheBreak.ts — noticing when the cached prefix stopped matching, and saying why (pure).
+ * cacheBreak.ts — noticing when the cached prefix stopped matching, and saying why.
  *
  * Every provider caches the same way: it hashes the front of the request and reuses the
  * work if the next request starts with the same bytes. Change one character anywhere in
@@ -26,6 +26,7 @@
  * prefix by design. The point is that it should be a decision someone made, not a
  * surprise, and an unexplained one is a defect that has already started costing money.
  */
+import { appendFileSync } from "node:fs";
 import type { ToolSchema } from "../tools/types.js";
 import type { ChatMessage } from "../drivers/types.js";
 
@@ -160,4 +161,59 @@ export function diffPrefix(prev: PrefixPrint, next: PrefixPrint): CacheBreak | n
   }
 
   return null;
+}
+
+/**
+ * What one model call did to the cache, as a line for a file.
+ *
+ * The diagnosis above was computed on every call and thrown away, so a break was still
+ * only findable by reading a session file afterwards — the exact position this module
+ * exists to end. It is written to a file rather than the screen because the screen is a
+ * full-frame TUI, and because the question it answers is asked once, deliberately, by
+ * someone chasing a bill.
+ *
+ * Both halves belong on the same line. A break with a hit of zero is our prefix moving;
+ * NO break with a hit of zero is the provider's cache having expired, which is a
+ * different problem with a different fix and cannot be told apart from either number
+ * alone. The gap since the previous call is on the line for the same reason.
+ */
+export interface CacheCallReport {
+  /** Which call of this turn, from 1. */
+  call: number;
+  /** Milliseconds since the previous call started, or null when this is the first. */
+  gapMs: number | null;
+  broke: CacheBreak | null;
+  promptTokens: number;
+  cacheHitTokens: number;
+  model: string;
+}
+
+/** Format one report. Pure, so what the file will say can be asserted directly. */
+export function cacheCallLine(report: CacheCallReport): string {
+  const gap = report.gapMs === null ? "first" : `${(report.gapMs / 1000).toFixed(1)}s`;
+  const share = report.promptTokens > 0 ? Math.round((report.cacheHitTokens / report.promptTokens) * 100) : 0;
+  const broke = report.broke ? `${report.broke.kind} — ${report.broke.detail}` : "none";
+  return (
+    `call=${report.call} gap=${gap} prompt=${report.promptTokens} ` +
+    `hit=${report.cacheHitTokens} (${share}%) model=${report.model} broke=${broke}`
+  );
+}
+
+/**
+ * Append one line to the file named by `MINDWEAVE_CACHE_LOG`, and do nothing at all
+ * without it.
+ *
+ * Read at call time rather than at import, so a session started before the variable was
+ * set is not the reason nothing was recorded. One synchronous append per model call is
+ * beneath notice next to the call itself — unlike the frame log, which had to buffer
+ * because writing was competing with the thing it measured.
+ */
+export function writeCacheLog(line: string): void {
+  const path = process.env.MINDWEAVE_CACHE_LOG ?? "";
+  if (!path || path === "0") return;
+  try {
+    appendFileSync(path, `${new Date().toISOString()} ${line}\n`, "utf8");
+  } catch {
+    // A diagnostic must never take a turn down with it.
+  }
 }

@@ -8,7 +8,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { prefixPrint, diffPrefix, hashString } from "./cacheBreak.js";
+import { prefixPrint, diffPrefix, hashString, cacheCallLine, writeCacheLog } from "./cacheBreak.js";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ToolSchema } from "../tools/types.js";
 import type { ChatMessage } from "../drivers/types.js";
 
@@ -113,4 +116,72 @@ test("the first rewritten message wins, not the last", () => {
   const before = prefixPrint("m", "SYSTEM", [tool("read")], [msg("a"), msg("b"), msg("c")]);
   const after = prefixPrint("m", "SYSTEM", [tool("read")], [msg("a"), msg("X"), msg("Y")]);
   assert.match(diffPrefix(before, after)!.detail, /message 2 /);
+});
+
+test("a call line carries the break AND the hit, because neither means anything alone", () => {
+  // The whole point of the line. A zero hit WITH a break is our prefix moving and is
+  // ours to fix; a zero hit with NO break is the provider's cache having expired, and no
+  // amount of prefix work would have prevented it. The two are indistinguishable from
+  // either half on its own, so they are never written on separate lines.
+  const ours = cacheCallLine({
+    call: 5,
+    gapMs: 412_000,
+    broke: { kind: "tools", detail: "sessions appeared" },
+    promptTokens: 18_851,
+    cacheHitTokens: 0,
+    model: "glm-5.3-flash",
+  });
+  assert.match(ours, /call=5/);
+  assert.match(ours, /gap=412\.0s/);
+  assert.match(ours, /prompt=18851 hit=0 \(0%\)/);
+  assert.match(ours, /broke=tools — sessions appeared/);
+
+  const theirs = cacheCallLine({
+    call: 5,
+    gapMs: 412_000,
+    broke: null,
+    promptTokens: 18_851,
+    cacheHitTokens: 0,
+    model: "glm-5.3-flash",
+  });
+  assert.match(theirs, /broke=none/, "a call with nothing changed must say so, not go unlogged");
+});
+
+test("a first call is not reported as an instant one", () => {
+  // `gap=0.0s` on the opening call would read as a cache that expired in no time.
+  assert.match(
+    cacheCallLine({ call: 1, gapMs: null, broke: null, promptTokens: 100, cacheHitTokens: 0, model: "m" }),
+    /gap=first/,
+  );
+});
+
+test("the hit share is of the prompt, and an empty prompt does not divide by zero", () => {
+  assert.match(
+    cacheCallLine({ call: 2, gapMs: 1000, broke: null, promptTokens: 1000, cacheHitTokens: 750, model: "m" }),
+    /hit=750 \(75%\)/,
+  );
+  assert.match(
+    cacheCallLine({ call: 2, gapMs: 1000, broke: null, promptTokens: 0, cacheHitTokens: 0, model: "m" }),
+    /\(0%\)/,
+  );
+});
+
+test("nothing is written without the variable, and the line is appended with it", () => {
+  const before = process.env.MINDWEAVE_CACHE_LOG;
+  const path = join(mkdtempSync(join(tmpdir(), "mindweave-cachelog-")), "cache.txt");
+  try {
+    delete process.env.MINDWEAVE_CACHE_LOG;
+    writeCacheLog("call=1");
+    assert.equal(existsSync(path), false, "a diagnostic that is off must touch nothing");
+
+    process.env.MINDWEAVE_CACHE_LOG = path;
+    writeCacheLog("call=1 hit=0");
+    writeCacheLog("call=2 hit=900");
+    const lines = readFileSync(path, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2, "the second call overwrote the first");
+    assert.match(lines[1]!, /^\d{4}-\d\d-\d\dT.*call=2 hit=900$/, "a line with no timestamp cannot be lined up with a bill");
+  } finally {
+    if (before === undefined) delete process.env.MINDWEAVE_CACHE_LOG;
+    else process.env.MINDWEAVE_CACHE_LOG = before;
+  }
 });

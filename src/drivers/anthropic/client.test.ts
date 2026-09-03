@@ -14,7 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type Anthropic from "@anthropic-ai/sdk";
 import { buildBody, emit, renderMessages, thinkingBudget, toStop, toTurn, toUsage } from "./client.js";
-import { FABLE, HAIKU, MODELS, OPUS, OPUS_48, SONNET, normalize, thinkLevels } from "./manifest.js";
+import { FABLE, FABLE_51, HAIKU, MODELS, OPUS, OPUS_48, SONNET, normalize, price, thinkLevels } from "./manifest.js";
 import type { Effort, ModelRequest, StreamEvent } from "../types.js";
 
 const base: ModelRequest = { system: "SYSTEM", messages: [] };
@@ -245,15 +245,27 @@ test("on the current surface, reasoning is adaptive thinking plus an effort leve
   }
 });
 
-test("Fable 5 is sent NO thinking field at all — it rejects every explicit value", () => {
+test("neither Fable is sent a thinking field at all — both reject every explicit value", () => {
   // Including `{type:"disabled"}`, which the other models accept happily. The one
-  // thing that must never appear on this model's body is the key itself.
-  for (const thinking of [true, false]) {
-    const body = bodyFor(FABLE, thinking, "xhigh");
-    assert.ok(!("thinking" in body), `thinking must be absent (thinking=${thinking})`);
-    // Effort still applies — Fable takes the full ladder.
-    assert.deepEqual(body.output_config, { effort: "xhigh" });
+  // thing that must never appear on either model's body is the key itself.
+  for (const model of [FABLE_51, FABLE]) {
+    for (const thinking of [true, false]) {
+      const body = bodyFor(model, thinking, "xhigh");
+      assert.ok(!("thinking" in body), `thinking must be absent (${model}, thinking=${thinking})`);
+      // Effort still applies — Fable takes the full ladder.
+      assert.deepEqual(body.output_config, { effort: "xhigh" });
+    }
   }
+});
+
+test("Fable 5.1 reads back from cache at a quarter of Fable 5's rate", () => {
+  // The one number that changed between them: same input, same output, a cache read
+  // at 2.5% of base input where every other model on this surface reads back at 10%.
+  // An agentic loop re-sends its prefix on every step, so this is most of the bill.
+  assert.equal(price(FABLE_51).cacheMiss, price(FABLE).cacheMiss);
+  assert.equal(price(FABLE_51).output, price(FABLE).output);
+  assert.equal(price(FABLE_51).cacheHit, 0.25);
+  assert.equal(price(FABLE_51).cacheHit, price(FABLE).cacheHit / 4);
 });
 
 test("Haiku 4.5 gets a token budget and NO effort — it predates both", () => {
@@ -311,9 +323,11 @@ test("normalize never pairs disabled thinking with an effort Opus 5 rejects", ()
   }
 });
 
-test("normalize forces thinking ON for Fable 5 — it cannot be asked to skip it", () => {
-  for (const effort of EFFORTS) {
-    assert.equal(normalize({ model: FABLE, thinking: false, effort }).thinking, true, effort);
+test("normalize forces thinking ON for both Fables — neither can be asked to skip it", () => {
+  for (const model of [FABLE_51, FABLE]) {
+    for (const effort of EFFORTS) {
+      assert.equal(normalize({ model, thinking: false, effort }).thinking, true, `${model}/${effort}`);
+    }
   }
 });
 

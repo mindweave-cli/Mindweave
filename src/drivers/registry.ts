@@ -31,6 +31,7 @@ import { cerebrasManifest } from "./cerebras/manifest.js";
 import { geminiManifest } from "./gemini/manifest.js";
 import { metaManifest } from "./meta/manifest.js";
 import { minimaxManifest } from "./minimax/manifest.js";
+import { tencentManifest } from "./tencent/manifest.js";
 
 /** Every provider's cheap metadata, in display order. Always loaded. */
 const MANIFESTS: DriverManifest[] = [
@@ -47,6 +48,7 @@ const MANIFESTS: DriverManifest[] = [
   geminiManifest,
   metaManifest,
   minimaxManifest,
+  tencentManifest,
 ];
 
 /** How to load each provider's wire code, on demand. Keyed by manifest id. */
@@ -64,6 +66,7 @@ const LOADERS: Record<string, () => Promise<Driver>> = {
   gemini: async () => (await import("./gemini/index.js")).geminiDriver,
   meta: async () => (await import("./meta/index.js")).metaDriver,
   minimax: async () => (await import("./minimax/index.js")).minimaxDriver,
+  tencent: async () => (await import("./tencent/index.js")).tencentDriver,
 };
 
 /** The provider used when a model id doesn't match any other. */

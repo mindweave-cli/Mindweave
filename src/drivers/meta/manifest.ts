@@ -9,24 +9,27 @@
  * Meta retired its hosted Llama API in July 2026; Llama itself is not served here
  * at all any more. Muse Spark, a closed model from the newly formed Meta
  * Superintelligence Labs, is the only thing on this endpoint now. 1.1 is
- * deliberately not offered: 1.2 supersedes it at the same price, the same
- * superseded-tier rule every other driver here follows.
+ * deliberately not offered: 1.3 and 1.2 both supersede it at the same price, the
+ * same superseded-tier rule every other driver here follows. 1.2 stays because a
+ * saved config naming it must keep working and because its rates are unchanged.
  *
- * THE CONTRIBUTOR TIER. This is the one fact in this file worth reading twice.
- * `muse-spark-1.2-contributor` is not a cheaper flag on the same model — it is a
- * SEPARATE model id whose price is roughly 12x lower than Standard in exchange for
+ * THE CONTRIBUTOR TIER. This is the one fact in this file worth reading twice. A
+ * `-contributor` id is not a cheaper flag on the same model — it is a SEPARATE
+ * model id whose price is roughly 12x lower than Standard in exchange for
  * Meta training on your prompts and completions. Both directions are real: the
  * discount is real, and so is the data use. Neither is the default. See `MODELS`
  * below for how that trade-off is worded to the person choosing it.
  */
 import type { DriverManifest, Effort, ModelChoice, ModelConfig, ModelId, ModelPrice, ThinkLevel } from "../types.js";
 
+export const MUSE_SPARK_13 = "muse-spark-1.3";
+export const MUSE_SPARK_13_CONTRIBUTOR = "muse-spark-1.3-contributor";
 export const MUSE_SPARK_12 = "muse-spark-1.2";
 export const MUSE_SPARK_12_CONTRIBUTOR = "muse-spark-1.2-contributor";
 
 /** The model used when nothing is saved and no env override is set. Standard
  *  tier, so no one is opted into sharing their data with anything but a choice. */
-export const DEFAULT_MODEL = MUSE_SPARK_12;
+export const DEFAULT_MODEL = MUSE_SPARK_13;
 
 /**
  * The models offered by `/model`. First entry is this provider's default, which is
@@ -37,11 +40,17 @@ export const DEFAULT_MODEL = MUSE_SPARK_12;
  * give up for that price. A model this consequential does not get a euphemism.
  */
 export const MODELS: ModelChoice[] = [
-  { id: MUSE_SPARK_12, label: "Muse Spark 1.2", description: "the default — your prompts stay yours" },
+  { id: MUSE_SPARK_13, label: "Muse Spark 1.3", description: "the default — your prompts stay yours" },
+  {
+    id: MUSE_SPARK_13_CONTRIBUTOR,
+    label: "Muse Spark 1.3 (Contributor)",
+    description: "~12x cheaper input — in exchange, Meta trains on your prompts and completions",
+  },
+  { id: MUSE_SPARK_12, label: "Muse Spark 1.2", description: "the previous Spark, at the same rate" },
   {
     id: MUSE_SPARK_12_CONTRIBUTOR,
     label: "Muse Spark 1.2 (Contributor)",
-    description: "~12x cheaper input — in exchange, Meta trains on your prompts and completions",
+    description: "the previous Spark, on the same data-for-price trade",
   },
 ];
 
@@ -63,6 +72,9 @@ export function thinkLevels(_model: ModelId): ThinkLevel[] {
  * volume deal.
  */
 const PRICES: Record<string, ModelPrice> = {
+  // 1.3 ships at 1.2's rates, on both tiers.
+  [MUSE_SPARK_13]: { cacheHit: 0.15, cacheMiss: 1.25, output: 4.25 },
+  [MUSE_SPARK_13_CONTRIBUTOR]: { cacheHit: 0.002, cacheMiss: 0.1, output: 0.2 },
   [MUSE_SPARK_12]: { cacheHit: 0.15, cacheMiss: 1.25, output: 4.25 },
   [MUSE_SPARK_12_CONTRIBUTOR]: { cacheHit: 0.002, cacheMiss: 0.1, output: 0.2 },
 };
@@ -73,7 +85,7 @@ export function price(model: ModelId): ModelPrice {
 }
 
 /**
- * The model's USABLE context window. Both models store 1,048,576 tokens with no
+ * The model's USABLE context window. Every model here stores 1,048,576 tokens with no
  * documented billing cliff inside it, unlike xAI's or Gemini's Pro tier — but on
  * BYOK every token in the window is still the user's money on every turn, so this
  * is the same 200K ceiling used elsewhere once a window is chosen for cost rather
@@ -110,7 +122,7 @@ const EFFORTS: Effort[] = ["high"];
 /**
  * Coerce a stored or unknown config onto a model this provider actually serves.
  *
- * There is no per-model rule to enforce: neither model has a reasoning dial, so
+ * There is no per-model rule to enforce: no model here has a reasoning dial, so
  * thinking is always false and the effort is inert filler, present only because
  * the shared `ModelConfig` shape requires one.
  */

@@ -22,7 +22,7 @@ import { guardOptions, GUARD_REFUSAL, GUARD_REFUSAL_INPUT, guardRefusalWith, gua
 import { readFreeText } from "../tools/approval.js";
 import { findTool, toolSchemas, TOOLS } from "../tools/registry.js";
 import { deferredToolsIndex } from "../tools/deferredNative.js";
-import { prefixPrint, diffPrefix } from "./cacheBreak.js";
+import { prefixPrint, diffPrefix, cacheCallLine, writeCacheLog } from "./cacheBreak.js";
 import { commandShellLabel } from "../tools/runCommand.js";
 import { isInteractiveServerCommand } from "../tools/backgroundShells.js";
 import { basePrompt } from "./prompt.js";
@@ -1112,6 +1112,10 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     const print = prefixPrint(session.modelConfig.model, request.system, request.tools ?? [], request.messages);
     const broke = session.prefixPrint ? diffPrefix(session.prefixPrint, print) : null;
     session.prefixPrint = print;
+    // Read BEFORE the stamp below, so it is the gap since the previous call rather
+    // than zero. A long gap with nothing changed is the provider's cache expiring,
+    // which no amount of prefix work would have prevented.
+    const sinceLastCall = session.lastCallAt ? Date.now() - session.lastCallAt : null;
 
     // Shed the oldest whole rounds and retry, ONCE per turn. Shared by both ways a
     // provider can refuse an over-long conversation, because the remedy is identical
@@ -1159,6 +1163,16 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     emitUsage(result, options);
     if (result.usage) {
       usages.push(result.usage);
+      writeCacheLog(
+        cacheCallLine({
+          call: usages.length,
+          gapMs: sinceLastCall,
+          broke,
+          promptTokens: result.usage.promptTokens,
+          cacheHitTokens: result.usage.cacheHitTokens,
+          model: session.modelConfig.model,
+        }),
+      );
       // Measure, don't guess. The provider just told us exactly how big the prompt was;
       // subtracting the transcript we measured on the way out leaves the fixed overhead
       // the bars were blind to. Recomputed every call, so it tracks a growing tool
