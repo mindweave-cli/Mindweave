@@ -26,6 +26,8 @@ It is built lean on purpose. Most of a coding agent's context budget goes on sca
 the model never needed. Mindweave keeps prompts thin and leaves the room for the model to
 reason about your code.
 
+For any questions or more email at zallinimann@gmail.com. 
+
 ## Mindweave 1
 
 This is Mindweave 1 which is finally out, tagged `mindweave-1`. It is on npm, and the
