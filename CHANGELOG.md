@@ -24,7 +24,7 @@ such, with the command to go back.
 
 A stray newline could reach the terminal, and one written on the bottom row scrolls the
 whole screen up a line. The renderer draws only the cells it believes changed, so every
-row afterwards was painted somewhere it was not — the banner ending up half beneath a
+row afterwards was painted somewhere it was not the banner ending up half beneath a
 tool row, a character of "Mindweave" surviving under a filename. Writes that carry no
 printable content are still forwarded, because that is how the alternate screen is
 entered and the cursor hidden, but the test now asks whether anything is left rather than
