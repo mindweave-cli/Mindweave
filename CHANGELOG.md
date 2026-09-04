@@ -7,7 +7,7 @@ Notable changes to Mindweave. Dates are release dates.
 
 `/update` takes the newest release and reopens on the conversation it left. It resolves
 the prefix from where this copy actually sits rather than asking npm where global
-packages go — those two disagree often enough that trusting the second either fails on
+packages go those two disagree often enough that trusting the second either fails on
 permissions or, worse, succeeds: a fresh copy installed somewhere the `mindweave` command
 does not look, reported as done, leaving the old version running with nothing on screen
 to say so. A working tree, a linked install and another project's dependency are refused
@@ -17,8 +17,8 @@ silently replaces the work in it.
 The restart is the point rather than a convenience. Driver modules load on demand, so a
 copy that rewrote itself mid-session would be an old process reading new files, which
 fails later and somewhere else. The old process stays alive only to hand the terminal
-over in a defined order — alternate screen left, mouse reporting off, cursor and autowrap
-restored, stdin out of raw mode — and to pass the exit code up, so the shell that started
+over in a defined order alternate screen left, mouse reporting off, cursor and autowrap
+restored, stdin out of raw mode and to pass the exit code up, so the shell that started
 it sees one process from beginning to end. A version that cannot start is reported as
 such, with the command to go back.
 
@@ -43,7 +43,7 @@ looks are recorded with its result, and several were not: whether a block of tex
 diff, so every edit came back as plain dim lines with its green and red gone; whether a
 row was hidden, so a session filled with rows the tool that produced them had suppressed;
 a command's timeout; and the name and colour a result gives itself, so a red "Build
-Error" returned as a routine "Check". The two sites that build a row — the live stream
+Error" returned as a routine "Check". The two sites that build a row the live stream
 and the replay — are now checked against each other from source, since listing the fields
 would only move the problem to the next one added.
 
@@ -69,7 +69,7 @@ reasoning dial.
 
 The `diagnostics` tool is gone. Every edit already returns the language server's errors
 for the file it changed, so a separate call for the same answer only added a row that
-hid itself when it found nothing — and a hidden row between two things the agent said
+hid itself when it found nothing and a hidden row between two things the agent said
 fused them into what read as two closing statements.
 
 A turn that is re-opened to verify no longer ends twice. Finishing without running a
