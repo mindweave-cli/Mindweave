@@ -3,6 +3,88 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.3.0 (2026-09-04): `/update`, a screen that stops tearing, and resumed sessions that look like the ones they resume
+
+`/update` takes the newest release and reopens on the conversation it left. It resolves
+the prefix from where this copy actually sits rather than asking npm where global
+packages go — those two disagree often enough that trusting the second either fails on
+permissions or, worse, succeeds: a fresh copy installed somewhere the `mindweave` command
+does not look, reported as done, leaving the old version running with nothing on screen
+to say so. A working tree, a linked install and another project's dependency are refused
+outright and handed the command to type instead, because `npm i -g` over a source build
+silently replaces the work in it.
+
+The restart is the point rather than a convenience. Driver modules load on demand, so a
+copy that rewrote itself mid-session would be an old process reading new files, which
+fails later and somewhere else. The old process stays alive only to hand the terminal
+over in a defined order — alternate screen left, mouse reporting off, cursor and autowrap
+restored, stdin out of raw mode — and to pass the exit code up, so the shell that started
+it sees one process from beginning to end. A version that cannot start is reported as
+such, with the command to go back.
+
+A stray newline could reach the terminal, and one written on the bottom row scrolls the
+whole screen up a line. The renderer draws only the cells it believes changed, so every
+row afterwards was painted somewhere it was not — the banner ending up half beneath a
+tool row, a character of "Mindweave" surviving under a filename. Writes that carry no
+printable content are still forwarded, because that is how the alternate screen is
+entered and the cursor hidden, but the test now asks whether anything is left rather than
+trimming first, and a write that is nothing but control characters is dropped. Vertical
+position here is decided entirely by absolute cursor moves; a newline from anywhere else
+can only move the screen out from under the model of it.
+
+Two more sources of the same corruption are closed. Autowrap is switched off while the
+app owns the screen, so a row one column too long is clipped at the margin instead of
+continuing onto the next one and pushing everything below it down. And a tool header
+counted its own width without the qualifier it then appended, so every command with a
+timeout built a row wider than the terminal.
+
+A resumed session now redraws the rows it is resuming. The fields that decide how a row
+looks are recorded with its result, and several were not: whether a block of text is a
+diff, so every edit came back as plain dim lines with its green and red gone; whether a
+row was hidden, so a session filled with rows the tool that produced them had suppressed;
+a command's timeout; and the name and colour a result gives itself, so a red "Build
+Error" returned as a routine "Check". The two sites that build a row — the live stream
+and the replay — are now checked against each other from source, since listing the fields
+would only move the problem to the next one added.
+
+Dismissing a question stops the turn. `ask_user` used to tell the model to "proceed with
+the most reasonable default" when its question was closed unanswered, and the model duly
+announced a choice a moment after the person had declined to make one. Closing a plan
+was read as rejecting it, which attributed a verdict to someone who had given none. Both
+now end the turn the way Esc does, because someone who closes a question is reaching for
+the keyboard, not waiting to see what gets decided for them.
+
+A command's output is shown as a result rather than as a log. The verdict sits beside the
+command with the time it took, not at the bottom of however many lines came out. Repeated
+column chrome — job names, timestamps — is removed before anything is counted, so the
+budget is spent on what was said rather than on text identical from line to line. What is
+kept is the END of the output, since that is where an error is, and it is capped: three
+lines for a command that worked, twelve for one that did not. A recognised test run
+collapses to its counts and the first few failures, and a green run to a single line;
+anything not recognised falls through to the ordinary block, whole.
+
+Gemini 3.8 Flash is available and is the Gemini default. It costs what 3.7 Flash costs,
+carries the same promotional rate ending 2026-12-31, and takes the same three-rung
+reasoning dial.
+
+The `diagnostics` tool is gone. Every edit already returns the language server's errors
+for the file it changed, so a separate call for the same answer only added a row that
+hid itself when it found nothing — and a hidden row between two things the agent said
+fused them into what read as two closing statements.
+
+A turn that is re-opened to verify no longer ends twice. Finishing without running a
+check prompts one, and the reply written before that check is dropped rather than left on
+screen above the one written after it.
+
+Smaller things. The caret no longer hides the character being typed when a line fills the
+box exactly. A failure is marked with a glyph one column wide, like the tick beside it,
+rather than one terminals draw as two and paint over the space after. A read of several
+files counts files instead of calls and names them. A block with output keeps its blank
+line, so one command's last line no longer touches the next command's header. A
+screenshot whose window was chosen between identically titled candidates says so, and
+says what would choose differently.
+
+
 ## v2.2.1 (2026-09-03): a symbol search that waits for the index, and Muse Spark's reasoning dial
 
 Asking for a symbol could return nothing while the answer was still being computed.

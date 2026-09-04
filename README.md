@@ -121,6 +121,7 @@ paths or commands the agent has to respect.
 | `/provider` · `/model` · `/think` | Who answers, which model, how hard it reasons |
 | `/clear` · `/continue` | Start fresh, or resume an earlier session |
 | `/undo` | Reverts what the last turn changed |
+| `/update` | Installs the newest version and reopens on this conversation |
 | `/mcp` | Manages connected MCP servers |
 | `shift-tab` | Cycles interaction modes |
 
