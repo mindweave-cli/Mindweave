@@ -301,6 +301,20 @@ export interface ToolContext {
     freeText?: { label: string; placeholder: string },
   ) => Promise<string>;
   /**
+   * Stop this turn, exactly as pressing Esc does.
+   *
+   * For the case where the USER has said, by their action, that they do not want the
+   * work to continue — not for a tool that has hit a problem, which reports an error and
+   * lets the model decide.
+   *
+   * `ask_user` is the one caller. Dismissing its question used to leave the turn running,
+   * so the model was told "the user did not answer" and carried on with an assumption it
+   * had just been denied permission to make. Telling the model harder does not fix that:
+   * the turn has to actually end, because the person dismissing a question is reaching
+   * for the keyboard, not waiting to see what gets decided for them.
+   */
+  interrupt?: () => void;
+  /**
    * Other coding tools whose data the user has allowed this session, by name
    * ("Claude Code", "Cursor", …). Another agent's sessions/memory/rules are not
    * ours to read, so the tools ask first; a yes lands here so the user is asked

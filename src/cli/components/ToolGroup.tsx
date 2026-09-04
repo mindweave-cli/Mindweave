@@ -42,7 +42,11 @@ export function ToolGroup({
   columns: number;
   tightTop?: boolean;
 }) {
-  const n = items.length;
+  // THINGS, not calls. `read_file` takes a list of paths, so one call can read several
+  // files, and counting calls made a burst of three files announce itself as
+  // "Reading 1 file" directly above its own row saying "Read 3 files" — the header
+  // contradicting its contents, with the header the one that was wrong.
+  const n = items.reduce((total, it) => total + (it.covers ?? 1), 0);
   const anyError = items.some((it) => it.status === "error");
   // Named for what it actually did when it's all one kind of work, which after
   // the narrowing above is the common case: a burst of reads says "Read 3 files".

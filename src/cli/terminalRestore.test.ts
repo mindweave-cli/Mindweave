@@ -9,24 +9,30 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MOUSE_OFF, ALT_SCREEN_OFF, SHOW_CURSOR, TERMINAL_RESTORE } from "./terminalRestore.js";
+import { MOUSE_OFF, ALT_SCREEN_OFF, SHOW_CURSOR, AUTOWRAP_ON, TERMINAL_RESTORE } from "./terminalRestore.js";
 import { enterAltScreen, exitAltScreen } from "./altScreen.js";
 
-test("the restore turns off reporting first, then the buffer, then the cursor", () => {
+test("the restore turns off reporting first, then the buffer, cursor and wrapping", () => {
   // Order is the point: the mode actively writing bytes into the terminal is silenced
   // before anything else, so nothing it emits lands in the middle of the rest.
-  assert.equal(TERMINAL_RESTORE, MOUSE_OFF + ALT_SCREEN_OFF + SHOW_CURSOR);
+  assert.equal(TERMINAL_RESTORE, MOUSE_OFF + ALT_SCREEN_OFF + SHOW_CURSOR + AUTOWRAP_ON);
   assert.equal(MOUSE_OFF, "\x1b[?1006l\x1b[?1000l");
   assert.equal(ALT_SCREEN_OFF, "\x1b[?1049l");
   assert.equal(SHOW_CURSOR, "\x1b[?25h");
+  assert.equal(AUTOWRAP_ON, "\x1b[?7h");
 });
 
-test("every sequence is a mode RESET, so sending it to a healthy terminal is a no-op", () => {
-  // A private-mode reset ends in `l`; `h` would switch something ON. Getting one of
-  // these backwards would mean --reset-terminal broke the terminal it was repairing.
+test("every sequence restores the DEFAULT, so sending it to a healthy terminal is a no-op", () => {
+  // What matters is the state each mode is left in, not the letter used to get there.
+  // Most of what the app switches on is off by default and so is reset with `l`; the two
+  // it switches OFF — the cursor and autowrap — are on by default and must be set back
+  // with `h`. Getting either direction backwards would mean --reset-terminal broke the
+  // terminal it was repairing: a stripped `?7h` leaves every long line in the next shell
+  // silently truncated at the right margin, with nothing on screen to say why.
+  const DEFAULT_ON = new Set(["25", "7"]);
   for (const seq of TERMINAL_RESTORE.matchAll(/\x1b\[\?(\d+)([hl])/g)) {
-    if (seq[1] === "25") continue; // showing the cursor is the one thing turned ON
-    assert.equal(seq[2], "l", `mode ${seq[1]} must be reset, not set`);
+    const wanted = DEFAULT_ON.has(seq[1]!) ? "h" : "l";
+    assert.equal(seq[2], wanted, `mode ${seq[1]} must be left at its default`);
   }
 });
 

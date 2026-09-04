@@ -10,7 +10,7 @@ lineup below costs nothing until you pick from it.
 
 ## Available now
 
-14 providers, 52 models. `/provider` moves between them and `/model`
+14 providers, 53 models. `/provider` moves between them and `/model`
 lists what the one you are on offers, so there is nothing here you need to memorise.
 
 | Provider | Models | Key |
@@ -18,7 +18,7 @@ lists what the one you are on offers, so there is nothing here you need to memor
 | **DeepSeek** | 3 | `DEEPSEEK_API_KEY` |
 | **Anthropic** | 6 | `ANTHROPIC_API_KEY` |
 | **OpenAI** | 3 | `OPENAI_API_KEY` |
-| **Gemini** | 6 | `GEMINI_API_KEY` |
+| **Gemini** | 7 | `GEMINI_API_KEY` |
 | **Qwen** | 4 | `DASHSCOPE_API_KEY` |
 | **Kimi** | 4 | `MOONSHOT_API_KEY` |
 | **GLM** | 6 | `ZAI_API_KEY` |

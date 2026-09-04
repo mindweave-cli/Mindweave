@@ -153,15 +153,16 @@ test("a typed /mcp remove reaches the removal branch with its target", async () 
  */
 test("every advertised command has a handler, and every handler is advertised", async () => {
   const { readFileSync } = await import("node:fs");
+  // The two halves live in different files now: the list is data in commands.ts, the
+  // handlers are branches in App.tsx. Reading it rather than importing it is still the
+  // point — a handler is a branch in a component, and there is nothing to import.
   const src = readFileSync("src/cli/App.tsx", "utf8");
+  const catalogSrc = readFileSync("src/cli/commands.ts", "utf8");
 
-  const listBlock = src.slice(src.indexOf("const BASE_COMMANDS = ["));
-  const listed = new Set(
-    [...listBlock.slice(0, listBlock.indexOf("];")).matchAll(/name: "(\/[a-z-]+)"/g)].map((m) => m[1]!),
-  );
+  const listed = new Set([...catalogSrc.matchAll(/name: "(\/[a-z-]+)"/g)].map((m) => m[1]!));
   const handled = new Set([...src.matchAll(/name === "(\/[a-z-]+)"/g)].map((m) => m[1]!));
 
-  assert.ok(listed.size >= 18, `only found ${listed.size} commands in BASE_COMMANDS — did the list move?`);
+  assert.ok(listed.size >= 18, `only found ${listed.size} commands in the catalog — did the list move?`);
 
   const advertisedButDead = [...listed].filter((c) => !handled.has(c));
   assert.deepEqual(advertisedButDead, [], "these are offered by /help and autocomplete but nothing handles them");

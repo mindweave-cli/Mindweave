@@ -65,6 +65,16 @@ export const ATTR = {
  */
 export const WIDE_CONTINUATION = 0xffff_ffff;
 
+/**
+ * A cell whose real contents are UNKNOWN.
+ *
+ * Only ever written into the PREVIOUS grid, by `invalidate()`, to say "assume nothing
+ * about what the terminal is showing here". No cell parsed from a frame can hold it, so
+ * every comparison against it differs and the diff repaints the cell. The painter never
+ * meets it, because it only ever reads characters out of the NEXT grid.
+ */
+export const UNKNOWN_CELL = 0xffff_fffe;
+
 /** A grid of terminal cells. */
 export class Screen {
   width: number;
@@ -96,6 +106,23 @@ export class Screen {
     return y * this.width + x;
   }
 
+  /**
+   * Forget what this grid says is on the terminal.
+   *
+   * Every cell is set to a value no real cell can hold, so a diff against this grid
+   * finds EVERY cell changed and repaints the whole screen. That is the framebuffer's
+   * only way back from a disagreement with the real terminal: the renderer writes just
+   * the cells it believes changed, so anything that reaches the screen behind its back
+   * (a line the terminal wrapped, a scroll it caused, a stray write) would otherwise
+   * stay there for the rest of the session.
+   *
+   * Deliberately NOT the same as `clear()`. A cleared grid claims the screen is blank,
+   * and blank matches blank, so the diff would write nothing for exactly the regions
+   * most likely to be holding stale text.
+   */
+  invalidate(): void {
+    this.chars.fill(UNKNOWN_CELL);
+  }
   /** Reset every cell to a default-styled blank. */
   clear(): void {
     this.chars.fill(32);

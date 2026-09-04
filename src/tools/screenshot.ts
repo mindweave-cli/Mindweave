@@ -50,7 +50,9 @@ const MAX_LISTED = 12;
 
 /** What matching a `window` argument against the open windows produced. */
 export type WindowPick =
-  | { kind: "match"; window: WindowInfo }
+  /** `tied` holds the other windows the query fitted exactly as well, which focus was
+   *  used to choose between. Empty when the match was the only candidate. */
+  | { kind: "match"; window: WindowInfo; tied: WindowInfo[] }
   | { kind: "none"; candidates: WindowInfo[] }
   | { kind: "ambiguous"; candidates: WindowInfo[] };
 
@@ -69,7 +71,9 @@ export function pickWindow(query: string | undefined, windows: WindowInfo[]): Wi
 
   if (!query) {
     const focused = windows.find((w) => w.foreground);
-    return focused ? { kind: "match", window: focused } : { kind: "ambiguous", candidates: windows };
+    return focused
+      ? { kind: "match", window: focused, tied: windows.filter((w) => w !== focused) }
+      : { kind: "ambiguous", candidates: windows };
   }
 
   const needle = query.trim().toLowerCase();
@@ -81,16 +85,44 @@ export function pickWindow(query: string | undefined, windows: WindowInfo[]): Wi
   ];
 
   for (const tier of tiers) {
-    if (tier.length === 1) return { kind: "match", window: tier[0]!.w };
+    if (tier.length === 1) return { kind: "match", window: tier[0]!.w, tied: [] };
     if (tier.length > 1) {
       // Several equally good matches, but if exactly one has focus the user is
       // looking at it, and that is a better answer than refusing.
+      //
+      // The losers are carried out with the winner. Resolving a tie silently makes a
+      // successful capture indistinguishable from one where the title could only ever
+      // name a single window, so a caller who wanted one of the OTHERS has no way to
+      // learn that its query cannot express the difference — and repeats the same call
+      // expecting a different picture.
       const focused = tier.filter(({ w }) => w.foreground);
-      if (focused.length === 1) return { kind: "match", window: focused[0]!.w };
+      if (focused.length === 1) {
+        return { kind: "match", window: focused[0]!.w, tied: tier.filter(({ w }) => !w.foreground).map(({ w }) => w) };
+      }
       return { kind: "ambiguous", candidates: tier.map(({ w }) => w) };
     }
   }
   return { kind: "none", candidates: windows };
+}
+
+/**
+ * Say that the capture was a tie decided by focus, and that repeating it will not
+ * decide it differently (pure).
+ *
+ * Without this a tie-broken capture reads exactly like an unambiguous one. A caller
+ * wanting one of the other windows sees a plain success, changes nothing, and calls
+ * again — the same window comes back, because focus has not moved and nothing in the
+ * result ever said that focus was what chose it. So this names the number, and names the
+ * two things that would actually change the answer.
+ */
+export function tieNote(query: string | undefined, tied: WindowInfo[]): string {
+  if (tied.length === 0) return "";
+  const others = tied.length === 1 ? "1 other window" : `${tied.length} other windows`;
+  return (
+    ` ${others} match${tied.length === 1 ? "es" : ""} ${query ? `"${query}"` : "as well"} just as closely; ` +
+    `this one had focus. Calling again will pick the same one — to reach another, focus it first ` +
+    `or name a title only it has.`
+  );
 }
 
 /** Render window titles for an error the model can act on without another call. */
@@ -222,7 +254,8 @@ export const screenshot: Tool = {
       return {
         output:
           `Captured "${target.title}" (${size.width}x${size.height}). ` +
-          `The image follows this result — look at it and say what you see.`,
+          `The image follows this result — look at it and say what you see.` +
+          tieNote(query, pick.tied),
         summary: `screenshot of ${target.title} (${size.width}x${size.height})`,
         // The facts about the capture itself, which the model's own output does not
         // carry: what was taken, how big it is, and WHEN — the timestamp is what tells

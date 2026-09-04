@@ -17,6 +17,14 @@
  * therefore known to be Ink's renderer output, where a global patch would also catch
  * unrelated writes and have to guess which was which.
  *
+ * ## Why it also writes the whole screen from time to time
+ *
+ * Diffing against a model of the terminal is only correct while the model is right, and
+ * a wrong cell is never revisited, because as far as a diff can see nothing about it
+ * changed. So the model is thrown away and the screen written in full on a schedule —
+ * see `invalidate()`. That is what keeps a single stray row from becoming a session of
+ * interleaved text, and it costs one Ink-sized frame every few seconds.
+ *
  * ## What is passed through untouched
  *
  * Only frame CONTENT can be diffed. Control sequences that are not a frame — entering
@@ -40,6 +48,31 @@ const ERASE_PREFIX = /^(?:\x1b\[2K(?:\x1b\[1A)?)+\x1b\[G/;
 
 /** Any escape sequence, for deciding whether a write carries visible content. */
 const ANY_ESCAPE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[[\]()#;?]*[0-9;]*[A-Za-z]|\x1b./g;
+
+/**
+ * How long the model and the real terminal may disagree during continuous work, in
+ * milliseconds.
+ *
+ * Writing every cell costs about what Ink's own renderer cost on EVERY frame, so paying
+ * it once every few seconds gives back almost none of the saving and puts a ceiling on
+ * how wrong the screen can get. `0` writes in full every frame, which is Ink's original
+ * behaviour and the thing to compare against when this is suspected.
+ *
+ * Read per wrapper rather than once at module load, so it is a property of the stream
+ * being wrapped instead of of whichever import happened first.
+ */
+function fullRepaintMs(): number {
+  const raw = Number(process.env["MINDWEAVE_FB_REPAINT_MS"]);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 4000;
+}
+
+/**
+ * How long after the last frame of a burst the screen is written in full.
+ *
+ * Short enough that a glitch is gone before it can be read, long enough that it never
+ * lands mid-burst: every frame cancels and re-arms it.
+ */
+const IDLE_REPAINT_MS = 400;
 
 /** A stream Ink can render into. Structural, so the real `process.stdout` satisfies it. */
 export interface OutputStream {
@@ -72,21 +105,23 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
   let onScreen = new Screen(real.columns ?? 80, real.rows ?? 24);
   let pending = new Screen(onScreen.width, onScreen.height);
 
+  const repaintEvery = fullRepaintMs();
+  /** When every cell was last written, which is what bounds how long a disagreement
+   *  with the real terminal can survive. */
+  let lastFull = 0;
+  /** The pending after-the-burst repaint, cancelled and re-armed by each frame. */
+  let idle: ReturnType<typeof setTimeout> | undefined;
+
   /**
    * Match the grids to the terminal. Returns true when the size changed, which the
-   * caller must answer by erasing the real screen before it paints.
+   * caller answers with a full write.
    *
-   * The erase is the whole point and it used to be missing. Resizing reset `onScreen`
-   * to blanks, on the reasoning that a blank model would make every cell differ and
-   * force a full repaint. It does the opposite: the new frame's blank regions are also
-   * blanks, so the diff finds them identical and writes nothing for them, while the real
-   * terminal still holds whatever was in those cells before. That is what fused an old
-   * line onto a new one, leaving rows like `Tools(session)s, ask_user, create_skill,`.
-   *
-   * Erasing for real is also the cheap fix rather than the expensive one. Filling the
-   * model with a sentinel no cell can equal would work too, and would then write every
-   * space on screen as an explicit character. One escape sequence costs four bytes and
-   * leaves the diff free to stay minimal for the frame itself.
+   * Resizing used to reset `onScreen` to blanks, on the reasoning that a blank model
+   * would make every cell differ and force a full repaint. It does the opposite: the new
+   * frame's blank regions are also blanks, so the diff finds them identical and writes
+   * nothing for them, while the real terminal still holds whatever was in those cells
+   * before. That is what fused an old line onto a new one, leaving rows like
+   * `Tools(session)s, ask_user, create_skill,`.
    */
   function syncSize(): boolean {
     const w = real.columns ?? onScreen.width;
@@ -94,10 +129,62 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
     if (w === onScreen.width && h === onScreen.height) return false;
     onScreen.resize(w, h);
     pending.resize(w, h);
-    // Now TRUE rather than assumed: the model says blank, and the caller is about to
-    // make the terminal blank to match.
-    onScreen.clear();
     return true;
+  }
+
+  /**
+   * Forget what is on the terminal, so the next paint writes every cell.
+   *
+   * THIS IS THE RENDERER'S ONLY WAY BACK, and it is the reason the rest of the file is
+   * safe. Everything here writes just the cells that changed between two frames, which
+   * is correct exactly as long as the model and the terminal agree. When they stop
+   * agreeing the error is PERMANENT: a cell the model has right but the terminal has
+   * wrong is never rewritten, because as far as the diff can see nothing about it
+   * changed. One stray row is enough to end a long session in interleaved text.
+   *
+   * There are several ways to lose that agreement — a row the terminal wrapped, a scroll
+   * it performed, a write from outside this proxy — and no way to detect any of them
+   * from in here. So this does not try to detect them. It gives a disagreement a
+   * LIFETIME instead: on a resize, once every `FULL_REPAINT_MS` of continuous work, and
+   * `IDLE_REPAINT_MS` after the last frame of a burst.
+   *
+   * Sentinel rather than an erase sequence. Filling the previous grid with a value no
+   * real cell can equal makes every cell differ, so the paint that follows covers the
+   * screen on its own. Erasing first would reach the same place with a blank flash in
+   * between, and would depend on the terminal's erase honouring the current background.
+   */
+  function invalidate(): void {
+    onScreen.invalidate();
+    lastFull = Date.now();
+  }
+
+  /**
+   * Re-assert the model onto the terminal outside of any frame.
+   *
+   * `pending` is scratch between frames — every frame rewrites it from scratch before
+   * reading it — so it can hold the picture while `onScreen` becomes the grid that knows
+   * nothing, and the two swap back exactly as they do on a normal frame.
+   */
+  function repaintNow(): void {
+    if (onScreen.width === 0 || onScreen.height === 0) return;
+    pending.copyFrom(onScreen);
+    invalidate();
+    const escape = paint(onScreen, pending, 1);
+    const previous = onScreen;
+    onScreen = pending;
+    pending = previous;
+    if (escape !== "") real.write(escape);
+  }
+
+  /** Arm the after-the-burst repaint. Unref'd: a screen touch-up must never be the
+   *  reason the process is still alive. */
+  function armIdleRepaint(): void {
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => {
+      idle = undefined;
+      repaintNow();
+    }, IDLE_REPAINT_MS);
+    idle.unref?.();
   }
 
   /**
@@ -117,14 +204,36 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
   const fbWrite = (data: string, callback?: (err?: Error | null) => void): boolean => {
       const body = data.replace(ERASE_PREFIX, "");
 
-      // No printable content: a control sequence, not a frame. Forward verbatim —
-      // these are how the alternate screen is entered, the cursor hidden, and frames
-      // wrapped in synchronized-update markers, none of which we may swallow.
-      if (body.replace(ANY_ESCAPE, "").trim() === "") {
-        return real.write(data, callback);
+      const bare = body.replace(ANY_ESCAPE, "");
+      // Nothing at all once the escapes are gone: a pure control sequence, not a frame.
+      // Forward verbatim — this is how the alternate screen is entered, the cursor
+      // hidden, and frames wrapped in synchronized-update markers, none of which we may
+      // swallow.
+      if (bare === "") return real.write(data, callback);
+
+      // Escapes plus nothing but CONTROL characters — in practice a stray newline.
+      //
+      // This used to pass through with the case above, because the test trimmed before
+      // asking, and a trimmed "\n" is empty. A newline is not inert: written at the
+      // bottom row it SCROLLS THE WHOLE SCREEN UP ONE LINE. Every row is then somewhere
+      // the model does not think it is, and since the model is the only thing that knows
+      // what is on screen, nothing ever corrects it — the banner ends up half under a
+      // tool row (`●MWrite(docs.html)`, the `M` being all that survived of "Mindweave").
+      //
+      // Swallowed rather than forwarded. Vertical position here is decided entirely by
+      // the absolute cursor moves `paint` emits, so a newline arriving from outside that
+      // can only move the real screen out from under the model. Tested by SPACES, not by
+      // whitespace: a frame of nothing but spaces is a real frame that clears the screen,
+      // and trimming would have swallowed that too.
+      if (bare.replace(/[\r\n\t\v\f\b]/g, "") === "") {
+        callback?.(null);
+        return true;
       }
 
-      const resized = syncSize();
+      // A resize invalidates everything, and so does simply having gone a while without
+      // writing in full. Both are answered the same way: by knowing nothing about the
+      // screen, so that this frame draws all of it.
+      if (syncSize() || Date.now() - lastFull >= repaintEvery) invalidate();
 
       // Build the new frame. Cleared first because a frame is a complete statement
       // about the rows it covers: a line that got shorter must leave blanks behind,
@@ -132,9 +241,7 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
       pending.clear();
       parseFrame(pending, body);
 
-      // `[2J` erases the display, `[H` homes the cursor. Sent only on a resize,
-      // to bring the real screen into line with the freshly blanked model above.
-      const escape = (resized ? "[2J[H" : "") + paint(onScreen, pending, 1);
+      const escape = paint(onScreen, pending, 1);
 
       // Swap rather than copy. Both grids are the same shape and `pending` is fully
       // rewritten at the start of every frame, so the old on-screen grid is free to
@@ -144,6 +251,10 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
       pending = previous;
 
       onFrame?.({ inBytes: data.length, outBytes: escape.length });
+
+      // Put the screen beyond doubt once this burst of frames stops. During a burst it
+      // is only ever cancelled and re-armed, so it costs nothing until things settle.
+      armIdleRepaint();
 
       if (escape === "") {
         // Nothing changed. Writing zero bytes is the correct output, but the caller

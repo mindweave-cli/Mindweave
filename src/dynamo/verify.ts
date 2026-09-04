@@ -87,11 +87,15 @@ export function looksLikeVerification(command: string): boolean {
 }
 
 /**
- * Did this tool call count as verifying the code? Either the diagnostics tool
- * (LSP errors/warnings) or a shell command that runs a build/test/typecheck/lint.
+ * Did this tool call count as verifying the code? A shell command that runs a
+ * build, test, typecheck or lint.
+ *
+ * The language server's own errors no longer count, and cannot: they arrive with every
+ * edit result rather than through a call of their own, so there is nothing here to
+ * recognise. That is also why they are not verification — reading what an edit handed
+ * back is not the same as running the project.
  */
 export function isVerification(toolName: string, args: Record<string, unknown>): boolean {
-  if (toolName === "diagnostics") return true;
   if (toolName === "run_command") return looksLikeVerification(String(args.command ?? ""));
   return false;
 }
@@ -345,7 +349,7 @@ export function batchEditNudge(path: string, count: number): string {
 /** The one-shot nudge injected when files changed but nothing was checked. */
 export const VERIFY_NUDGE =
   "You edited files this turn but never ran a check. Before finishing, verify what you changed actually " +
-  "works — run the project's build or tests, or call `diagnostics` on the files you touched, and fix anything " +
+  "works — run the project's build or tests, and fix anything " +
   "it surfaces. If no check meaningfully applies here (for example a docs or config edit), say so in one line " +
   "and finish. (This reminder fires once per turn.)";
 

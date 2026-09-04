@@ -83,13 +83,25 @@ const askUserDef: Tool = {
     // back as "The user chose: SQLite" — a decision attributed to someone who declined
     // to make it, which is worse than not having asked.
     if (choice === APPROVAL_DISMISSED) {
+      // Dismissing is an INTERRUPTION, not a non-answer to be worked around.
+      //
+      // This used to tell the model to "proceed with the most reasonable default and say
+      // which one you assumed", and the model duly did — announcing a choice a moment
+      // after the person had declined to make one, which is the same fault as reporting
+      // a dismissal as a selection, one step further along. Someone who presses Esc on a
+      // question is reaching for the keyboard because none of the options fit, and the
+      // last thing they want is the work continuing on a guess in the meantime.
+      //
+      // So the turn ends here, by the same route Esc takes. Wording alone could not do
+      // it: whatever this said, nothing was stopping the model from carrying on.
+      ctx.interrupt?.();
       return {
         output:
-          "The user dismissed the question without answering, so you do not have their " +
-          "preference. Do not treat any option as chosen. Proceed with the most " +
-          "reasonable default and say which one you assumed, or continue with the part " +
-          "of the work that does not depend on the answer.",
-        summary: `asked: ${clip(question)} → dismissed`,
+          "The user dismissed the question without answering. Treat that as an " +
+          "interruption, not as a decision: do not report any option as chosen, do not " +
+          "assume a default, and do not continue the work. They are about to say what " +
+          "they want instead.",
+        summary: `asked: ${clip(question)} → cancelled`,
       };
     }
     return {

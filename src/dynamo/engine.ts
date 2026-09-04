@@ -995,6 +995,9 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // rewrite lands — history should hold what the user actually saw, not the draft.
   let replyRegated = false;
   let overlongReplyAt: number | null = null;
+  /** Where a reply given BEFORE the work was checked sits, so it can be removed once the
+   *  model concludes again with the check behind it. A turn may only end once. */
+  let prematureReplyAt: number | null = null;
 
   // Seal whatever files this turn edits into one restorable checkpoint (/undo),
   // no matter how the turn ends (finish, pause, interrupt, throw). Labeled with
@@ -1211,7 +1214,16 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       // mid-turn, and the work that follows has to be verified like any other.
       if (VERIFY_GATE && !session.toolContext.planMode && mutatedThisTurn && !verifiedThisTurn && !verifyNudged) {
         verifyNudged = true;
+        prematureReplyAt = session.transcript.length - 1; // the reply pushed just above
         session.transcript.push({ role: "user", content: VERIFY_NUDGE, synthetic: true });
+        // The reply that was about to be shown was written before the work was checked,
+        // and the model is about to conclude a second time once it has checked. Drop the
+        // first, or the user reads both — two closing statements with nothing between
+        // them, since the nudge is synthetic and a clean check reports nothing.
+        //
+        // The reply gate below does exactly this for a draft it rejects. The same applies
+        // here for the same reason: a turn ends once, so it may only say so once.
+        options.onEvent?.({ type: "replyReset" });
         continue;
       }
 
@@ -1231,11 +1243,17 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
           continue;
         }
       }
-      // The rewrite landed. Drop the rejected draft and its instruction so what is saved
-      // (and resumed, and compacted) is the answer that was actually given.
-      if (overlongReplyAt !== null) {
-        session.transcript.splice(overlongReplyAt, 2);
+      // The real reply landed. Drop whichever earlier draft was superseded, and the
+      // synthetic instruction that asked for this one, so what is saved — and resumed,
+      // and compacted — is the answer that was actually given.
+      //
+      // Highest index first: splicing the earlier one would shift the later one.
+      for (const at of [overlongReplyAt, prematureReplyAt].filter((i): i is number => i !== null).sort((a, b) => b - a)) {
+        session.transcript.splice(at, 2);
+      }
+      if (overlongReplyAt !== null || prematureReplyAt !== null) {
         overlongReplyAt = null;
+        prematureReplyAt = null;
         await options.persist?.();
       }
       return content;
@@ -1491,6 +1509,14 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         // (summary line + diff/detail). Ignored when building the wire request.
         ...(result.summary ? { summary: result.summary } : {}),
         ...(result.detail ? { detail: result.detail } : {}),
+        // HOW to read `detail`, without which it is only text. A resumed session was
+        // storing the diff and losing the fact that it WAS a diff, so every edit came
+        // back as dim plain lines — the +/- markers still there, the green and red gone,
+        // and shell output without its rail. The row is not the same row without this.
+        ...(result.detailKind ? { detailKind: result.detailKind } : {}),
+        ...(result.quiet ? { quiet: true } : {}),
+        ...(result.displayName ? { displayName: result.displayName } : {}),
+        ...(result.displayKind ? { displayKind: result.displayKind } : {}),
         ...(result.isError ? { isError: true } : {}),
         // Presence, as recorded by the tool that knows: this result IS the whole
         // content of that file. Not display — the presence derivation reads it.

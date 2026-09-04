@@ -19,8 +19,8 @@
 import { appVersion } from "./version.js";
 
 export type Startup =
-  /** Start normally. */
-  | { kind: "run" }
+  /** Start normally, resuming `resumeSessionId` when one was asked for. */
+  | { kind: "run"; resumeSessionId?: string }
   /** Print `text` and exit 0. */
   | { kind: "print"; text: string }
   /** Write the terminal-restore sequences and exit 0. Separate from `print` because
@@ -72,14 +72,41 @@ export function helpText(): string {
  * documented would be a worse failure than ignoring it.
  */
 export function parseStartupArgs(argv: readonly string[]): Startup {
-  for (const arg of argv) {
+  let resumeSessionId: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
     if (arg === "--help" || arg === "-h") return { kind: "print", text: helpText() };
     if (arg === "--version" || arg === "-v") return { kind: "print", text: versionText() };
     // No short form on purpose: this is typed once in a blue moon, by someone reading it
     // out of --help, and a one-letter alias for it would be a trap next to -h and -v.
     if (arg === "--reset-terminal") return { kind: "reset" };
+    if (arg === "--resume") {
+      // Undocumented in --help on purpose: nobody types this. It is how a relaunch
+      // after `/update` lands back in the conversation it left, and the only thing
+      // that writes it is Mindweave itself.
+      //
+      // A malformed id starts a NORMAL session rather than refusing to launch. This
+      // flag's whole job is to make an update invisible, and the one outcome worse
+      // than losing the thread is not coming back at all — `/continue` still reaches
+      // the session either way.
+      resumeSessionId = safeSessionId(argv[i + 1]);
+      i++;
+    }
   }
-  return { kind: "run" };
+  return resumeSessionId === undefined ? { kind: "run" } : { kind: "run", resumeSessionId };
+}
+
+/**
+ * A session id, only if it is one (pure).
+ *
+ * The id is used to build a path under the project's session directory, so it is
+ * checked as a filename component rather than trusted as a label: no separators, no
+ * dots, nothing that could climb out of the folder it is meant to name. Session ids
+ * are UUIDs, so this rejects nothing legitimate.
+ */
+export function safeSessionId(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  return /^[A-Za-z0-9_-]{1,64}$/.test(raw) ? raw : undefined;
 }
 
 /**

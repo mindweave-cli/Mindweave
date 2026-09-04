@@ -73,8 +73,10 @@ test("looksLikeVerification ignores ordinary commands", () => {
   }
 });
 
-test("isVerification counts diagnostics and check-like commands", () => {
-  assert.ok(isVerification("diagnostics", {}));
+test("isVerification counts check-like commands, and only those", () => {
+  // The language server no longer answers a call of its own — its errors ride back with
+  // every edit — so running the project is the only thing left that verifies it.
+  assert.ok(!isVerification("diagnostics", {}), "there is no such tool to count");
   assert.ok(isVerification("run_command", { command: "npm test" }));
   assert.ok(!isVerification("run_command", { command: "git status" }));
   assert.ok(!isVerification("read_file", { path: "x" }));

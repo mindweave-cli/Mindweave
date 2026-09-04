@@ -233,6 +233,19 @@ test("the reply-style rules live in the CACHED prefix, not the per-request tail"
   assert.doesNotMatch(engineSource, /parts\.push\(REPLY_STYLE\)/, "it must not be pushed into the tail");
 });
 
+test("the closing reply still asks what the user could not have seen", () => {
+  // The one part of a turn that is NOT recoverable from the screen. Everything else in
+  // this block describes what to leave out, so a later edit trimming it "for brevity"
+  // would take the only line that adds something — and nothing would look wrong.
+  const promptSource = readFileSync(fileURLToPath(new URL("./prompt.ts", import.meta.url)), "utf8");
+  assert.match(promptSource, /unexpected that you did not act on/, "the surprise line is gone");
+  assert.match(promptSource, /cannot see for themselves/, "the reason it outranks brevity is gone");
+  assert.match(promptSource, /an invented next step is worse than none/, "the escape from a forced offer is gone");
+  // And the rule it replaced must not come back alongside it: "just stop" and "offer the
+  // next step" in the same block is a contradiction the model resolves at random.
+  assert.doesNotMatch(promptSource, /After doing work, just stop\./, "the superseded rule is back");
+});
+
 test("the reply gate fires at the turn-end boundary and can only fire once", () => {
   // Prose asked for this budget in three wordings and was ignored each time; this is
   // the version that holds, so the wiring is worth pinning.
@@ -241,7 +254,27 @@ test("the reply gate fires at the turn-end boundary and can only fire once", () 
   assert.match(engineSource, /options\.onEvent\?\.\(\{ type: "replyReset" \}\)/, "the draft must be dropped from the UI buffer");
 });
 
-test("a rejected draft is spliced out of history, so what is saved is what was shown", () => {
-  // Otherwise a resumed session replays the wall of text the gate just removed.
-  assert.match(engineSource, /session\.transcript\.splice\(overlongReplyAt, 2\)/);
+test("a superseded reply is spliced out of history, so what is saved is what was shown", () => {
+  // Otherwise a resumed session replays the text the gate just removed. Both gates that
+  // re-open a concluded turn record where the reply they superseded sits, and both are
+  // unwound by the same loop.
+  assert.match(engineSource, /\[overlongReplyAt, prematureReplyAt\]/);
+  assert.match(engineSource, /session\.transcript\.splice\(at, 2\)/);
+});
+
+test("a turn that is re-opened to verify does not end up saying goodbye twice", () => {
+  // Seen on screen: the model finished, the verify gate re-opened the turn, and the model
+  // concluded a SECOND time — two closing statements with nothing between them, because
+  // the nudge is synthetic and a clean check reports nothing. The reply gate below it had
+  // always dropped its superseded draft; this one had not.
+  // Anchored on the gate's own condition, not on the words "Verification gate" — those
+  // appear in a comment 45,000 characters earlier, and slicing from there swept in the
+  // REPLY gate's reset, so this passed with the line it exists to check deleted.
+  const start = engineSource.indexOf("if (VERIFY_GATE");
+  const end = engineSource.indexOf("// Reply gate.");
+  assert.ok(start > 0 && end > start, "the gates have moved; this test is looking at nothing");
+  const gate = engineSource.slice(start, end);
+  assert.ok(gate.length < 2000, `the slice is too wide to mean anything: ${gate.length} chars`);
+  assert.match(gate, /prematureReplyAt = session\.transcript\.length - 1/, "the premature reply is not recorded");
+  assert.match(gate, /type: "replyReset"/, "the premature reply still reaches the screen");
 });

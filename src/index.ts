@@ -17,11 +17,14 @@ import { App } from "./cli/App.js";
 import { loadConfig } from "./cli/bootstrap.js";
 import { sweepTempInBackground } from "./tools/tempSweep.js";
 import { parseStartupArgs, hasInteractiveInput, NO_TERMINAL_MESSAGE } from "./cli/startupArgs.js";
-import { enterAltScreen } from "./cli/altScreen.js";
+import { enterAltScreen, exitAltScreen } from "./cli/altScreen.js";
 import { TERMINAL_RESTORE } from "./cli/terminalRestore.js";
 import { instrumentStdout, flush as flushPerf, perf, perfEnabled } from "./cli/perfLog.js";
 import { MAX_FPS } from "./cli/frameRate.js";
 import { framebufferStdout } from "./cli/framebuffer/writer.js";
+import { spawn } from "node:child_process";
+import { relaunch } from "./cli/restart.js";
+import { takePendingRestart } from "./cli/updateRunner.js";
 
 // --help / --version answer and exit, BEFORE anything reads config, sweeps a
 // directory, or starts the UI. They used to fall through to the interactive app,
@@ -88,7 +91,37 @@ enterAltScreen();
 // ours is per-cell where Ink's is per-line.
 // The frame-rate cap is what sets typing latency — see `cli/frameRate.ts` for the
 // measurements and for why it is a timer rather than a cost.
-render(createElement(App), {
+const instance = render(createElement(App, { resumeSessionId: startup.resumeSessionId }), {
   maxFps: MAX_FPS,
   stdout: framebufferStdout(process.stdout, perfEnabled() ? (s) => perf(`frame in=${s.inBytes} out=${s.outBytes}`) : undefined) as unknown as NodeJS.WriteStream,
 });
+
+// `/update` cannot hand the terminal over from inside the UI: the handover has to happen
+// after Ink has unmounted, and unmounting is what ends the render. So the command records
+// what it wants and the app closes the way it always closes; this is where the intention
+// is read, with the screen already given back.
+await instance.waitUntilExit();
+const restart = takePendingRestart();
+if (restart) {
+  process.exit(
+    await relaunch(restart.packageRoot, restart.sessionId, restart.previousVersion, restart.prefix, {
+      // The order here is the whole risk. Both processes can write to this terminal and
+      // both can want raw mode, so the old one is completely out — alternate screen left,
+      // mouse reporting off, cursor and autowrap restored, stdin no longer raw — before
+      // the new one is allowed to start. `exitAltScreen` is idempotent, so the exit hook
+      // that also calls it later changes nothing.
+      teardown: () => {
+        exitAltScreen();
+        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+        process.stdin.pause();
+      },
+      spawn: (command, args) =>
+        new Promise((resolve) => {
+          const child = spawn(command, args, { stdio: "inherit" });
+          child.on("error", () => resolve({ code: 1, signal: null }));
+          child.on("close", (code, signal) => resolve({ code, signal }));
+        }),
+      report: (text) => process.stdout.write(text + "\n"),
+    }),
+  );
+}

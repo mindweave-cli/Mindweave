@@ -22,6 +22,23 @@ import { TERMINAL_RESTORE } from "./terminalRestore.js";
 const ENTER = "\x1b[?1049h";
 const HIDE_CURSOR = "\x1b[?25l";
 
+/**
+ * Autowrap off (DECAWM).
+ *
+ * With it on, a row one column too long does not fail visibly — the terminal quietly
+ * continues it on the next row and pushes everything below it down, and on the bottom
+ * row it scrolls the whole screen. The renderer addresses the terminal as a fixed grid
+ * and writes only the cells it believes changed (see `framebuffer/`), so a row that
+ * moved is a row nothing will ever correct: the text stays on screen, in the wrong
+ * place, for the rest of the session.
+ *
+ * Off, an over-long row is clipped at the right margin instead. Losing a character at
+ * the edge is a visible, local, self-correcting fault; a wrap is an invisible one that
+ * spreads. The layout still aims to fit every row, and this is what makes a miss cost
+ * one character rather than the screen.
+ */
+const AUTOWRAP_OFF = "\x1b[?7l";
+
 let active = false;
 
 /** Switches to the alternate screen and registers the restore-on-exit hooks.
@@ -30,7 +47,7 @@ let active = false;
 export function enterAltScreen(): void {
   if (active || !process.stdout.isTTY) return;
   active = true;
-  process.stdout.write(ENTER + HIDE_CURSOR);
+  process.stdout.write(ENTER + HIDE_CURSOR + AUTOWRAP_OFF);
   process.on("exit", exitAltScreen);
   process.on("SIGINT", () => {
     exitAltScreen();

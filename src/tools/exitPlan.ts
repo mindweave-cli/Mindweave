@@ -24,7 +24,7 @@
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { savePlanArtifact } from "../dynamo/planArtifact.js";
 import { fail, failQuietly } from "./results.js";
-import { readFreeText } from "./approval.js";
+import { APPROVAL_DISMISSED, readFreeText } from "./approval.js";
 
 /**
  * What the user chose at the approval prompt. Order is the display order.
@@ -47,8 +47,16 @@ export const PLAN_CHOICES = [
 /** The typed answer offered alongside them, for saying what to change. */
 export const PLAN_FEEDBACK = { label: "Change something", placeholder: "say what to change" };
 
-/** The decision, separated from its wording so the engine never matches on prose. */
-export type PlanVerdict = "lightning" | "sentinel" | "reject" | "revise";
+/**
+ * The decision, separated from its wording so the engine never matches on prose.
+ *
+ * `dismiss` is not a quieter `reject`. Rejecting is a verdict on the plan; dismissing is
+ * declining to give one, usually because none of the five rows is the thing the reader
+ * wants to say. Collapsing the two told the model "the user rejected the plan" on the
+ * strength of a keypress that said no such thing — the same fault as reporting a
+ * dismissed question as a chosen option, on the longest thing the app ever asks about.
+ */
+export type PlanVerdict = "lightning" | "sentinel" | "reject" | "revise" | "dismiss";
 
 /** An approval, and whether it asked to start from a clean slate. */
 export interface PlanDecision {
@@ -81,6 +89,9 @@ export function readVerdict(choice: string): PlanVerdict {
 export function readDecision(choice: string): PlanDecision {
   const typed = readFreeText(choice);
   if (typed !== null) return { verdict: "revise", fresh: false, feedback: typed.trim() };
+  // Before anything is matched on prose: a dismissal is not one of the answers, and the
+  // catch-all at the bottom of this function would otherwise make it a rejection.
+  if (choice === APPROVAL_DISMISSED) return { verdict: "dismiss", fresh: false };
   const c = choice.trim().toLowerCase();
   if (c.startsWith("approve")) {
     return { verdict: c.includes("sentinel") ? "sentinel" : "lightning", fresh: c.includes("fresh") };
@@ -137,6 +148,19 @@ export const exitPlan: Tool = {
     const choice = await ctx.requestApproval(PLAN_QUESTION, [...PLAN_CHOICES], plan, undefined, PLAN_FEEDBACK);
     const { verdict, fresh, feedback } = readDecision(choice);
 
+    if (verdict === "dismiss") {
+      // The same stop Esc performs, for the same reason it is right in ask_user: someone
+      // who closes a plan without answering is reaching for the keyboard. Leaving the
+      // turn running would have the model respond to a verdict nobody gave.
+      ctx.interrupt?.();
+      return {
+        output:
+          "The user closed the plan without answering. That is not a rejection and not " +
+          "approval: they have said nothing about the plan yet. Do not start any of it, " +
+          "do not revise it, and do not ask again. Wait for what they say next.",
+        summary: "plan dismissed",
+      };
+    }
     if (verdict === "reject") {
       return {
         output:

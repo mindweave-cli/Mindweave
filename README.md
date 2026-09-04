@@ -71,7 +71,7 @@ else is configured inside a session.
 
 ## What it can do
 
-**14 providers, 52 models, one key.** DeepSeek, Anthropic, OpenAI, Gemini, xAI, Mistral,
+**14 providers, 53 models, one key.** DeepSeek, Anthropic, OpenAI, Gemini, xAI, Mistral,
 Groq, Cerebras, Qwen, Kimi, GLM, Meta, MiniMax and Tencent. Each family gets its own driver so it
 runs at its best without bloating the shared core, and only the driver you are using is
 ever loaded. Switch with `/provider` and `/model`; the choice is remembered per project.
@@ -82,7 +82,8 @@ and language servers, costing no tokens, so the agent understands your codebase 
 than just the file you opened.
 
 **Real tools.** File read and edit, multi-file edits, ripgrep search, a shell with
-background jobs, sub-agents, and compiler diagnostics. Read-before-edit is enforced, and
+background jobs, and sub-agents. Every edit comes back with the language server's own
+errors for that file, so a mistake surfaces where it was made. Read-before-edit is enforced, and
 `/undo` is a real net rather than a hope.
 
 **Session memory.** Long sessions stay sharp through automatic compaction plus a running

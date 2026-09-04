@@ -253,16 +253,22 @@ export function parseFrame(screen: Screen, frame: string, top = 0): void {
     }
 
     const w = eastAsianWidth(code);
-    if (x < screen.width) {
-      const at = screen.index(x, y);
+    // Past the right margin. A terminal with autowrap off — which is the mode the app
+    // runs the screen in, see `altScreen.ts` — does not discard these: each one replaces
+    // the character already in the last column. Dropping them here instead left the model
+    // holding a different character than the terminal was showing, in the one column most
+    // likely to be written over, and a cell the model has wrong is never repainted.
+    const cx = Math.min(x, screen.width - 1);
+    if (cx >= 0) {
+      const at = screen.index(cx, y);
       screen.chars[at] = code;
       screen.fg[at] = pen.fg;
       screen.bg[at] = pen.bg;
       screen.attrs[at] = pen.attrs;
       // A wide character claims the next column too. Marking it is what keeps every
       // later column on the row aligned with what the terminal will actually do.
-      if (w === 2 && x + 1 < screen.width) {
-        const next = screen.index(x + 1, y);
+      if (w === 2 && cx + 1 < screen.width) {
+        const next = screen.index(cx + 1, y);
         screen.chars[next] = WIDE_CONTINUATION;
         screen.fg[next] = pen.fg;
         screen.bg[next] = pen.bg;

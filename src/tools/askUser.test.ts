@@ -51,7 +51,36 @@ test("dismissing the question is never reported as a choice", async () => {
   assert.doesNotMatch(res.output, /The user chose/i, "no option may be reported as picked");
   assert.doesNotMatch(res.output, /SQLite/, "least of all the second one");
   assert.match(res.output, /dismissed/i);
-  assert.match(res.output, /default/i, "and it must say what to do instead");
+  assert.match(res.output, /do not continue the work/i, "it must say to stop, not to carry on");
+});
+
+test("dismissing the question STOPS the turn", async () => {
+  // Seen live: the user pressed Esc because none of the options fitted, and the model
+  // answered "I'll go with the most reasonable default…" and kept working. It was obeying
+  // this tool, which used to end its dismissal message with exactly that instruction.
+  //
+  // Wording could never have fixed it — nothing was stopping the model from continuing.
+  // Someone dismissing a question is reaching for the keyboard, so the turn has to end
+  // the way Esc ends it, and this asserts the stop rather than the sentence.
+  let stopped = false;
+  const res = await askUserTool.execute(
+    { question: "Which database?", options: ["Postgres", "SQLite"] },
+    ctx({ requestApproval: async () => APPROVAL_DISMISSED, interrupt: () => void (stopped = true) }),
+  );
+  assert.equal(stopped, true, "the turn kept running after the question was dismissed");
+  assert.doesNotMatch(res.output, /proceed with/i, "and it must not invite the model to carry on");
+});
+
+test("an ANSWERED question does not stop anything", async () => {
+  // The other side. Interrupting on a real answer would end the turn the answer was
+  // given to enable, which is the same fault pointing the other way.
+  let stopped = false;
+  const res = await askUserTool.execute(
+    { question: "Which database?", options: ["Postgres", "SQLite"] },
+    ctx({ requestApproval: async () => "Postgres", interrupt: () => void (stopped = true) }),
+  );
+  assert.equal(stopped, false, "answering the question stopped the turn");
+  assert.match(res.output, /Postgres/);
 });
 
 test("a sub-agent cannot reach the user, and ask_user degrades instead of stalling", async () => {

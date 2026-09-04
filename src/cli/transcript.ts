@@ -35,6 +35,10 @@ export interface ToolGroupItem {
   kind?: ToolKind;
   /** The call's one-line result ("195 lines", "12 files"), shown once it resolves. */
   note?: string;
+  /** How many things this ONE call covers, when that is not one — `read_file` takes a
+   *  list of paths and reads several files at once. The group header counts these rather
+   *  than calls, or three files read together announce themselves as one. */
+  covers?: number;
 }
 
 /** One delegated worker inside a subagent block. */
@@ -126,7 +130,7 @@ export interface TranscriptState {
 export type Action =
   | { type: "user"; text: string }
   | { type: "token"; delta: string }
-  | { type: "toolStart"; toolId: string; name: string; arg?: string; meta?: string; action?: ToolKind; group?: boolean }
+  | { type: "toolStart"; toolId: string; name: string; arg?: string; meta?: string; action?: ToolKind; group?: boolean; covers?: number }
   | {
       type: "toolEnd";
       toolId: string;
@@ -306,7 +310,7 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
         // group is NOT drained — it stays live so more calls can join it.
         const open = sealed.tail.find((b) => b.kind === "tools" && !b.done);
         if (open && open.kind === "tools") {
-          const item: ToolGroupItem = { toolId: a.toolId, name: a.name, arg: a.arg, kind: a.action, status: "running" };
+          const item: ToolGroupItem = { toolId: a.toolId, name: a.name, arg: a.arg, kind: a.action, status: "running", ...(a.covers ? { covers: a.covers } : {}) };
           return {
             ...sealed,
             toolMap: { ...sealed.toolMap, [a.toolId]: open.id },

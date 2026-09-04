@@ -13,14 +13,6 @@ test("only read-only discovery tools group — edits, writes, runs, tests never 
   for (const n of ["read_file", "read_symbol", "shells"]) {
     assert.ok(isGroupable(n), `${n} should group (silent receipt — collapsing loses nothing)`);
   }
-  // `diagnostics` USED to group here, and that was wrong. Collapsing was justified by
-  // "its one-line summary carries into the group note, so nothing is lost" — but a
-  // group row renders a label and never a detail, and diagnostics carries a caret
-  // block: the source line, the squiggle under the failing token, the error code. So
-  // the one case worth looking at, an actual compiler error, was the case that got
-  // hidden. It keeps its own row now, and reports NOTHING when it finds nothing
-  // (quiet), which removes the wall of "no diagnostics" rows grouping was for.
-  assert.ok(!isGroupable("diagnostics"), "a caret block cannot render inside a group row");
   // Search and the code-intel lookups do NOT group, because they no longer render at
   // all (search.ts sets quiet on every path; navigational() wraps the others): they are
   // how the agent finds its way around, not work done to the project. Grouping them

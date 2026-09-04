@@ -15,6 +15,7 @@
  * pin a stale copy. Everything here is plain JSON — the same data that will cross
  * the wire when the engine later moves to a server.
  */
+import type { ToolKind } from "../cli/toolDisplay.js";
 import type { ToolContext } from "../tools/types.js";
 
 /** One tool call the assistant made, stored so the turn can be replayed. */
@@ -68,6 +69,21 @@ export type Entry =
       content: string;
       summary?: string;
       detail?: string;
+      /** How to read `detail`: a real +/- diff, shell output on a rail, or plain text.
+       *  Without it a resumed edit replays as dim plain lines — the markers still there,
+       *  the colour gone — because `detail` alone does not say what it is. */
+      detailKind?: "diff" | "text" | "shell";
+      /** This result was shown to the MODEL but never drawn — a routine internal step the
+       *  user cannot act on, like a clean diagnostics sweep. Stored because a resume that
+       *  does not know a row was hidden replays it, and the screen fills with exactly the
+       *  rows the tool went out of its way to suppress. */
+      quiet?: boolean;
+      /** The row's name and category as the RESULT set them, not as the call implied.
+       *  A diagnostics sweep that finds errors renames itself "Build Error" and turns red;
+       *  without these the same row replays as a routine "Check", which is the opposite of
+       *  what it said at the time. */
+      displayName?: string;
+      displayKind?: ToolKind;
       isError?: boolean;
       /** Absolute paths whose WHOLE content this result carries (see ToolResult). While
        *  this entry is unstubbed the model can see those files; `memory/presence.ts`

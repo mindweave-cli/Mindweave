@@ -88,3 +88,26 @@ test("an MCP server's tool is never mistaken for an invented one", () => {
   assert.equal(d.name, "MCPServer");
   assert.equal(d.arg, "sqlite-local");
 });
+
+test("a multi-file read names the files and says how many it covers", () => {
+  // The defect on screen: the group header counted CALLS and called them files, so
+  // three files read in one call announced "Reading 1 file" directly above its own row
+  // saying "Read 3 files". The header and its contents disagreed, and the header was
+  // the one that was wrong.
+  const d = toolDisplay("read_file", { paths: ["src/a/index.html", "docs/changelog.html", "b/docs.html"] });
+  assert.equal(d.covers, 3, "the group header has to count files, not calls");
+  assert.equal(d.arg, "index.html, changelog.html, docs.html");
+});
+
+test("a single-file read covers nothing extra and reads as its name", () => {
+  const d = toolDisplay("read_file", { paths: ["docs/changelog.html"] });
+  assert.equal(d.covers, undefined);
+  assert.equal(d.arg, "changelog.html");
+});
+
+test("a multi-file read no longer just repeats the count back", () => {
+  // "3 files" said the same thing as the header above it and named none of them, so a
+  // burst of reads was arithmetic instead of information.
+  const d = toolDisplay("read_file", { paths: ["a.ts", "b.ts", "c.ts"] });
+  assert.doesNotMatch(d.arg ?? "", /^\d+ files$/);
+});

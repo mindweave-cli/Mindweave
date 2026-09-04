@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { capLines, editDetail, outputDetail, writeDetail, withOutcome, lineCount, rangeLabel, magnitude, withScope, stripAnsi, collapseBlanks } from "./detail.js";
+import { OK_MARK, FAIL_MARK, capLines, editDetail, outputDetail, writeDetail, withOutcome, lineCount, rangeLabel, magnitude, withScope, stripAnsi, collapseBlanks } from "./detail.js";
 
 test("editDetail shows removed then added lines, prefixed", () => {
   const d = editDetail("a\nb", "a\nc");
@@ -57,29 +57,29 @@ test("withScope prepends the scope header above the body", () => {
 test("a command's exit code is shown on SUCCESS as well as failure", () => {
   // If only failures carried a line, the absence of one would be the signal — and an
   // absence is easy to read past under a wall of build output.
-  assert.match(withOutcome("build ok", false, 0, null, 120_000), /✓ Exit code 0$/);
-  assert.match(withOutcome("2 failing", false, 1, null, 120_000), /✖ Exit code 1$/);
+  assert.match(withOutcome("build ok", false, 0, null, 120_000, 4_200), /✓ 0 · 4.2s$/);
+  assert.match(withOutcome("2 failing", false, 1, null, 120_000, 12_400), /✗ 1 · 12.4s$/);
 });
 
 test("the outcome is appended, never replaces the output", () => {
-  const out = withOutcome(["line one", "line two"].join("\n"), false, 0, null, 120_000);
-  assert.equal(out, ["line one", "line two", "✓ Exit code 0"].join("\n"));
+  const out = withOutcome(["line one", "line two"].join("\n"), false, 0, null, 120_000, 273);
+  assert.equal(out, ["line one", "line two", "✓ 0 · 273ms"].join("\n"));
 });
 
 test("a timeout says how long it waited, not just that it failed", () => {
-  assert.match(withOutcome("", true, null, null, 30_000), /Timed out after 30s — killed/);
+  assert.match(withOutcome("", true, null, null, 30_000, 30_100), /timed out after 30s/);
 });
 
 test("a signalled process is named by its signal, never reported as exit 0", () => {
   // A process ended by a signal reports no exit code. Treating that as "not non-zero"
   // made a killed command read as a command that worked.
-  assert.match(withOutcome("", false, null, "SIGTERM", 120_000), /✖ Terminated by SIGTERM/);
-  assert.doesNotMatch(withOutcome("", false, null, "SIGTERM", 120_000), /Exit code 0/);
-  assert.match(withOutcome("", false, null, null, 120_000), /✖ Ended without an exit code/);
+  assert.match(withOutcome("", false, null, "SIGTERM", 120_000, 2_100), /✗ killed \(SIGTERM\)/);
+  assert.doesNotMatch(withOutcome("", false, null, "SIGTERM", 120_000, 2_100), /✓ 0/);
+  assert.match(withOutcome("", false, null, null, 120_000, 900), /✗ no exit code/);
 });
 
 test("a command with no output still reports its outcome", () => {
-  assert.equal(withOutcome("", false, 0, null, 120_000), "✓ Exit code 0");
+  assert.equal(withOutcome("", false, 0, null, 120_000, 500), "✓ 0 · 500ms");
 });
 
 // ── A command's output, as it actually arrives ────────────────────────────────
@@ -141,20 +141,40 @@ test("a real PowerShell listing survives with its shape intact and no wasted row
 test("a killed command names the signal and the process it went to", () => {
   // After a timeout the pid is what lets the user check whether it actually died or is
   // still holding a port. On an ordinary exit it is trivia, so it is not shown.
-  const out = withOutcome("running suite...", true, null, null, 30_000, 59_120);
-  assert.match(out, /✖ Timed out after 30s — killed/);
+  const out = withOutcome("running suite...", true, null, null, 30_000, 30_040, 59_120);
+  assert.match(out, /✗ timed out after 30s/);
   assert.match(out, /Signal: SIGTERM sent to process \(PID 59120\)/);
 });
 
 test("a command that exited normally gets NO signal line, pid or not", () => {
-  assert.doesNotMatch(withOutcome("done", false, 0, null, 30_000, 59_120), /Signal:/);
-  assert.doesNotMatch(withOutcome("boom", false, 1, null, 30_000, 59_120), /Signal:/);
+  assert.doesNotMatch(withOutcome("done", false, 0, null, 30_000, 1_000, 59_120), /Signal:/);
+  assert.doesNotMatch(withOutcome("boom", false, 1, null, 30_000, 1_000, 59_120), /Signal:/);
 });
 
 test("a command killed by a signal names THAT signal, not a default", () => {
-  assert.match(withOutcome("", false, null, "SIGKILL", 30_000, 4242), /Signal: SIGKILL sent to process \(PID 4242\)/);
+  assert.match(withOutcome("", false, null, "SIGKILL", 30_000, 1_000, 4242), /Signal: SIGKILL sent to process \(PID 4242\)/);
 });
 
 test("with no pid known the outcome line still stands alone", () => {
-  assert.equal(withOutcome("", true, null, null, 30_000), "✖ Timed out after 30s — killed");
+  assert.equal(withOutcome("", true, null, null, 30_000, 30_050), "✗ timed out after 30s");
+});
+
+test("the failure mark is one column wide, like the success mark", () => {
+  // On screen: `✓ 0 · 256ms` sat correctly while `✖ 1 · 885ms` arrived as `✖1 · 885ms`.
+  // Terminals give the HEAVY multiplication x (U+2716) emoji presentation and two
+  // columns, while this code and Ink both measure it as one, so it overprinted the space
+  // after it. `✓` and `✗` are the light pair: same block, text presentation, one column.
+  assert.equal(OK_MARK, "\u2713");
+  assert.equal(FAIL_MARK, "\u2717");
+  assert.notEqual(FAIL_MARK, "\u2716", "the heavy mark renders two columns wide");
+  // Nothing this module EMITS may carry the heavy one.
+  const emitted = [
+    withOutcome("", false, 1, null, 120_000, 885),
+    withOutcome("", true, null, null, 30_000, 30_050),
+    withOutcome("", false, null, "SIGKILL", 30_000, 1_000),
+    withOutcome("", false, null, null, 30_000, 1_000),
+  ];
+  for (const line of emitted) {
+    assert.ok(!line.includes("\u2716"), `the heavy mark reached the screen: ${line}`);
+  }
 });

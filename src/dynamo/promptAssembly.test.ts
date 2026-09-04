@@ -199,8 +199,10 @@ test("the final reply rules are complete, and live in the cached prompt", () => 
   // into the cached prefix, because at the boundary they cost 645 tokens per step.
   const prompt = basePrompt("PowerShell");
   assert.match(prompt, /FOUR LINES OR FEWER/);
-  assert.match(prompt, /After doing work, just stop/);
-  assert.match(prompt, /Ask at most ONE question/);
+  assert.match(prompt, /After doing work, lead with the outcome in one plain line/);
+  // One question per turn still, but it is now the closing offer rather than a
+  // clarification the model stopped to ask.
+  assert.match(prompt, /the ONE question a turn may ask/);
   assert.match(prompt, /Long is not thorough/);
   assert.match(prompt, /Examples of the right length/, "a number without examples is the version that lost");
   // And nothing re-sends them per request — that is the whole point of the move.
@@ -208,7 +210,16 @@ test("the final reply rules are complete, and live in the cached prompt", () => 
 });
 
 test("the reply rule forbids appending what was not asked for", () => {
-  // The specific habit: answering the question, then volunteering a correction to an
-  // earlier reply that changes nothing the user would do.
-  assert.match(basePrompt("PowerShell"), /Do not append an adjacent topic you noticed/);
+  // The specific habit: answering the question, then volunteering an improvement nobody
+  // asked about. The closing offer is NOT that — it names the step the finished work
+  // implies — so the rule draws the line rather than banning the ending outright.
+  assert.match(basePrompt("PowerShell"), /do not raise an adjacent improvement the finished work does not imply/);
+});
+
+test("the reply rule asks for what the user could not have seen", () => {
+  // The one part of a turn that is not recoverable from the screen, and the part a later
+  // trim "for brevity" would take first, since everything around it says what to leave out.
+  const prompt = basePrompt("PowerShell");
+  assert.match(prompt, /unexpected that you did not act on/);
+  assert.match(prompt, /an invented next step is worse than none/, "the escape from a forced offer");
 });

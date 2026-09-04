@@ -57,6 +57,10 @@ import { Picker } from "./components/Picker.js";
 import { ApprovalBox } from "./components/ApprovalBox.js";
 import { BlockView } from "./components/BlockView.js";
 import { initialState, reduce, trimNarration, type Action, type Block, type TranscriptState } from "./transcript.js";
+import { isTight } from "./blockSpacing.js";
+import { BASE_COMMANDS } from "./commands.js";
+import { manualCommand, refusalReason } from "./selfUpdate.js";
+import { currentInstall, requestRestart, runUpdate } from "./updateRunner.js";
 import { enableMouse, readWheel, stripMouse } from "./mouse.js";
 import { chatLayout, reflowScroll } from "./chatAnchor.js";
 import { virtualWindow } from "./virtualWindow.js";
@@ -150,7 +154,17 @@ const RESUME_MODES = [
   { label: "Fresh start", description: "leave it and start a new empty session here instead" },
 ];
 
-export function App() {
+/**
+ * `resumeSessionId` is set only by a relaunch after `/update` — see `restart.ts`. It is
+ * what makes the restart invisible: the new version opens on the conversation the old
+ * one was in, rather than on an empty session that happens to be in the same folder.
+ */
+export interface AppProps {
+  /** Set only by a relaunch after `/update`. */
+  resumeSessionId?: string;
+}
+
+export function App({ resumeSessionId }: AppProps) {
   // The transcript state machine lives in a ref and is advanced by the reducer as
   // the stream arrives; `render` forces a paint. A ref (not useState) so the async
   // streaming loop always reads/writes the latest state without stale closures.
@@ -377,8 +391,14 @@ export function App() {
   // the SAME reducer actions the live stream uses — so a resumed chat shows the
   // exact rows it did before: user/assistant prose, every `● Tool(arg)` with its
   // `⎿` result/diff, the consolidated discovery groups, and a marker where context
-  // was summarized. The tool display fields (summary/detail/isError) were stored on
-  // each tool entry at run time, so nothing about a row is lost across a resume.
+  // was summarized. The tool display fields (summary/detail/detailKind/isError) were
+  // stored on each tool entry at run time, so nothing about a row is lost across a resume.
+  //
+  // `detailKind` used to be missing from that list while this comment already claimed
+  // the rows came back identical. They did not: the diff text survived and the fact that
+  // it WAS a diff did not, so every resumed edit rendered as dim plain lines. Anything
+  // added to a row's appearance has to be stored here too, or the claim above quietly
+  // stops being true again.
   function showResumed(transcript: Entry[]) {
     for (const e of transcript) {
       if (e.role === "user") {
@@ -399,8 +419,21 @@ export function App() {
           dispatch({ type: "say", text: intermediate ? trimNarration(e.content) : e.content });
         }
         for (const call of e.toolCalls ?? []) {
+          // The spawn itself is drawn by its sub-agent block live, never as a raw row.
+          // Replaying it as one puts a `● SpawnSubagent(...)` in a resumed transcript
+          // that was not in the live one.
+          if (call.name === "spawn_subagent") continue;
           const d = toolDisplay(call.name, parseToolArgs(call.arguments));
-          dispatch({ type: "toolStart", toolId: call.id, name: d.name, arg: d.arg, action: d.kind, group: isGroupable(call.name) });
+          dispatch({
+            type: "toolStart",
+            toolId: call.id,
+            name: d.name,
+            arg: d.arg,
+            ...(d.meta ? { meta: d.meta } : {}),
+            action: d.kind,
+            group: isGroupable(call.name),
+            ...(d.covers ? { covers: d.covers } : {}),
+          });
         }
       } else {
         // A tool result resolves its row/group item, mirroring the live toolEnd.
@@ -410,6 +443,10 @@ export function App() {
           ok: e.isError === undefined ? !e.content.startsWith("Error:") : !e.isError,
           summary: e.summary,
           detail: e.detail,
+          ...(e.detailKind ? { detailKind: e.detailKind } : {}),
+          ...(e.quiet ? { quiet: true } : {}),
+          ...(e.displayName ? { name: e.displayName } : {}),
+          ...(e.displayKind ? { action: e.displayKind } : {}),
         });
       }
     }
@@ -459,6 +496,9 @@ export function App() {
 
   function attachApproval(s: Session) {
     s.toolContext.requestApproval = (q, o, detail, title) => askApproval.current(q, o, detail, title);
+    // Same stop Esc performs. A tool reaches for this when the USER has said, by
+    // dismissing a question, that the work should not carry on without them.
+    s.toolContext.interrupt = () => abortRef.current?.abort();
     s.toolContext.backgroundShells?.setOnChange(handleBgChange);
     // Servers connect in the background and can die or revive at any time; without this
     // the /mcp view would only ever show what was true when the last key was pressed.
@@ -536,10 +576,22 @@ export function App() {
   const session = useRef<Session | null>(null);
 
   useEffect(() => {
-    createSession().then((s) => {
+    // A relaunch after `/update` opens on the conversation it left. A resume that does
+    // not work out — an id that names nothing, a session file that will not load —
+    // falls through to a normal start rather than refusing to open: the point of the
+    // whole mechanism is that an update costs you nothing, and failing to come up at
+    // all is the one outcome worse than losing the thread. `/continue` still reaches it.
+    const open = resumeSessionId
+      ? resumeSession(process.cwd(), resumeSessionId).then((s) => s ?? createSession())
+      : createSession();
+    open.then((s) => {
       attachApproval(s);
       session.current = s;
       setReady(true);
+      if (resumeSessionId && s.id === resumeSessionId) {
+        showResumed(s.transcript);
+        note(`— updated to v${appVersion()}, continuing —`);
+      }
       // The project may have a model saved from a different provider than the
       // default, so re-check against what we're actually about to run.
       const cur = session.current;
@@ -569,7 +621,7 @@ export function App() {
   useEffect(() => {
     void checkForUpdate().then((latest) => {
       if (!latest) return;
-      note(`update available: v${appVersion()} → v${latest} — npm install -g mindweave`);
+      note(`update available: v${appVersion()} → v${latest} — /update to take it`);
     });
   }, []);
 
@@ -1095,7 +1147,7 @@ export function App() {
               // A sub-agent's own tool call — fold it into that worker's nested rail.
               enqueueReveal({ type: "subToolStart", agentId: e.agent, toolId: e.id, name: d.name, arg: d.arg, action: d.kind });
             } else {
-              enqueueReveal({ type: "toolStart", toolId: e.id, name: d.name, arg: d.arg, meta: d.meta, action: d.kind, group: isGroupable(e.name) });
+              enqueueReveal({ type: "toolStart", toolId: e.id, name: d.name, arg: d.arg, meta: d.meta, action: d.kind, group: isGroupable(e.name), ...(d.covers ? { covers: d.covers } : {}) });
             }
           } else if (e.type === "tool" && e.phase === "end") {
             if (e.name === "spawn_subagent") return;
@@ -1451,6 +1503,69 @@ export function App() {
           },
         ]),
       );
+      return;
+    }
+
+    // /update — take the newer version and come back to this same conversation.
+    //
+    // The restart is the point. A process cannot replace its own code: driver modules
+    // are imported lazily, so a copy that rewrote itself mid-session would be an old
+    // process reading new files, which fails later and somewhere else. Ending and
+    // reopening is what makes the new version actually the version running, and landing
+    // back in this session is what makes that invisible.
+    if (name === "/update") {
+      if (busy) {
+        note("Finish or stop the current turn first — restarting would strand it.", { error: true });
+        return;
+      }
+      const install = currentInstall();
+      if (install.kind !== "global") {
+        // Never guessed at. Overwriting a working tree or another project's dependency
+        // is the one thing this command must not do; see selfUpdate.ts.
+        note(`${refusalReason(install)}\n\nTo do it by hand:\n  ${manualCommand(install)}`, { error: true });
+        return;
+      }
+      // Past the once-a-day cache deliberately: someone typing this is asking NOW, and
+      // answering from a check made this morning would report "up to date" about a
+      // release that has happened since.
+      const latest = await checkForUpdate({ readCacheImpl: () => null });
+      const current = appVersion();
+      if (!latest) {
+        note(`Already on the latest${current ? ` (v${current})` : ""}.`);
+        return;
+      }
+      const choice = await askApproval.current(
+        `Update from v${current} to v${latest}? Mindweave will restart into this same conversation.`,
+        ["Yes, update and restart", "No"],
+        manualCommand(install),
+        "This will run",
+      );
+      if (!choice.startsWith("Yes")) {
+        note("Left as it is.");
+        return;
+      }
+      note(`Updating to v${latest}…`);
+      const result = await runUpdate(install.prefix);
+      if (!result.ok) {
+        // A failure here is a no-op rather than a half-state: npm either replaced the
+        // package or it did not, and the copy running is the copy that always was.
+        note(
+          `The update did not run, and nothing was changed.\n${result.message}\n\nTo do it by hand:\n  ${manualCommand(install)}`,
+          { error: true },
+        );
+        return;
+      }
+      // On disk before the successor goes looking for it.
+      await saveSession(s);
+      // Recorded rather than done here: the terminal can only be handed over once Ink
+      // has unmounted, and unmounting is what ends this render. `index.ts` picks it up.
+      requestRestart({
+        packageRoot: install.packageRoot,
+        sessionId: s.id,
+        previousVersion: current,
+        prefix: install.prefix,
+      });
+      exit();
       return;
     }
 
@@ -2556,15 +2671,6 @@ const FOOTER_BASE_ROWS = 7;
 /** The palette's own chrome: title, the "Tab completes" hint, top+bottom border. */
 const MENU_CHROME_ROWS = 4;
 
-/** Whether a block hugs the one above it — consecutive tool rows have no blank
- *  line between them. Takes the FULL list, not the rendered slice, so the first
- *  visible block still spaces correctly against the one scrolled off above it. */
-function isTight(all: readonly Block[], i: number): boolean {
-  const block = all[i];
-  const prev = i > 0 ? all[i - 1] : undefined;
-  return !!block && block.kind === "tool" && !!prev && prev.kind === "tool";
-}
-
 /** Lines PageUp/PageDown move per press. */
 const PAGE_LINES = 10;
 /** Lines one wheel notch moves. Three is the usual terminal step, and a flick
@@ -2724,30 +2830,6 @@ function useTerminalSize(): { columns: number; rows: number } {
   return size;
 }
 
-// The built-in slash commands offered by the input's autocomplete. Project skills
-// are appended at render time from the live session.
-const BASE_COMMANDS = [
-  { name: "/help", description: "show this list" },
-  { name: "/init", description: "write MINDWEAVE.md — what the agent should always know about this project" },
-  { name: "/provider", description: "choose which provider serves this project" },
-  { name: "/key", description: "add or replace an API key" },
-  { name: "/model", description: "choose which model answers, from the current provider" },
-  { name: "/think", description: "set the reasoning level for the model" },
-  { name: "/rules", description: "list rules, or add one: /rules <directive>" },
-  { name: "/skills", description: "list skills, or make one: /skills <description>" },
-  { name: "/forbidden", description: "list protected paths, or add: /forbidden <path>" },
-  { name: "/forbid-command", description: "list forbidden commands, or add: /forbid-command <command>" },
-  { name: "/link", description: "pull in the rest of the project (monorepo / sibling repos)" },
-  { name: "/include", description: "add a folder to the workspace: /include <path>" },
-  { name: "/exclude", description: "remove an added folder: /exclude <label>" },
-  { name: "/shells", description: "view or stop background commands (tests, servers)" },
-  { name: "/mcp", description: "view MCP servers; /mcp add <name> <command|url> to connect one" },
-  { name: "/context", description: "show what Mindweave sees about this project" },
-  { name: "/undo", description: "roll back file changes: /undo, /undo list, /undo <n>" },
-  { name: "/compact", description: "summarize the conversation to free up context" },
-  { name: "/clear", description: "start a fresh conversation in this project" },
-  { name: "/continue", description: "pick a past session to resume" },
-];
 
 /** Split a /include argument into paths: quoted segments (spaces) or bare tokens. */
 function parsePaths(arg: string): string[] {

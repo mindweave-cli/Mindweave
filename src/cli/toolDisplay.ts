@@ -19,7 +19,6 @@ const DISPLAY_NAME: Record<string, string> = {
   definition: "Map",
   references: "Map",
   relevant: "Map",
-  diagnostics: "Check",
   web_fetch: "Fetch",
   web_search: "WebSearch",
   screenshot: "WindowCapture",
@@ -122,7 +121,6 @@ const TOOL_KIND: Record<string, ToolKind> = {
   replace_symbol_body: "edit",
   write_file: "write",
   run_command: "run",
-  diagnostics: "check",
   spawn_subagent: "agent",
   shells: "run",
   // web_fetch and web_search are both "reaching out to the web" — same family,
@@ -178,6 +176,15 @@ export interface ToolDisplay {
   /** A dim qualifier after the name — currently a non-default command timeout, shown
    *  because it changes how long the row may sit there before it means anything. */
   meta?: string;
+  /**
+   * How many THINGS this one call covers, when that is not one.
+   *
+   * `read_file` takes a list of paths, so a single call can read several files. The
+   * discovery group counted calls and called them files, which meant three files read in
+   * one call announced themselves as "Reading 1 file" above a row that said "Read 3
+   * files" — the header and its own content disagreeing, with the header wrong.
+   */
+  covers?: number;
 }
 
 /** Build the `Name(arg)` display parts for a tool call. */
@@ -231,17 +238,28 @@ export function toolDisplay(name: string, args: Record<string, unknown>): ToolDi
   if (name === "spawn_subagent") return { name: display, arg: clip(str(args.task), 48) || undefined, kind };
 
   // `paths` is a LIST — read_file takes several files in one call, and the row has to
-  // say which. One file reads as its name; several read as a count, because four
-  // basenames do not fit a header and the group below already lists them.
+  // say WHICH. It used to say "3 files", which repeated the count the header above it
+  // already gave and named none of them, so a burst of reads was three rows of arithmetic
+  // and no information. The names are what anyone reading it wants, and they are already
+  // here in the arguments.
+  //
+  // A multi-path read has no line range to show — ranges only apply to a single file, and
+  // the tool ignores them for a list — so the names are the whole story.
   const many = Array.isArray(args.paths) ? args.paths.filter((v): v is string => typeof v === "string") : [];
   const path = many.length > 0 ? (many.length === 1 ? (many[0] ?? "") : "") : str(args.path);
   const detail =
     many.length > 1
-      ? `${many.length} files`
+      ? many.map(base).join(", ")
       : path
         ? base(path)
         : str(args.symbol) || str(args.name) || str(args.query) || str(args.label);
-  return { name: display, arg: detail || undefined, kind };
+  return {
+    name: display,
+    arg: detail || undefined,
+    kind,
+    // What the group header counts. One call, three files read.
+    ...(many.length > 1 ? { covers: many.length } : {}),
+  };
 }
 
 function str(v: unknown): string {

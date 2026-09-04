@@ -80,6 +80,41 @@ test("a near miss is not treated as the repair flag", () => {
   }
 });
 
+// ── --resume, which only Mindweave itself writes ─────────────────────────────
+
+test("--resume carries a session into the launch", () => {
+  const startup = parseStartupArgs(["--resume", "9603f18c-514e-45d0-a672-52284b75e8c4"]);
+  assert.equal(startup.kind, "run");
+  assert.equal(startup.kind === "run" && startup.resumeSessionId, "9603f18c-514e-45d0-a672-52284b75e8c4");
+});
+
+test("the id is taken as a filename, not trusted as a label", () => {
+  // It names a file under the project's session directory, so anything that could climb
+  // out of that directory is refused rather than joined onto a path.
+  for (const bad of ["../../etc/passwd", "a/b", "a\\b", "..", ".hidden", "", "x".repeat(65)]) {
+    const startup = parseStartupArgs(["--resume", bad]);
+    assert.equal(startup.kind === "run" && startup.resumeSessionId, undefined, bad);
+  }
+});
+
+test("a malformed id starts a session rather than refusing to launch", () => {
+  // This flag exists to make an update invisible. The one outcome worse than losing the
+  // thread is not coming back at all, and `/continue` still reaches the session.
+  const startup = parseStartupArgs(["--resume", "../nope"]);
+  assert.equal(startup.kind, "run");
+});
+
+test("--resume with nothing after it is not an error", () => {
+  assert.equal(parseStartupArgs(["--resume"]).kind, "run");
+});
+
+test("the flags after --resume are still read", () => {
+  // The id is consumed, not skipped past: a `--version` behind it must still answer.
+  assert.equal(parseStartupArgs(["--resume", "abc", "--version"]).kind, "print");
+  // And an id that happens to look like a flag is consumed as the id, not obeyed.
+  assert.equal(parseStartupArgs(["--resume", "--version"]).kind, "run");
+});
+
 test("a pipe is not a terminal to read from, and a terminal is", () => {
   // The renderer needs raw mode on stdin. Without a terminal it fails from inside React
   // with a reconciler stack trace, on a process that still exits 0 — so the caller is

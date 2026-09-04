@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
 import { parseWindowList, type WindowInfo } from "./screenshotWin.js";
-import { pickWindow, listTitles, safeName, screenshot, needsApproval } from "./screenshot.js";
+import { pickWindow, listTitles, safeName, screenshot, needsApproval, tieNote } from "./screenshot.js";
 
 function win(title: string, handle = "1", foreground = false): WindowInfo {
   return { handle, title, foreground };
@@ -82,6 +82,32 @@ test("pickWindow refuses to guess between equally good matches", () => {
 test("pickWindow breaks a tie toward the window the user is looking at", () => {
   const pick = pickWindow("chrome", [win("Chrome — A", "1"), win("Chrome — B", "2", true)]);
   assert.equal(pick.kind === "match" && pick.window.handle, "2");
+});
+
+test("a tie-broken match carries the windows it beat", () => {
+  // Otherwise a capture decided by focus is indistinguishable from one where the title
+  // named a single window, and a caller after a DIFFERENT window has nothing telling it
+  // that its query cannot express the difference.
+  const pick = pickWindow("chrome", [win("Chrome — A", "1"), win("Chrome — B", "2", true)]);
+  assert.deepEqual(pick.kind === "match" && pick.tied.map((w) => w.handle), ["1"]);
+});
+
+test("an unambiguous match beat nothing", () => {
+  const pick = pickWindow("editor", [win("Chrome", "1"), win("Editor", "2")]);
+  assert.deepEqual(pick.kind === "match" && pick.tied, []);
+});
+
+test("the tie is reported in the result, with what would change it", () => {
+  // The observed failure: five identical calls in a row, each returning the same window,
+  // because a plain "Captured …" gave the caller no reason to do anything differently.
+  const note = tieNote("Changelog", [win("Changelog — Chrome", "1"), win("Changelog — Chrome", "2")]);
+  assert.match(note, /2 other windows/);
+  assert.match(note, /Calling again will pick the same one/);
+  assert.match(note, /focus it first|name a title only it has/);
+});
+
+test("no tie, no note", () => {
+  assert.equal(tieNote("editor", []), "");
 });
 
 test("pickWindow reports no match with the candidates it did see", () => {

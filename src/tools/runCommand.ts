@@ -41,7 +41,8 @@ import { posixShell, shellMismatchNote } from "./posixShell.js";
 import { killTree, spawnManaged } from "./killTree.js";
 import { captureAfterCommand, looksReadOnly, snapshotBeforeCommand } from "./shellCheckpoint.js";
 import { canonicalRoot, relativize } from "./paths.js";
-import { outputDetail, withOutcome } from "./detail.js";
+import { SHELL_ROWS_FAILED, SHELL_ROWS_OK, formatDuration, shellOutput, withOutcome } from "./detail.js";
+import { parseTestRun, testDetail } from "./testSummary.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
 import { findRunningDuplicate, findRecentUserClose, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
 import { fail, failQuietly } from "./results.js";
@@ -298,6 +299,9 @@ async function runShell(
   shell: Shell,
   declaredNotify?: NotifyPolicy,
 ): Promise<ToolResult> {
+  // How long the command took, for the row's outcome. Taken here rather than around the
+  // spawn so it covers what the user actually waited through.
+  const startedAt = Date.now();
   // A unique temp file the wrapped command writes its final cwd into.
   const cwdFile = join(tmpdir(), `mindweave-cwd-${randomBytes(6).toString("hex")}.txt`);
   // Where we stood before the command ran — applyCwd may move ctx.cwd, and the model
@@ -440,7 +444,9 @@ async function runShell(
       detachAbort();
       await applyCwd(cwdFile, ctx);
       if (tempFile) await fs.rm(tempFile, { force: true }).catch(() => {});
-      resolve(format(command, ctx, collected(), dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore, child.pid));
+      resolve(
+        format(command, ctx, collected(), dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore, Date.now() - startedAt, child.pid),
+      );
     };
 
     child.on("error", (error) => {
@@ -644,6 +650,8 @@ function format(
   timeoutMs: number,
   shell: Shell,
   cwdBefore: string,
+  /** Wall-clock milliseconds the command ran for. */
+  elapsedMs: number,
   /** The killed process, named only when something WAS killed (see withOutcome). */
   pid?: number,
 ): ToolResult {
@@ -695,9 +703,14 @@ function format(
   const moved = cwdChangeNote(cwdBefore, ctx.cwd, shown);
   if (moved) parts.push(moved);
   const status = timedOut ? "timed out" : signal ? `killed (${signal})` : exitCode === 0 ? "ok" : `exit ${exitCode}`;
+  const failed = timedOut || signal !== null || (exitCode !== 0 && exitCode !== null);
+  // Only for a command that RAN to a conclusion. A run killed on a timeout has whatever
+  // its runner had printed by then, and summarising a partial log as a result would put a
+  // confident set of numbers under a command nobody let finish.
+  const testRun = timedOut || signal !== null ? undefined : parseTestRun(body);
   return {
     output: parts.join("\n"),
-    isError: timedOut || signal !== null || (exitCode !== 0 && exitCode !== null),
+    isError: failed,
     summary: `ran \`${clip(command)}\` in ${shown} (${status})`,
     // The outcome is appended to what is SHOWN, not just to what the model reads. A
     // command that printed output previously ended its row with the last line of that
@@ -707,14 +720,27 @@ function format(
     // The command leads its own block on its own row. Inline in the header it was
     // clipped to 48 characters, which for a real command line lost the half that said
     // what it actually did (`Run(mkdir -p ..\astra-backup; Move-Item .\astra.htm…)`).
-    detail: withOutcome(shellBody(command, body), timedOut, exitCode, signal, timeoutMs, pid),
+    // A recognised test run is shown as a RESULT rather than as output: its own counts
+    // and the first few failures, in place of the thousands of lines it printed to say
+    // that nothing was wrong. Anything not recognised falls through to the ordinary
+    // block, whole — see testSummary.ts for why that direction is the safe one.
+    detail: testRun
+      ? testDetail(testRun, formatDuration)
+      : withOutcome(shellBody(command, body, failed), timedOut, exitCode, signal, timeoutMs, elapsedMs, pid),
     detailKind: "shell" as const,
   };
 }
 
-/** The `$ command` header row above a command's captured output. */
-function shellBody(command: string, body: string): string {
-  const out = outputDetail(body);
+/**
+ * The `$ command` header row above a command's captured output.
+ *
+ * How many rows of output follow depends on whether the command WORKED. A run that
+ * succeeded needs to show that it finished and what it ended up saying; a run that failed
+ * is the only one anyone reads, and gets a larger, still fixed, budget. Both are capped
+ * from the end — see `shellOutput`.
+ */
+function shellBody(command: string, body: string, failed: boolean): string {
+  const out = shellOutput(body, failed ? SHELL_ROWS_FAILED : SHELL_ROWS_OK);
   return out ? `$ ${command}\n${out}` : `$ ${command}`;
 }
 

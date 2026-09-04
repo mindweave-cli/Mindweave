@@ -729,7 +729,14 @@ function Field({
     );
   }
 
-  const view = inputView(value, cursor, width, maxRows);
+  // One column narrower than the box, because the caret is a real column.
+  //
+  // At the end of a row the caret has no character to sit on top of, so it ADDS a column
+  // to that row. Wrapped to the full box width, a row that filled the box then rendered
+  // one column too wide, `truncate-end` cut it, and the `…` landed on the character just
+  // typed — so the box would hide exactly the letter being written, and only once a line
+  // was full. The reserved column is never wasted: the caret is always somewhere.
+  const view = inputView(value, cursor, Math.max(1, width - 1), maxRows);
   return (
     <Box flexDirection="column" flexShrink={0}>
       {view.hiddenAbove > 0 ? (

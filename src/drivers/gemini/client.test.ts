@@ -12,8 +12,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildBody } from "../openaiCompat/wire.js";
 import { cacheSplit, geminiProvider, reasoningFields } from "./client.js";
-import { DEFAULT_MODEL, FLASH_37, FLASH_LITE_35, FLASH_36, FLASH_35, FLASH_LITE_31, MODELS, hasListedPrice, PRO_31, contextWindow, normalize, price, thinkLevels } from "./manifest.js";
-import type { Effort, ModelRequest } from "../types.js";
+import { DEFAULT_MODEL, FLASH_38, FLASH_37, FLASH_LITE_35, FLASH_36, FLASH_35, FLASH_LITE_31, MODELS, hasListedPrice, PRO_31, contextWindow, normalize, price, thinkLevels } from "./manifest.js";
+import type { Effort, ModelConfig, ModelRequest } from "../types.js";
 
 const base: ModelRequest = { system: "S", messages: [] };
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -96,7 +96,7 @@ test("every added model is priced from the published table, never the fallback",
   // added to MODELS but forgotten in PRICES is silently costed as something else —
   // wrong, and invisible, in the figure the status line now shows as money.
   // Asked of the TABLE, not of the returned values: two models can legitimately share
-  // a rate (3.7 and 3.6 Flash both carry the same promotional price), so equal values
+  // a rate (3.8, 3.7 and 3.6 Flash all carry the same promotional price), so equal values
   // prove nothing either way. Only presence does.
   for (const choice of MODELS) {
     assert.ok(hasListedPrice(choice.id), `${choice.id} has no entry in PRICES and is costed as the default`);
@@ -105,10 +105,37 @@ test("every added model is priced from the published table, never the fallback",
 });
 
 test("3.5 Flash really is dearer than the newer Flash models", () => {
-  // Counter-intuitive and deliberate: 3.7 and 3.6 carry a promotional rate that 3.5
+  // Counter-intuitive and deliberate: 3.8, 3.7 and 3.6 carry a promotional rate that 3.5
   // does not. Pinned so a future tidy-up does not "correct" it into looking ordered.
+  assert.ok(price(FLASH_35).cacheMiss > price(FLASH_38).cacheMiss);
   assert.ok(price(FLASH_35).cacheMiss > price(FLASH_37).cacheMiss);
   assert.ok(price(FLASH_35).cacheMiss > price(FLASH_36).cacheMiss);
+});
+
+test("3.8 Flash leads the lineup and is what a fresh session runs", () => {
+  assert.equal(DEFAULT_MODEL, FLASH_38);
+  assert.equal(FLASH_38, "gemini-3.8-flash");
+  assert.equal(MODELS[0]!.id, FLASH_38, "the default must be the first model /model offers");
+});
+
+test("3.8 Flash costs exactly what 3.7 does", () => {
+  // Google launched it at the older model's rate, promotion and 2027-01-01 expiry
+  // included. Pinned because a newer, better model being no dearer is the sort of fact
+  // that looks like a copy-paste mistake to whoever reads the table next.
+  assert.deepEqual(price(FLASH_38), price(FLASH_37));
+});
+
+test("3.8 Flash only ever sees a rung Google accepts for it", () => {
+  // Google's docs say this model ERRORS on `minimal`, and that `none` is 2.5-only. Both
+  // are outside the shared `Effort` union, so neither can be typed here — but a config
+  // saved by another provider is plain JSON on disk and is not bound by that. What has
+  // to hold is that whatever arrives leaves as one of the three rungs Gemini accepts.
+  const accepted = new Set(thinkLevels(FLASH_38).map((l) => l.effort));
+  assert.deepEqual([...accepted].sort(), ["high", "low", "medium"]);
+  for (const effort of ["minimal", "none", "xhigh", "max", "", "HIGH"]) {
+    const settled = normalize({ model: FLASH_38, thinking: true, effort } as unknown as ModelConfig);
+    assert.ok(accepted.has(settled.effort), `${effort || "(empty)"} settled on ${settled.effort}, which Gemini rejects`);
+  }
 });
 
 test("the cheapest model is the Lite one, on every rate", () => {

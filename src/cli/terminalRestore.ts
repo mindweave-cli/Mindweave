@@ -25,6 +25,15 @@ export const ALT_SCREEN_OFF = "\x1b[?1049l";
 export const SHOW_CURSOR = "\x1b[?25h";
 
 /**
+ * Autowrap back on (DECAWM), the default every shell expects.
+ *
+ * The app turns it OFF while it owns the screen, because it addresses the terminal as a
+ * grid of cells and a row that wraps is a row in a place nothing knows about. Leaving it
+ * off afterwards would truncate every long line in the shell that follows.
+ */
+export const AUTOWRAP_ON = "\x1b[?7h";
+
+/**
  * Everything the app switches on, switched back off, in the order a half-dead terminal
  * wants it: stop the reporting that is actively producing garbage, then restore the
  * screen buffer, then the cursor.
@@ -34,4 +43,4 @@ export const SHOW_CURSOR = "\x1b[?25h";
  * without first working out which parts are actually needed — and there is no way to
  * work that out anyway, since the terminal will not tell us what modes it is in.
  */
-export const TERMINAL_RESTORE = MOUSE_OFF + ALT_SCREEN_OFF + SHOW_CURSOR;
+export const TERMINAL_RESTORE = MOUSE_OFF + ALT_SCREEN_OFF + SHOW_CURSOR + AUTOWRAP_ON;

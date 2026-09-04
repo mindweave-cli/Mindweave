@@ -8,6 +8,7 @@
  * a diff or a command's stdout. Lines are prefixed so the
  * renderer can colour them: `+ ` added (green), `- ` removed (red), bare = plain.
  */
+import { condense, tailCap } from "./outputShape.js";
 
 /** Cap a list of display lines, noting how many were hidden. */
 export function capLines(lines: string[], max: number): string {
@@ -106,18 +107,76 @@ export function outputDetail(body: string): string {
   return capLines(collapseBlanks(stripAnsi(body).split("\n")), 18);
 }
 
+/** Rows of output shown under a command that SUCCEEDED. Enough to see what it ended up
+ *  saying; a run that worked is not a thing anyone reads. */
+export const SHELL_ROWS_OK = 3;
+
+/** Rows shown under a command that FAILED. More, because there is now something to read,
+ *  and still a fixed budget: a failure must not take the screen. */
+export const SHELL_ROWS_FAILED = 12;
+
+/**
+ * A command's output as it is DISPLAYED (pure).
+ *
+ * Three steps, in this order and no other. Escapes go first, because a colour code is
+ * neither content nor width. Then the repeated chrome — job columns, timestamps — because
+ * it has to be gone before anything is counted, or the budget is spent on text that is
+ * identical from line to line. Only then is it capped, and from the END, since output is
+ * read backwards: the error is on the last line, the banner on the first.
+ */
+export function shellOutput(body: string, max: number): string {
+  if (!body) return "";
+  return tailCap(condense(collapseBlanks(stripAnsi(body).split("\n"))), max).join("\n");
+}
+
+/**
+ * The two outcome marks.
+ *
+ * `✗` (U+2717 BALLOT X) rather than the heavy `✖` (U+2716), and that is not a taste
+ * choice. Terminals give the heavy one EMOJI presentation and draw it two columns wide,
+ * while every width table this code and Ink consult call it one. So it overprinted the
+ * character after it and `✖ 1 · 885ms` reached the screen as `✖1 · 885ms`, while the
+ * passing row beside it sat correctly as `✓ 0 · 256ms`.
+ *
+ * `✓` and `✗` are the light pair from the same block, both text-presentation, both one
+ * column. A failure now lines up exactly like a success, which is the whole point of
+ * putting them in the same place.
+ */
+export const OK_MARK = "✓";
+export const FAIL_MARK = "✗";
+
+/**
+ * A wall-clock span, at the precision worth reading (pure).
+ *
+ * Sub-second work is reported in milliseconds because "0.0s" says nothing; past a minute
+ * the seconds stop mattering and the minutes start to.
+ */
+export function formatDuration(ms: number): string {
+  const clamped = Math.max(0, Math.round(ms));
+  if (clamped < 1000) return `${clamped}ms`;
+  if (clamped < 60_000) return `${(clamped / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(clamped / 60_000);
+  const seconds = Math.round((clamped % 60_000) / 1000);
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
+
 /**
  * A command's output with its outcome as the last line (pure).
  *
- *   ✓ Exit code 0
- *   ✖ Exit code 1
- *   ✖ Timed out after 30s — killed
- *   ✖ Terminated by SIGTERM
+ *   ✓ 0 · 273ms
+ *   ✗ 1 · 12.4s
+ *   ✗ timed out after 30s
+ *   ✗ killed (SIGTERM) · 2.1s
  *
  * Shown for a SUCCESS too, not only a failure. A row that says nothing when a command
  * passed and something when it failed makes the absence of a line the signal, and an
- * absence is easy to read past — especially under a wall of build output. The reference
- * design puts the exit code on every command for the same reason.
+ * absence is easy to read past, especially under a wall of build output.
+ *
+ * Short, because the renderer lifts this line out of the body and sets it against the
+ * right margin of the command's own header row — the one place a verdict can sit and be
+ * in the same position every time, instead of at the bottom of however many lines of
+ * output happened to come out. `Exit code 0` spelled out is four words to say what `0`
+ * says once you know where to look, and the point of a fixed position is that you do.
  *
  * `exitCode` is null when a process was ended by a signal and never reported one; that
  * case is named by the signal instead, because reporting it as "exit 0" made a killed
@@ -129,15 +188,17 @@ export function withOutcome(
   exitCode: number | null,
   signal: string | null,
   timeoutMs: number,
+  elapsedMs: number,
   pid?: number,
 ): string {
+  const took = ` · ${formatDuration(elapsedMs)}`;
   const line = timedOut
-    ? `✖ Timed out after ${Math.round(timeoutMs / 1000)}s — killed`
+    ? `✗ timed out after ${Math.round(timeoutMs / 1000)}s`
     : signal
-      ? `✖ Terminated by ${signal}`
+      ? `✗ killed (${signal})${took}`
       : exitCode === null
-        ? "✖ Ended without an exit code"
-        : `${exitCode === 0 ? "✓" : "✖"} Exit code ${exitCode}`;
+        ? `✗ no exit code${took}`
+        : `${exitCode === 0 ? "✓" : "✗"} ${exitCode}${took}`;
   // Which process was killed, and by what. Only when something WAS killed: on an
   // ordinary exit the pid is trivia, but after a timeout it is the thing the user needs
   // in order to check whether it actually died or is still holding a port.

@@ -14,7 +14,6 @@ import { search } from "./search.js";
 import { outlineTool, definitionTool, referencesTool } from "./codeIntel.js";
 import { readSymbolTool } from "./readSymbol.js";
 import { replaceSymbolBody } from "./replaceSymbol.js";
-import { diagnosticsTool } from "./diagnostics.js";
 import { web } from "./web.js";
 import { screenshot } from "./screenshot.js";
 import { exitPlan } from "./exitPlan.js";
@@ -41,7 +40,6 @@ export const TOOLS: Tool[] = [
   definitionTool,
   referencesTool,
   readSymbolTool,
-  diagnosticsTool,
   // Background shells (read-only: inspect long-running commands)
   shellsTool,
   // External integrations (read-only: finds MCP tools, and reads the DATA servers expose

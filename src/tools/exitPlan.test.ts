@@ -202,11 +202,34 @@ test("a typed answer is a revision request carrying its text", () => {
   assert.equal(d.fresh, false, "typing must never start work");
 });
 
-test("dismissing the prompt is still a refusal, never approval", () => {
-  // The failure that matters here is acting when nobody said yes.
-  assert.equal(readDecision(APPROVAL_DISMISSED).verdict, "reject");
+test("nothing but an explicit approval ever starts the work", () => {
+  // The failure that matters here is acting when nobody said yes, so this asserts what
+  // must NOT happen rather than which particular refusal each answer becomes.
+  for (const answer of [APPROVAL_DISMISSED, "", "yes go on then", "maybe", "Rejected"]) {
+    const { verdict } = readDecision(answer);
+    assert.ok(verdict !== "lightning" && verdict !== "sentinel", `${JSON.stringify(answer)} started the work`);
+  }
   assert.equal(readDecision("").verdict, "reject");
   assert.equal(readDecision("yes go on then").verdict, "reject");
+});
+
+test("closing the plan is not the same as rejecting it", () => {
+  // Esc used to fall through the catch-all and arrive as a rejection, so the model was
+  // told "the user rejected the plan" on the strength of a keypress that said nothing
+  // about the plan at all — the same fault as reporting a dismissed question as a chosen
+  // option, on the longest thing this app ever asks anyone to read.
+  assert.equal(readDecision(APPROVAL_DISMISSED).verdict, "dismiss");
+});
+
+test("closing the plan STOPS the turn and claims no verdict", async () => {
+  let stopped = false;
+  const c = ctx(APPROVAL_DISMISSED);
+  c.interrupt = () => void (stopped = true);
+  const r = await exitPlan.execute({ plan: PLAN }, c);
+  assert.equal(stopped, true, "the turn kept running after the plan was closed unanswered");
+  assert.doesNotMatch(r.output, /rejected/i, "a dismissal must not be reported as a rejection");
+  assert.match(r.output, /not a rejection/i);
+  assert.equal(c.planMode, true, "planning stays in force until something is approved");
 });
 
 test("the user's words reach the model instead of a shrug", async () => {
