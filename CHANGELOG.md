@@ -3,6 +3,30 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.3.1 (2026-09-05): a count of how many people are running it
+
+Mindweave has no account and no server of its own, which meant nobody could answer the
+simplest question about it: whether anyone is using it. This release adds the smallest
+thing that answers that. Once at startup it sends a random identifier and the version
+number, and nothing else. Not code, not keys, not paths, not which provider answered,
+not a token count.
+
+It is on by default and says so on every launch rather than once, because a notice shown
+a single time is one somebody scrolls past and then discovers months later. `/analytics`
+opens the same fixed box every other setting uses, with the switch and, underneath it,
+what is actually sent and where to check both halves of that claim: the source that
+sends it, and the public numbers it produces. `/analytics on` and `/analytics off` still
+work for anyone who would rather type than pick. The identifier is generated once and
+kept in `~/.mindweave/analytics.json` beside the flag, so turning it off is a fact on
+disk rather than a preference that quietly resets. The address it reports to is a single
+constant, overridable with `MINDWEAVE_ANALYTICS_URL`, so what sits behind it can be
+replaced without the client changing.
+
+The picker gained a place for text that belongs under the choices rather than in the
+title, counted into the same fixed height budget so the box still never resizes as its
+contents change. And the keyboard hint got a second space after the backspace glyph,
+which renders wide enough in most terminal fonts to collide with the word after it.
+
 ## v2.3.0 (2026-09-04): `/update`, a screen that stops tearing, and resumed sessions that look like the ones they resume
 
 `/update` takes the newest release and reopens on the conversation it left. It resolves
