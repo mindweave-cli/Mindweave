@@ -219,7 +219,7 @@ export function KeyManager({
         rows={actions.length + (shown ? 2 : 0)}
         maxRows={maxRows}
         width={width}
-        hint={shown ? "hidden again when you leave · Esc or ⌫ back" : "↑/↓ · Enter to choose · Esc or ⌫ back"}
+        hint={shown ? "hidden again when you leave · Esc or ⌫  back" : "↑/↓ · Enter to choose · Esc or ⌫  back"}
       >
         {actions.map((a, i) => (
           <Row key={a} on={i === sel} n={i + 1} left={a} width={width} />
@@ -243,7 +243,7 @@ export function KeyManager({
         rows={Math.min(win, keys.length - start) + (addRow ? 1 : 0)}
         maxRows={maxRows}
         width={width}
-        hint="↑/↓ · Enter to choose · Esc or ⌫ back"
+        hint="↑/↓ · Enter to choose · Esc or ⌫  back"
       >
         {keys.slice(start, start + win).map((r, i) => (
           <Row
@@ -270,7 +270,7 @@ export function KeyManager({
       rows={Math.min(win, providers.length - start)}
       maxRows={maxRows}
       width={width}
-      hint="↑/↓ · Enter to choose · Esc or ⌫ close"
+      hint="↑/↓ · Enter to choose · Esc or ⌫  close"
     >
       {providers.slice(start, start + win).map((p, i) => (
         <Row

@@ -52,6 +52,13 @@ import { formatHelp } from "./help.js";
 import { hasApiKey, saveApiKey, removeApiKey, useApiKey, globalEnvPath, reloadConfig } from "./bootstrap.js";
 import { versionLabel, appVersion } from "./version.js";
 import { checkForUpdate } from "./updateCheck.js";
+import {
+  ANALYTICS_EXPLANATION,
+  analyticsEnabled,
+  sendAnalyticsPing,
+  setAnalyticsEnabled,
+  startupStatusLine,
+} from "./analytics.js";
 import { PromptInput } from "./components/PromptInput.js";
 import { Picker } from "./components/Picker.js";
 import { ApprovalBox } from "./components/ApprovalBox.js";
@@ -90,6 +97,7 @@ const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
  *  in full, because only a bare invocation opens anything: given an argument each of these
  *  acts directly and there is no surface to hold the frame for. */
 const OVERLAY_COMMANDS = new Set([
+  "/analytics",
   "/continue",
   "/key",
   "/mcp",
@@ -132,6 +140,7 @@ function missingKeyFor(model: string): KeyNeed | null {
  * prompt, carrying the promise resolver the blocked tool is awaiting.
  */
 type Overlay =
+  | { kind: "analytics" }
   | { kind: "sessions"; items: SessionMeta[] }
   | { kind: "resumeMode"; meta: SessionMeta }
   | { kind: "provider" }
@@ -612,6 +621,13 @@ export function App({ resumeSessionId }: AppProps) {
       void need;
       setSetupOpen(true);
     });
+  }, []);
+
+  // Anonymous usage ping — on by default. The status line shows every launch, not just
+  // the first one; the full explanation lives in the /analytics box itself.
+  useEffect(() => {
+    note(startupStatusLine());
+    sendAnalyticsPing(appVersion());
   }, []);
 
   // A quiet, backgrounded check for a newer release — independent of session startup so a
@@ -1419,7 +1435,10 @@ export function App({ resumeSessionId }: AppProps) {
       return;
     }
     setOverlay(null);
-    if (o.kind === "resumeMode") void applyResume(o.meta, index);
+    if (o.kind === "analytics") {
+      setAnalyticsEnabled(index === 0);
+      note(`Analytics turned ${index === 0 ? "on" : "off"}.`);
+    } else if (o.kind === "resumeMode") void applyResume(o.meta, index);
     else if (o.kind === "provider") void applyProvider(index);
     else if (o.kind === "model") void applyModel(index);
     else if (o.kind === "think") void applyThink(index);
@@ -1566,6 +1585,22 @@ export function App({ resumeSessionId }: AppProps) {
         prefix: install.prefix,
       });
       exit();
+      return;
+    }
+
+    // /analytics — the anonymous usage ping. Bare opens the on/off switch, the same
+    // fixed box every other setting uses; an argument acts directly, same as /model.
+    if (name === "/analytics") {
+      const verb = arg.trim().toLowerCase();
+      if (verb === "on" || verb === "off") {
+        setAnalyticsEnabled(verb === "on");
+        note(`Analytics turned ${verb}.`);
+        return;
+      }
+      if (verb) {
+        return say("/analytics on|off, or bare to open the switch.");
+      }
+      setOverlay({ kind: "analytics" });
       return;
     }
 
@@ -2242,6 +2277,25 @@ export function App({ resumeSessionId }: AppProps) {
     }
     if (!overlay) return null;
     const cur = session.current;
+    if (overlay.kind === "analytics") {
+      const enabled = analyticsEnabled();
+      const items = [
+        { label: "On" + (enabled ? "  ✓" : ""), description: "sends the ping" },
+        { label: "Off" + (!enabled ? "  ✓" : ""), description: "sends nothing" },
+      ];
+      return (
+        <Picker
+          title="Anonymous usage analytics"
+          note={ANALYTICS_EXPLANATION}
+          items={items}
+          width={width}
+          maxRows={maxRows}
+          initialIndex={enabled ? 0 : 1}
+          onSelect={onOverlaySelect}
+          onCancel={onOverlayCancel}
+        />
+      );
+    }
     if (overlay.kind === "sessions") {
       const items = overlay.items.map((m) => ({
         label: sessionTitle(m),

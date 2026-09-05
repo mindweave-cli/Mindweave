@@ -41,6 +41,7 @@ export const BASE_COMMANDS: CommandInfo[] = [
   { name: "/undo", description: "roll back file changes: /undo, /undo list, /undo <n>" },
   { name: "/compact", description: "summarize the conversation to free up context" },
   { name: "/update", description: "update Mindweave and restart into this conversation" },
+  { name: "/analytics", description: "see or switch anonymous usage analytics on/off" },
   { name: "/clear", description: "start a fresh conversation in this project" },
   { name: "/continue", description: "pick a past session to resume" },
 ];

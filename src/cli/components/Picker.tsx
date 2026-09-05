@@ -32,6 +32,11 @@ interface PickerProps {
   initialIndex?: number;
   /** Hard ceiling on the title's rendered height. See MAX_TITLE_ROWS. */
   maxTitleRows?: number;
+  /** Dim text shown BELOW the items, above the key hint — context that isn't itself a
+   *  choice (e.g. what a setting actually does). Counted into the fixed-height budget
+   *  the same way the title is. */
+  note?: string;
+  maxNoteRows?: number;
   /** How many list rows may show at once — App computes this from the real frame
    *  height so the bordered box never grows past the screen and tears. Falls back
    *  to a small, always-safe count. */
@@ -55,6 +60,7 @@ const MAX_VISIBLE = 10;
  * in `detail`, which prints to the transcript (see ToolContext.requestApproval).
  */
 const MAX_TITLE_ROWS = 6;
+const MAX_NOTE_ROWS = 4;
 
 export function Picker({
   title,
@@ -65,6 +71,8 @@ export function Picker({
   active = true,
   initialIndex = 0,
   maxTitleRows = MAX_TITLE_ROWS,
+  note,
+  maxNoteRows = MAX_NOTE_ROWS,
   maxRows = MAX_VISIBLE,
 }: PickerProps) {
   // Same window size as the command menu (App clamps maxRows to a safe ceiling), so the
@@ -102,11 +110,14 @@ export function Picker({
   // exists says the same thing and cannot resize anything.
   const counter = items.length > visible ? `  ${sel + 1} of ${items.length}` : "";
   const titleRows = clipRows(title, Math.max(4, rowWidth - counter.length), maxTitleRows);
+  const noteRows = note ? clipRows(note, rowWidth, maxNoteRows) : [];
 
-  // Blank rows so title + list is a fixed count, matching the command menu's header(1) +
-  // maxRows. The box is then the SAME height as the command box and never resizes when a
-  // shorter list is shown — the surplus is empty space, not a smaller box.
-  const pad = Math.max(0, maxRows + 1 - titleRows.length - shown.length);
+  // Blank rows so title + list + note is a fixed count, matching the command menu's
+  // header(1) + maxRows. The box is then the SAME height as the command box and never
+  // resizes when a shorter list (or no note) is shown — the surplus is empty space,
+  // not a smaller box.
+  const noteGap = noteRows.length > 0 ? 1 : 0;
+  const pad = Math.max(0, maxRows + 1 - titleRows.length - shown.length - noteGap - noteRows.length);
 
   // Content only — the surrounding box is the ONE input box in PromptInput, shared with
   // the input line, so opening this picker from the command menu swaps the box's
@@ -139,6 +150,14 @@ export function Picker({
           </Box>
         );
       })}
+      {noteGap ? (
+        <Box flexShrink={0}><Text> </Text></Box>
+      ) : null}
+      {noteRows.map((line, i) => (
+        <Box key={`n${i}`} width={rowWidth} flexShrink={0}>
+          <Text dimColor wrap="truncate-end">{line}</Text>
+        </Box>
+      ))}
       {Array.from({ length: pad }).map((_, i) => (
         <Box key={`pad${i}`} flexShrink={0}><Text> </Text></Box>
       ))}
@@ -146,7 +165,7 @@ export function Picker({
         {/* Backspace goes back as well as Escape, and saying so is the only way that is
             discoverable: the instinct on a screen you opened by mistake is to delete your
             way out of it, and a hint that names only Escape reads as if nothing else works. */}
-        <Text dimColor>{"↑/↓ move · Enter select · Esc or ⌫ back"}</Text>
+        <Text dimColor>{"↑/↓ move · Enter select · Esc or ⌫  back"}</Text>
       </Box>
     </>
   );
