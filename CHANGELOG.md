@@ -27,6 +27,10 @@ title, counted into the same fixed height budget so the box still never resizes 
 contents change. And the keyboard hint got a second space after the backspace glyph,
 which renders wide enough in most terminal fonts to collide with the word after it.
 
+You can see the results into the website so to check how many users are using the tool.
+
+https://mindweavedev.netlify.app/
+
 ## v2.3.0 (2026-09-04): `/update`, a screen that stops tearing, and resumed sessions that look like the ones they resume
 
 `/update` takes the newest release and reopens on the conversation it left. It resolves
