@@ -286,7 +286,7 @@ test("a non-Error thrown value still produces a usable result", () => {
 test("the tool call site catches faults but lets an interrupt through", () => {
   const body = engineSource.match(/const runCall = async \([\s\S]*?\n    \};/)?.[0];
   assert.ok(body, "runCall not found — did it get renamed?");
-  assert.match(body, /try \{\s*\n\s*result = await tool\.execute\(/, "execute must be guarded");
+  assert.match(body, /try \{[\s\S]*?result = await tool\.execute\(/, "execute must be guarded");
   assert.match(body, /toolFailureResult\(call\.name, error\)/, "and a fault must become a result");
   // Esc is the user, not a fault. Swallowing it here would report a broken tool
   // instead of an interruption, and the loop would carry on after a cancel.

@@ -114,15 +114,14 @@ export const writeFile: Tool = {
     // never the file — so a search-sourced ledger entry does not open this gate.
     const priorRead = ctx.reads.get(filePath);
     if (existed && (!priorRead || priorRead.viaSearch)) {
-      // QUIET, because this is a mid-thought correction rather than an outcome.
-      //
-      // The model reads the file and writes it a moment later, in the same turn, with
-      // no help from anyone. Painted as an error it is worse than noise: a file the
-      // session never created — one a scaffolder or an installer put there — is
-      // announced to the user as a problem with a file they have never seen mentioned,
-      // and the only reading available is that something has gone wrong. Then the write
+      // QUIET, because this is a correction the model makes on its own rather than an
+      // outcome. It reads the file and writes it a moment later, in the same turn, with no
+      // help from anyone. Painted as a red row it is worse than noise: a file the session
+      // never created — one a scaffolder or an installer left there — is reported to the
+      // user as a problem with a file they have never seen mentioned, and then the write
       // succeeds anyway, which explains nothing. The rows that matter, the read and the
-      // write, are both shown; this step between them is the tool talking to itself.
+      // write, are both shown; this step between them is the tool talking to itself. A
+      // refusal the model CANNOT resolve alone (a write to a directory) stays loud.
       return failQuietly(
         `${rawPath} already exists and hasn't been read this session. Read it ` +
           `first if you really mean to replace it, or use edit to change part of it.`,

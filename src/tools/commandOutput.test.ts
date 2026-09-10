@@ -176,14 +176,30 @@ test("a command that prints far more than a pipe buffer still finishes", async (
 test("the output file is cleaned up once the command has been read", async () => {
   // These live in the temp directory and a session can run hundreds of commands. The
   // startup sweep is the backstop for a crash, not the plan.
+  //
+  // Observed by set difference, not by a raw count, and settled by polling. Two reasons,
+  // both of which turned this into a CI-only failure once. The removal is fire-and-forget
+  // (removeOutputFile does an un-awaited fs.rm), so the file can still be on disk the
+  // instant execute() returns; and the temp directory is shared with every other test
+  // running under --test-concurrency, whose own mindweave-out- files inflate a plain
+  // count. So: which files appeared during THIS run, and did they all go away. This run's
+  // file is deleted by runCommand; a sibling's transient file is deleted by its own
+  // runCommand; only a genuine leak stays.
   const { runCommand } = await import("./runCommand.js");
   const { promises: nodeFs } = await import("node:fs");
   const { tmpdir } = await import("node:os");
-  const before = (await nodeFs.readdir(tmpdir())).filter((f) => f.startsWith("mindweave-out-")).length;
+  const listOut = async () =>
+    new Set((await nodeFs.readdir(tmpdir())).filter((f) => f.startsWith("mindweave-out-")));
+  const before = await listOut();
   const ctx = { cwd: process.cwd(), reads: new Map(), todos: [] } as unknown as import("./types.js").ToolContext;
   await runCommand.execute({ command: process.platform === "win32" ? "Write-Output hi" : "echo hi" }, ctx);
-  const after = (await nodeFs.readdir(tmpdir())).filter((f) => f.startsWith("mindweave-out-")).length;
-  assert.ok(after <= before, `output files accumulated: ${before} before, ${after} after`);
+  let leaked: string[] = [];
+  for (let i = 0; i < 100; i++) {
+    leaked = [...(await listOut())].filter((f) => !before.has(f));
+    if (leaked.length === 0) break;
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  assert.equal(leaked.length, 0, `output file was not cleaned up: ${leaked.join(", ")}`);
 });
 
 test("stdout and stderr land in ONE file, interleaved as written", async () => {

@@ -69,13 +69,18 @@ test("a missing directory is real news and stays visible", async () => {
   assert.notEqual(r.quiet, true, "a missing directory was hidden from the user");
 });
 
-test("the read-before-overwrite gate stays visible", async () => {
-  // A protection firing is news. The model can resolve it (by reading first), but the
-  // user should see that an overwrite was stopped.
+test("the read-before-overwrite gate is quiet, and the model still gets the reason", async () => {
+  // The line drawn in this file is not "refusal vs mistake", it is "can the model fix it
+  // alone". This one it can: it reads the file and writes it again a moment later, in the
+  // same turn, with no user involvement. So the row is dropped while the model still gets
+  // the full reason and the file is left untouched. The refusals the user must act on —
+  // a missing directory above, a write to a directory below — stay loud. See the pair in
+  // tools.test.ts that draws the same line from the write side.
   const ctx = freshCtx();
   await fs.writeFile(join(ctx.cwd, "exists.ts"), "original\n");
   const r = await writeFile.execute({ path: "exists.ts", content: "replaced" }, ctx);
-  assert.equal(r.isError, true);
-  assert.notEqual(r.quiet, true, "a blocked overwrite was hidden from the user");
-  assert.equal(await fs.readFile(join(ctx.cwd, "exists.ts"), "utf8"), "original\n");
+  assert.equal(r.isError, true, "still a failure for the model");
+  assert.equal(r.quiet, true, "a self-correcting refusal must not paint a row the user cannot act on");
+  assert.match(r.output, /hasn't been read this session/, "the model must still be told why");
+  assert.equal(await fs.readFile(join(ctx.cwd, "exists.ts"), "utf8"), "original\n", "the file is untouched");
 });
