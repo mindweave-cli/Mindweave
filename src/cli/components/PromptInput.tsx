@@ -14,11 +14,14 @@
  * above it. Editing keys: ←/→, Ctrl+A/E (home/end), Ctrl+U (kill line),
  * Backspace, and paste (inserted at the cursor).
  */
-import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { Box, Text, useInput } from "ink";
-import { inputView } from "../inputView.js";
+import { useEffect, useLayoutEffect, useReducer, useRef, useState, type ReactNode } from "react";
+import { Box, Text, measureElement, useCursor, useInput, type DOMElement } from "ink";
+import { clickToOffset, inputView } from "../inputView.js";
+import { latestScreen } from "../framebuffer/overlay.js";
 import { feedPasteChunk, initPasteState, type PasteState } from "../pasteAssembler.js";
 import { stripMouse } from "../mouse.js";
+import { killToLineEnd, wordEnd, wordStart } from "../wordEdit.js";
+import { declareCaret } from "../caretPark.js";
 
 /** One autocomplete entry. */
 export interface Completion {
@@ -64,9 +67,21 @@ interface InputState {
   histIdx: number | null; // null = editing a fresh draft (not browsing history)
   selected: number; // highlighted suggestion in the menu
   draft: string; // the in-progress line, stashed while browsing history
+  /** Text the user dragged over, as offsets into `value`. Backspace deletes it and typing
+   *  replaces it, which is what "selected" means everywhere else. Null when nothing is
+   *  selected, which is nearly always. */
+  range: { from: number; to: number } | null;
 }
 
-const INITIAL: InputState = { value: "", cursor: 0, histIdx: null, selected: 0, draft: "" };
+const INITIAL: InputState = { value: "", cursor: 0, histIdx: null, selected: 0, draft: "", range: null };
+
+/** The selected span as a safe, ordered pair inside the buffer, or null if there is none. */
+function span(s: InputState): { from: number; to: number } | null {
+  if (!s.range) return null;
+  const from = Math.max(0, Math.min(s.range.from, s.value.length));
+  const to = Math.max(0, Math.min(s.range.to, s.value.length));
+  return from === to ? null : { from: Math.min(from, to), to: Math.max(from, to) };
+}
 
 type Action =
   | { t: "insert"; text: string } // a keypress or pasted chunk at the cursor
@@ -76,6 +91,13 @@ type Action =
   | { t: "home" }
   | { t: "end" }
   | { t: "killLine" } // Ctrl+U — delete from start to cursor
+  | { t: "killWordBack" } // Ctrl+W / Alt+Backspace: delete the chunk behind the cursor
+  | { t: "killWordForward" } // Ctrl+Delete: delete the chunk ahead of it
+  | { t: "killToEnd" } // Ctrl+K: delete the rest of the line
+  | { t: "wordLeft" } // Ctrl+Left: move a chunk left
+  | { t: "wordRight" } // Ctrl+Right: move a chunk right
+  | { t: "moveTo"; offset: number } // a mouse click landed somewhere in the text
+  | { t: "selectRange"; from: number; to: number } // a drag covered part of the text
   | { t: "newline" } // Shift/Meta+Enter
   | { t: "splice"; start: number; end: number; text: string } // replace a range (path completion)
   | { t: "selUp" }
@@ -85,34 +107,77 @@ type Action =
   | { t: "reset" };
 
 function reduce(s: InputState, a: Action): InputState {
+  // Every action but the two that manage it drops the selection. A selection is a thing
+  // you are about to act on, not a mode to be left lying around: once the cursor has moved
+  // or the text has changed, a range recorded against the old text means nothing.
+  const clear = a.t === "selectRange" ? s : { ...s, range: null };
+
   switch (a.t) {
-    case "insert":
-      // Typing leaves history-browsing and resets the suggestion highlight.
+    case "insert": {
+      // Typing over a selection replaces it, which is what selecting text is for.
+      const sel = span(s);
+      const from = sel ? sel.from : s.cursor;
+      const to = sel ? sel.to : s.cursor;
       return {
-        ...s,
-        value: s.value.slice(0, s.cursor) + a.text + s.value.slice(s.cursor),
-        cursor: s.cursor + a.text.length,
+        ...clear,
+        value: s.value.slice(0, from) + a.text + s.value.slice(to),
+        cursor: from + a.text.length,
         histIdx: null,
         selected: 0,
       };
-    case "backspace":
-      if (s.cursor === 0) return s;
+    }
+    case "backspace": {
+      // With a selection, ONE press takes the whole of it rather than one character.
+      const sel = span(s);
+      if (sel) {
+        return {
+          ...clear,
+          value: s.value.slice(0, sel.from) + s.value.slice(sel.to),
+          cursor: sel.from,
+          selected: 0,
+        };
+      }
+      if (s.cursor === 0) return clear;
       return {
-        ...s,
+        ...clear,
         value: s.value.slice(0, s.cursor - 1) + s.value.slice(s.cursor),
         cursor: s.cursor - 1,
         selected: 0,
       };
+    }
+    case "selectRange":
+      return { ...s, range: { from: a.from, to: a.to } };
     case "left":
-      return { ...s, cursor: Math.max(0, s.cursor - 1) };
+      return { ...clear, cursor: Math.max(0, s.cursor - 1) };
     case "right":
-      return { ...s, cursor: Math.min(s.value.length, s.cursor + 1) };
+      return { ...clear, cursor: Math.min(s.value.length, s.cursor + 1) };
     case "home":
-      return { ...s, cursor: 0 };
+      return { ...clear, cursor: 0 };
     case "end":
-      return { ...s, cursor: s.value.length };
+      return { ...clear, cursor: s.value.length };
     case "killLine":
-      return { ...s, value: s.value.slice(s.cursor), cursor: 0 };
+      return { ...clear, value: s.value.slice(s.cursor), cursor: 0 };
+    case "killWordBack": {
+      const start = wordStart(s.value, s.cursor);
+      if (start === s.cursor) return s;
+      return { ...clear, value: s.value.slice(0, start) + s.value.slice(s.cursor), cursor: start, selected: 0 };
+    }
+    case "killWordForward": {
+      const end = wordEnd(s.value, s.cursor);
+      if (end === s.cursor) return s;
+      return { ...clear, value: s.value.slice(0, s.cursor) + s.value.slice(end), selected: 0 };
+    }
+    case "killToEnd": {
+      const next = killToLineEnd(s.value, s.cursor);
+      if (next.value === s.value) return s;
+      return { ...clear, value: next.value, cursor: next.cursor, selected: 0 };
+    }
+    case "wordLeft":
+      return { ...clear, cursor: wordStart(s.value, s.cursor) };
+    case "wordRight":
+      return { ...clear, cursor: wordEnd(s.value, s.cursor) };
+    case "moveTo":
+      return { ...clear, cursor: Math.max(0, Math.min(s.value.length, a.offset)) };
     case "newline":
       return {
         ...s,
@@ -121,12 +186,12 @@ function reduce(s: InputState, a: Action): InputState {
       };
     case "splice": {
       const value = s.value.slice(0, a.start) + a.text + s.value.slice(a.end);
-      return { ...s, value, cursor: a.start + a.text.length, selected: 0 };
+      return { ...clear, value, cursor: a.start + a.text.length, selected: 0 };
     }
     case "selUp":
-      return { ...s, selected: Math.max(0, s.selected - 1) };
+      return { ...clear, selected: Math.max(0, s.selected - 1) };
     case "selDown":
-      return { ...s, selected: Math.min(a.max, s.selected + 1) };
+      return { ...clear, selected: Math.min(a.max, s.selected + 1) };
     case "histReplace":
       return {
         ...s,
@@ -139,7 +204,7 @@ function reduce(s: InputState, a: Action): InputState {
       // Unlike histReplace this keeps NO history position and no draft: the text
       // came from the queue, not from history, so ↑ afterwards should walk history
       // from the newest again rather than resuming a walk the user never started.
-      return { ...s, value: a.value, cursor: Math.min(a.value.length, a.cursor), histIdx: null, selected: 0 };
+      return { ...clear, value: a.value, cursor: Math.min(a.value.length, a.cursor), histIdx: null, selected: 0 };
     case "reset":
       return INITIAL;
   }
@@ -163,6 +228,19 @@ interface PromptInputProps {
   /** Register a large multi-line paste; returns the placeholder chip to insert in
    *  its place (the App restores the full text when the message is sent). */
   onLargePaste?: (content: string) => string;
+  /** Register any file paths a drag-and-drop just delivered; returns the text with each
+   *  path replaced by a short handle, so the buffer holds `mwimg1` rather than sixty
+   *  characters of path. The App puts the real paths back when the message is sent. */
+  onDroppedPaths?: (content: string) => string;
+  /** Hand the App a way to place the caret from a mouse click. Only this component knows
+   *  what its rows currently hold, which is what a click has to be resolved against. */
+  registerCaretClick?: (place: ((x: number, y: number) => void) | null) => void;
+  /** Hand the App a way to offer it a dragged range. Returns true when both ends landed
+   *  in the input, which tells the App the selection is editable text rather than
+   *  something dragged out of the transcript. */
+  registerTextSelect?: (
+    select: ((a: { x: number; y: number }, b: { x: number; y: number }) => boolean) | null,
+  ) => void;
   /** How many command-palette rows App.tsx has actually verified there's room
    *  for — computed from the real frame height, not a guess. Showing more than
    *  this can make the footer taller than the screen, which corrupts the whole
@@ -178,6 +256,15 @@ interface PromptInputProps {
    *  text and where to put the cursor, or undefined when nothing is queued — that
    *  distinction matters: on undefined ↑ must fall through to history, and Esc must
    *  fall through to the App's interrupt. */
+  /** Draw the caret rather than parking the terminal cursor on it — the inline shell,
+   *  which does not own the screen. See Field. */
+  placeCursor?: boolean;
+  /** Put the command menu ABOVE the input, without its border or title. The inline
+   *  shell, where a taller region scrolls the terminal and every row costs one. */
+  menuAbove?: boolean;
+  /** Changes whenever something is committed to the terminal's scrollback. Releases the
+   *  rows held open after the palette closes — see `holdPad` below. */
+  settleKey?: number;
   onQueuePop?: (
     input: string,
     cursor: number,
@@ -213,14 +300,22 @@ export function PromptInput({
   completions = [],
   pathComplete,
   onLargePaste,
+  onDroppedPaths,
+  registerCaretClick,
+  registerTextSelect,
   maxMenuRows = DEFAULT_MAX_SUGGESTIONS,
   onMenuChange,
+  placeCursor = false,
+  menuAbove = false,
+  settleKey = 0,
   onQueuePop,
   maxInputRows = DEFAULT_MAX_INPUT_ROWS,
   overlay,
   opening = false,
 }: PromptInputProps) {
   const [state, dispatch] = useReducer(reduce, INITIAL);
+  // Mirrors what the click handler needs, refreshed each render (see registerCaretClick).
+  const clickCtx = useRef({ value: "", cursor: 0, fieldWidth: 0, maxRows: 1 });
   const { value, cursor, histIdx, selected, draft } = state;
 
   // The two autocomplete sources. Command menu: a single `/token` (no space) at the
@@ -295,10 +390,30 @@ export function PromptInput({
   const pasteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Insert an assembled paste — as a `[Pasted text …]` chip when it's big enough to
   // flood the box, otherwise inline.
+  /**
+   * The one way text enters the buffer, so a dropped file path is shortened to its handle
+   * wherever it came in.
+   *
+   * That matters because a drop does NOT reliably arrive as a paste. Ink consumes the
+   * bracketed-paste markers itself and hands the content over as one ordinary input
+   * event, so whether a dropped path reaches the paste branch below or this one comes
+   * down to whether it happened to be long enough to look like a paste. Shortening at
+   * the single point every insert passes through makes that distinction irrelevant.
+   *
+   * A lone keystroke is never a path and typing is the hot path here, so anything one
+   * character wide skips the scan entirely.
+   */
+  function insertText(text: string) {
+    dispatch({ t: "insert", text: onDroppedPaths && text.length > 1 ? onDroppedPaths(text) : text });
+  }
   function emitPaste(text: string) {
     if (!text) return;
     const big = text.split("\n").length >= PASTE_MIN_LINES || text.length >= PASTE_MIN_CHARS;
-    dispatch({ t: "insert", text: onLargePaste && big ? onLargePaste(text) : text });
+    if (onLargePaste && big) {
+      dispatch({ t: "insert", text: onLargePaste(text) });
+      return;
+    }
+    insertText(text);
   }
   function flushPaste() {
     pasteTimer.current = null;
@@ -387,6 +502,35 @@ export function PromptInput({
         return;
       }
 
+      // Chunk-sized editing. Every one of these has to be tested BEFORE the plain
+      // backspace and arrow handlers below, which claim the same physical keys and would
+      // otherwise swallow the chord one character at a time.
+      //
+      // Ctrl+Backspace is deliberately absent. The terminal sends it as the same byte as
+      // a bare Backspace, so there is nothing to tell the two apart by: binding it would
+      // either do nothing or change what plain Backspace does. Ctrl+W and Alt+Backspace
+      // are the chords that survive the wire, and both are bound here.
+      if ((key.ctrl && input === "w") || (key.meta && key.backspace)) {
+        dispatch({ t: "killWordBack" });
+        return;
+      }
+      if (key.ctrl && key.delete) {
+        dispatch({ t: "killWordForward" });
+        return;
+      }
+      if (key.ctrl && input === "k") {
+        dispatch({ t: "killToEnd" });
+        return;
+      }
+      if (key.ctrl && key.leftArrow) {
+        dispatch({ t: "wordLeft" });
+        return;
+      }
+      if (key.ctrl && key.rightArrow) {
+        dispatch({ t: "wordRight" });
+        return;
+      }
+
       if (key.backspace || key.delete) {
         dispatch({ t: "backspace" });
         return;
@@ -439,7 +583,7 @@ export function PromptInput({
           if (pasteTimer.current) clearTimeout(pasteTimer.current);
           pasteTimer.current = setTimeout(flushPaste, PASTE_COALESCE_MS);
         } else {
-          dispatch({ t: "insert", text: input });
+          insertText(input);
         }
       }
 
@@ -483,10 +627,137 @@ export function PromptInput({
   // pad to `maxMenuRows`) land at exactly this height and never resize as you filter or
   // switch, while a richer surface in the same box (the key manager, an approval) may grow
   // past it rather than being clipped.
-  const menuBoxRows = maxMenuRows + 4;
+  // Bordered: a border (2) around a header (1), the item rows, and the hint (1). Bare —
+  // the inline shell — keeps only the rows and the hint, because the two it drops are two
+  // more rows the terminal has to scroll for and neither is part of the choice.
+  const menuBoxRows = maxMenuRows + (menuAbove ? 1 : 4);
+
+  // Clicking in the text moves the caret there.
+  //
+  // What the click has to be resolved against is the CURRENT buffer, so the handler reads
+  // through a ref that this render refreshes rather than closing over a snapshot: a
+  // handler registered once and holding last minute's text would place clicks against
+  // characters that are no longer on screen. The alternative — re-registering on every
+  // keystroke — would put a subscribe and unsubscribe on the typing path for no gain.
+  //
+  // The mapping itself deliberately knows nothing about where the box was laid out; it
+  // finds the row's text in what was actually painted. See clickToOffset.
+  clickCtx.current = { value, cursor, fieldWidth, maxRows: maxInputRows };
+
+  /** Screen cell to buffer offset, against the buffer as it stands right now. */
+  function offsetAt(x: number, y: number): number | null {
+    const screen = latestScreen();
+    if (!screen) return null;
+    const { value: text, cursor: at, fieldWidth: w, maxRows } = clickCtx.current;
+    const view = inputView(text, at, Math.max(1, w - 1), maxRows);
+    const rowAt = (row: number) => (col: number) => {
+      if (row < 0 || row >= screen.height || col < 0 || col >= screen.width) return " ";
+      const ch = screen.chars[screen.index(col, row)]!;
+      // A grid caught mid-repaint holds sentinels that are not codepoints at all, and
+      // String.fromCodePoint throws on them. Reading them as blanks simply means the row
+      // will not match and the click is ignored, which is the right outcome.
+      return ch > 0x10ffff ? " " : String.fromCodePoint(ch);
+    };
+    return clickToOffset(view.rows, view.cursorRow, view.cursorCol, rowAt, screen.width, x, y);
+  }
+
+  useEffect(() => {
+    if (!registerCaretClick) return;
+    registerCaretClick((x, y) => {
+      const offset = offsetAt(x, y);
+      if (offset !== null) dispatch({ t: "moveTo", offset });
+    });
+    return () => registerCaretClick(null);
+  }, [registerCaretClick]);
+
+  useEffect(() => {
+    if (!registerTextSelect) return;
+    registerTextSelect((a, b) => {
+      // Both ends have to land in the input. A drag that started in the transcript is
+      // something to copy, not something to edit, and must not be reported as text.
+      const from = offsetAt(a.x, a.y);
+      const to = offsetAt(b.x, b.y);
+      if (from === null || to === null || from === to) return false;
+      // The far end of a drag is the cell the pointer is ON, and that character is part of
+      // what was highlighted, so the range has to reach past it.
+      const [lo, hi] = from < to ? [from, to + 1] : [to, from + 1];
+      dispatch({ t: "selectRange", from: lo, to: hi });
+      return true;
+    });
+    return () => registerTextSelect(null);
+  }, [registerTextSelect]);
+
+  // The ONE surface for everything: the command menu, every picker, the key manager, an
+  // approval prompt — they all render HERE, in a single box beside the input. It appears
+  // ONLY when something is open, and its height is FIXED at  and NEVER grows:
+  // every surface inside windows or pads its content to fit and scrolls when there is
+  // more, so the box is one steady size no matter what it holds.
+  //
+  // WHERE it sits is the shells' only disagreement about it. Fullscreen puts it beneath
+  // the input, inside a frame of fixed height, so opening it shrinks the chat and closing
+  // it gives those rows back — nothing moves that does not come back. Inline has no frame:
+  // the region simply gets taller, the terminal SCROLLS to fit it, and that scroll is
+  // one-way. Above the input, the prompt stays the last thing on screen through all of it,
+  // and the rows the palette borrowed are given back above rather than below (see
+  // livePad.ts). The chrome goes too, because inline every row costs a scroll.
+  // Blank rows holding the prompt still when the palette closes.
+  //
+  // The palette makes the live region taller than the room below it, so the TERMINAL
+  // scrolls to fit — and a scroll is one-way. Closing it again would let Ink write a
+  // shorter region at the top of where the tall one was, dropping the prompt a dozen rows
+  // up the screen with a gap beneath it. The rows are held instead of given back.
+  //
+  // Computed HERE, beside the box it compensates for, and that placement is the fix for a
+  // bug that survived two attempts elsewhere. Held in App, the height had to arrive
+  // through a callback — a render late — so for exactly one frame the pad and the palette
+  // were BOTH on screen, the region grew by twice what it should have, and the correction
+  // on the next frame left the gap it was supposed to prevent. Same state, same render,
+  // and the two can no longer disagree.
+  //
+  //  changes when something is committed to scrollback. That is when the hold
+  // is released: printing pushes the live region back to the bottom of the screen on its
+  // own, so the rows are no longer holding anything up, and keeping them would leave a
+  // band of blank above the prompt for the rest of the session.
+  const boxRows = overlay || menu || opening ? menuBoxRows + 1 : 0;
+  const holdRef = useRef(0);
+  const heldAt = useRef(settleKey);
+  if (heldAt.current !== settleKey) {
+    heldAt.current = settleKey;
+    holdRef.current = 0;
+  }
+  holdRef.current = Math.max(holdRef.current, boxRows);
+  // Only the inline shell needs this. Fullscreen has a frame of fixed height: the palette
+  // shrinks the chat and closing it gives those rows back, so nothing ever scrolls.
+  const holdPad = menuAbove ? Math.max(0, holdRef.current - boxRows) : 0;
+
+  const menuBox =
+    overlay || menu || opening ? (
+        <Box
+          flexDirection="column"
+          width={width}
+          height={menuBoxRows}
+          flexShrink={0}
+          {...(menuAbove ? { marginBottom: 1 } : { borderStyle: "single" as const, borderColor: "gray", paddingX: 1, marginTop: 1 })}
+          overflow="hidden"
+        >
+          {overlay ? (
+            overlay
+          ) : menu ? (
+            <SuggestionMenu matches={menu.items} selected={sel} width={width} mode={menu.mode} maxRows={maxMenuRows} bare={menuAbove} />
+          ) : (
+            // `opening`: a command that opens a surface here was submitted, and the surface
+            // is a moment away. The frame is held open with an empty body so the transition
+            // from the command list to what it opens is a change of CONTENT inside one box
+            // that never leaves the screen.
+            <Box flexDirection="column" height={menuBoxRows - 2} />
+          )}
+      </Box>
+    ) : null;
 
   return (
     <Box flexDirection="column" width={width} flexShrink={0}>
+      {holdPad > 0 ? <Box flexShrink={0} height={holdPad} /> : null}
+      {menuAbove ? menuBox : null}
       {/* The chat input box — its own box, always separate from the menu below it. */}
       <Box
         flexDirection="column"
@@ -503,41 +774,11 @@ export function PromptInput({
           placeholder={overlay ? "" : placeholder}
           width={fieldWidth}
           maxRows={maxInputRows}
+          placeCursor={placeCursor}
         />
       </Box>
 
-      {/* The ONE box for everything: the command menu, every picker, the key manager, an
-          approval prompt — they all render HERE, inside this single box below the input.
-          It appears ONLY when something is open, growing the footer upward so the input
-          rides up and the box sits beneath it; when it closes the box is gone and the input
-          drops back to the bottom, just as it was. The height is FIXED at `menuBoxRows` and
-          NEVER grows: every surface inside windows/pads its content to fit and scrolls when
-          there is more, so the box is one steady size no matter what it holds. */}
-      {overlay || menu || opening ? (
-        <Box
-          flexDirection="column"
-          width={width}
-          height={menuBoxRows}
-          flexShrink={0}
-          borderStyle="single"
-          borderColor="gray"
-          paddingX={1}
-          marginTop={1}
-          overflow="hidden"
-        >
-          {overlay ? (
-            overlay
-          ) : menu ? (
-            <SuggestionMenu matches={menu.items} selected={sel} width={width} mode={menu.mode} maxRows={maxMenuRows} />
-          ) : (
-            // `opening`: a command that opens a surface here was submitted, and the surface
-            // is a moment away. The frame is held open with an empty body so the transition
-            // from the command list to what it opens is a change of CONTENT inside one box
-            // that never leaves the screen.
-            <Box flexDirection="column" height={menuBoxRows - 2} />
-          )}
-        </Box>
-      ) : null}
+      {menuAbove ? null : menuBox}
     </Box>
   );
 }
@@ -579,12 +820,16 @@ function SuggestionMenu({
   width,
   mode,
   maxRows,
+  bare = false,
 }: {
   matches: Completion[];
   selected: number;
   width: number;
   mode: "command" | "path";
   maxRows: number;
+  /** Drop the title row. The inline shell pays for every row it renders — see the box
+   *  below — and the title is the one line here that says nothing about the choice. */
+  bare?: boolean;
 }) {
   // Window the list so `selected` is always visible (same scheme as Picker).
   const start = Math.min(Math.max(0, selected - (maxRows - 1)), Math.max(0, matches.length - maxRows));
@@ -623,7 +868,7 @@ function SuggestionMenu({
   // with a bare Ink render, same as the chat viewport's rows — see App.tsx).
   return (
     <>
-      {header}
+      {bare ? null : header}
       {shown.map((m, i) => {
         const active = start + i === selected;
         return (
@@ -658,48 +903,6 @@ function SuggestionMenu({
  * the tip vanished and the box looked cut in half. The wrapping and the cursor maths
  * live in inputView.ts, where they are unit-tested.
  */
-/**
- * How long each half of the blink lasts.
- *
- * 530ms is the rate terminals and editors have converged on. It is slow enough to read
- * as a pulse rather than a flicker, and fast enough that the caret is never missing long
- * enough to look lost.
- */
-const BLINK_MS = 530;
-
-/**
- * The text caret: a thin bar that blinks, rather than a solid block that sits still.
- *
- * The block was drawn by inverting the cell, which is the cheapest possible caret and
- * reads as a frozen artefact — a filled square parked in the box whether the tool is
- * waiting for you, thinking, or doing nothing at all. A bar that blinks is the one piece
- * of motion that says an input is LIVE, and it is what makes a terminal prompt feel like
- * talking to something rather than typing into a field.
- *
- * The blink state lives HERE, not in Field or PromptInput. It ticks twice a second
- * forever, and anywhere higher up that would re-render the input's whole subtree — the
- * wrapped rows, the suggestion menu — twice a second for one cell.
- *
- * `under` is the character the caret sits on. A terminal grid has no room between cells,
- * so the caret has to occupy one: it shows the bar on the on-beat and gives the cell back
- * on the off-beat, which keeps a character under mid-line editing readable. At the end of
- * the text, where the caret spends nearly all its time, there is nothing under it and it
- * is simply a blinking bar.
- *
- * `resetKey` restarts the cycle on the on-beat whenever it changes. Without it, typing
- * during an off-beat leaves the caret invisible at the exact moment the user is looking
- * for it, which reads as dropped input.
- */
-function Caret({ under, resetKey }: { under: string; resetKey: string | number }) {
-  const [on, setOn] = useState(true);
-  useEffect(() => {
-    setOn(true);
-    const id = setInterval(() => setOn((v) => !v), BLINK_MS);
-    return () => clearInterval(id);
-  }, [resetKey]);
-  return on ? <Text color="cyan">{"│"}</Text> : <Text>{under || " "}</Text>;
-}
-
 function Field({
   value,
   cursor,
@@ -707,6 +910,7 @@ function Field({
   placeholder,
   width,
   maxRows,
+  placeCursor,
 }: {
   value: string;
   cursor: number;
@@ -714,14 +918,89 @@ function Field({
   placeholder: string;
   width: number;
   maxRows: number;
+  /**
+   * Draw the caret as a cell, instead of relying on the terminal's own cursor being
+   * parked on it.
+   *
+   * True in the inline shell, and it is not a preference there — parking needs an
+   * absolute cursor move, which needs to know where everything is, which is exactly what
+   * the app gives up by not owning the screen. Without this the input has no caret at
+   * all and the real cursor sits wherever Ink's output happened to end, stranded on a
+   * line of its own below the box.
+   *
+   * Inverse rather than a bar, and that is the one honest option: a bar has to live
+   * somewhere, and a grid has no room between two cells, so it would either take a
+   * column (opening a gap between the letters it sits between) or stand on the character
+   * and hide it for half of every blink. Inverse takes no column and the character stays
+   * readable. The terminal's own cursor does better than any of these, which is why the
+   * fullscreen shell parks it — this is what is left when that is not available.
+   */
+  placeCursor: boolean;
 }) {
+  // ---- NO EARLY RETURN ABOVE THIS BLOCK ----
+  // Every hook here runs before the empty-value branch below returns. A hook underneath
+  // an early return runs a different number of times on the two renders either side of
+  // it, which takes the whole tree down; this app has already been bitten by exactly that.
+  const caretRowRef = useRef<DOMElement | null>(null);
+  const caretView = inputView(value, cursor, Math.max(1, width - 1), maxRows);
+  // Declared during RENDER, not from a layout effect.
+  //
+  // Ink writes its frame from resetAfterCommit, which React runs BEFORE layout effects.
+  // A declaration made in useLayoutEffect is therefore read by the NEXT frame, not this
+  // one — the cursor sat one keystroke behind, visibly at the old position for a moment
+  // before catching up. Declaring here happens before the frame is built.
+  //
+  // Only the column is a value; the box is a REF, resolved at paint time when it has been
+  // attached and yoga has measured it. So nothing here has to be current except the
+  // number, which is.
+  declareCaret(active ? { ref: caretRowRef, column: value.length === 0 ? 0 : caretView.cursorCol } : null);
+
+  // ── the inline shell: the same caret, placed by Ink instead of by us ──────
+  //
+  // Fullscreen parks the terminal's own cursor after each frame, because it owns the
+  // screen and knows where every cell is. Inline it owns nothing — but Ink does, and
+  //  is its API for exactly this: hand it a position relative to the live
+  // output and it emits the move and the show on the end of its own frame.
+  //
+  // So the caret is the REAL terminal cursor in both shells. Thin, blinking or not
+  // according to the terminal's own setting, taking no column and hiding no character.
+  // The block that was here before was what every inline terminal app draws when it
+  // gives up on this, and it is worse in all three of those ways.
+  //
+  // The ROW comes from a measurement of the previous frame; the COLUMN is computed
+  // fresh every render. That split is what keeps typing exact: a keystroke moves the
+  // column and nothing else, so the caret is never a frame behind where the character
+  // just went. The row only moves when the layout does — a block landing, a wrap — and
+  // catches up on the frame after, when nobody is mid-keystroke.
+  const { setCursorPosition } = useCursor();
+  const [caretAnchor, setCaretAnchor] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!placeCursor || !caretRowRef.current) return;
+    try {
+      const box = measureElement(caretRowRef.current);
+      // A node that has never been laid out measures as nothing. Anchoring there would
+      // put the cursor at the top-left corner of the output.
+      if (box.width === 0 && box.height === 0) return;
+      setCaretAnchor((a) => (a && a.x === box.x && a.y === box.y ? a : { x: box.x, y: box.y }));
+    } catch {
+      // Unmounted between the render and the measurement.
+    }
+  });
+  if (placeCursor) {
+    const column = value.length === 0 ? 0 : caretView.cursorCol;
+    setCursorPosition(active && caretAnchor ? { x: caretAnchor.x + column, y: caretAnchor.y } : undefined);
+  }
+
+
   if (value.length === 0) {
+    // An empty prompt still has a caret, sitting where the first character will go: at
+    // the START of the placeholder, which is the row the renderer can find on screen.
     return (
       <Box flexShrink={0}>
         <Text bold color="cyan">{"> "}</Text>
-        <Box width={width} overflow="hidden">
+        {/* The caret sits at the start of this box when there is nothing typed yet. */}
+        <Box width={width} overflow="hidden" ref={caretRowRef}>
           <Text wrap="truncate-end">
-            {active ? <Caret under="" resetKey="placeholder" /> : null}
             {placeholder ? <Text dimColor>{placeholder}</Text> : null}
           </Text>
         </Box>
@@ -737,6 +1016,7 @@ function Field({
   // typed — so the box would hide exactly the letter being written, and only once a line
   // was full. The reserved column is never wasted: the caret is always somewhere.
   const view = inputView(value, cursor, Math.max(1, width - 1), maxRows);
+
   return (
     <Box flexDirection="column" flexShrink={0}>
       {view.hiddenAbove > 0 ? (
@@ -747,17 +1027,13 @@ function Field({
           {/* The marker is only on the first row; continuations align under the text
               so a wrapped message reads as one paragraph, not a list. */}
           <Text bold color="cyan">{i === 0 && view.hiddenAbove === 0 ? "> " : "  "}</Text>
-          <Box width={width} overflow="hidden">
+          <Box
+            width={width}
+            overflow="hidden"
+            ref={active && i === view.cursorRow ? caretRowRef : undefined}
+          >
             <Text wrap="truncate-end">
-              {active && i === view.cursorRow ? (
-                <>
-                  {row.text.slice(0, view.cursorCol)}
-                  <Caret under={row.text.slice(view.cursorCol, view.cursorCol + 1)} resetKey={`${cursor}:${value.length}`} />
-                  {row.text.slice(view.cursorCol + 1)}
-                </>
-              ) : (
-                row.text
-              )}
+              {row.text}
             </Text>
           </Box>
         </Box>

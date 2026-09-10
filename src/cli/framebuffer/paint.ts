@@ -87,7 +87,13 @@ function penEscape(from: Pen, screen: Screen, i: number): string {
 function charOf(screen: Screen, i: number): string {
   const c = screen.chars[i]!;
   if (c === WIDE_CONTINUATION) return "";
-  return String.fromCodePoint(c === 0 ? 32 : c);
+  // A control code in a cell is drawn as a blank, never emitted. The parser will not put
+  // one there, and this is the second lock on the same door: a cell holding an ESC, a
+  // backspace or a tab would be written to the terminal as that control, which does not
+  // print — it moves the cursor, or starts eating the bytes after it as an escape
+  // sequence. One bad cell would take the rest of the screen with it.
+  if (c === 0 || c < 0x20 || c === 0x7f) return " ";
+  return String.fromCodePoint(c);
 }
 
 /**

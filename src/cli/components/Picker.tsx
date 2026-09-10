@@ -37,6 +37,23 @@ interface PickerProps {
    *  the same way the title is. */
   note?: string;
   maxNoteRows?: number;
+  /**
+   * Show the HIGHLIGHTED item's full description below the list, wrapped, instead of
+   * truncated on its own row.
+   *
+   * A one-line row can only ever show the first few words of a long description before an
+   * ellipsis, which reads as broken. With this on, the rows carry labels alone and the
+   * selection's description appears in full below — wrapping down the way the rest of the
+   * full-screen shell does — and updates as the highlight moves. Reserves `maxNoteRows`,
+   * so the box stays a fixed height whatever the description's length.
+   */
+  describeSelection?: boolean;
+  /**
+   * Pin each item's description to the RIGHT edge of its row, label filling the rest.
+   * The clean table look for a list whose labels vary wildly in length (session titles);
+   * the default aligned column is better when the labels are uniform. See the row render.
+   */
+  rightAlignDescription?: boolean;
   /** How many list rows may show at once — App computes this from the real frame
    *  height so the bordered box never grows past the screen and tears. Falls back
    *  to a small, always-safe count. */
@@ -73,6 +90,8 @@ export function Picker({
   maxTitleRows = MAX_TITLE_ROWS,
   note,
   maxNoteRows = MAX_NOTE_ROWS,
+  describeSelection = false,
+  rightAlignDescription = false,
   maxRows = MAX_VISIBLE,
 }: PickerProps) {
   // Same window size as the command menu (App clamps maxRows to a safe ceiling), so the
@@ -110,7 +129,12 @@ export function Picker({
   // exists says the same thing and cannot resize anything.
   const counter = items.length > visible ? `  ${sel + 1} of ${items.length}` : "";
   const titleRows = clipRows(title, Math.max(4, rowWidth - counter.length), maxTitleRows);
-  const noteRows = note ? clipRows(note, rowWidth, maxNoteRows) : [];
+  // The note is either the caller's own text, or — with describeSelection — the
+  // highlighted item's full description, wrapped. The two never combine: a picker that
+  // describes its selection has no separate note to show.
+  const selectionNote = describeSelection ? items[sel]?.description ?? "" : "";
+  const noteText = describeSelection ? selectionNote : note ?? "";
+  const noteRows = noteText ? clipRows(noteText, rowWidth, maxNoteRows) : [];
 
   // Blank rows so title + list + note is a fixed count, matching the command menu's
   // header(1) + maxRows. The box is then the SAME height as the command box and never
@@ -136,13 +160,40 @@ export function Picker({
       {shown.map((item, i) => {
         const idx = start + i;
         const activeRow = idx === sel;
+        // Right-aligned metadata: the description is pinned to the row's right edge and
+        // the label takes the rest, truncating if it must. It is the clean table look for
+        // a list whose labels vary wildly in length — session titles run from three
+        // words to a whole sentence, and a left-aligned column then either strands the
+        // short ones far from their metadata or crowds the long ones out of it. The
+        // aligned-column layout below is right when the labels are uniform (provider
+        // names, model tiers); this is right when they are not.
+        if (rightAlignDescription && item.description && !describeSelection) {
+          return (
+            <Box key={idx} width={rowWidth} flexShrink={0}>
+              <Box flexGrow={1} flexShrink={1} overflow="hidden">
+                <Text color={activeRow ? "cyan" : undefined} bold={activeRow} wrap="truncate-end">
+                  {activeRow ? "› " : "  "}
+                  {item.label}
+                </Text>
+              </Box>
+              {/* flexShrink:0 so the metadata keeps its full width and the LABEL shrinks
+                  and truncates instead — otherwise a long label pushed the description
+                  onto a second wrapped line. */}
+              <Box flexShrink={0}>
+                <Text dimColor>{"  " + item.description}</Text>
+              </Box>
+            </Box>
+          );
+        }
         return (
           <Box key={idx} width={rowWidth} flexShrink={0}>
             <Text color={activeRow ? "cyan" : undefined} bold={activeRow}>
               {activeRow ? "› " : "  "}
               {item.label.padEnd(labelWidth)}
             </Text>
-            {item.description ? (
+            {/* The description is shown BELOW the list when describeSelection is set — see
+                the note area — so it is not repeated, truncated, on the row here. */}
+            {item.description && !describeSelection ? (
               <Box width={descWidth}>
                 <Text dimColor wrap="truncate-end">{"  " + item.description}</Text>
               </Box>

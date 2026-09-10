@@ -13,6 +13,7 @@
  * off-by-one lives: a word break silently drops the space it broke on, so the rendered
  * text is shorter than the source it came from.
  */
+import { findTextColumn } from "./wordEdit.js";
 
 /** One rendered row and where it came from in the buffer. */
 export interface InputRow {
@@ -123,4 +124,55 @@ export function inputView(value: string, cursor: number, width: number, maxRows:
     hiddenAbove: first,
     hiddenBelow: all.length - (first + cap),
   };
+}
+
+/**
+ * The buffer offset a click at (clickX, clickY) landed on, or null when the click cannot
+ * be placed with confidence.
+ *
+ * A mouse report gives a terminal row and column; this has to turn that into a position
+ * in the text. The obvious route — work out where the box was laid out and subtract — is
+ * the one thing that must not be done here: the layout is decided by flex at render time,
+ * the box has a marker on its first row and continuations on the rest, and any arithmetic
+ * that duplicates that becomes wrong the day one of them changes. A wrong answer is not a
+ * missing feature, it is a cursor that jumps somewhere the user did not click.
+ *
+ * So it reads the screen instead. `gridRowAt(y)` returns what was actually PAINTED on
+ * row y, and a view row is located by finding its own text there; the difference between
+ * where the text starts and where the click landed is the column, with no assumption
+ * about borders, padding or the prompt marker.
+ *
+ * A neighbouring row is checked as well, because two rows of a message can read the same
+ * and matching the wrong one would place the caret a line away. Anything that does not
+ * resolve returns null and the caller does nothing.
+ */
+export function clickToOffset(
+  rows: InputRow[],
+  cursorRow: number,
+  cursorCol: number,
+  gridRowAt: (y: number) => (x: number) => string,
+  width: number,
+  clickX: number,
+  clickY: number,
+): number | null {
+  // A painted row IS the row: the caret takes no column of its own. It is the TERMINAL
+  // cursor now, parked after the frame (see caretPark.ts), so nothing is inserted into
+  // the text and what was rendered matches the buffer exactly.
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const col = findTextColumn(gridRowAt(clickY), width, row.text);
+    if (col < 0) continue;
+
+    // Confirm with a neighbour: view rows are contiguous on screen, so the row above (or
+    // below, for the first) must be where this match implies it is.
+    if (i > 0) {
+      if (findTextColumn(gridRowAt(clickY - 1), width, rows[i - 1]!.text) < 0) continue;
+    } else if (rows.length > 1) {
+      if (findTextColumn(gridRowAt(clickY + 1), width, rows[1]!.text) < 0) continue;
+    }
+
+    const within = Math.max(0, Math.min(row.text.length, clickX - col));
+    return row.start + within;
+  }
+  return null;
 }

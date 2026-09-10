@@ -12,7 +12,7 @@ import { commandLabel, firstSegment } from "./commandLabel.js";
 test("a pipeline is named by its first command", () => {
   const command =
     "gh run view 33756215434 --repo acme/site --log-failed 2>&1 | Select-String -Pattern 'error' | Select-Object -Last 25";
-  assert.equal(commandLabel(command, 80), "gh run view 33756215434 --repo acme/site --log-failed");
+  assert.equal(commandLabel(command, 80), "gh run view 33756215434 --repo acme/site --log-failed…");
 });
 
 test("a pipe inside quotes is not a pipe", () => {
@@ -23,9 +23,9 @@ test("a pipe inside quotes is not a pipe", () => {
 });
 
 test("chains end the name too", () => {
-  assert.equal(commandLabel("npm run build && npm test", 80), "npm run build");
-  assert.equal(commandLabel("git fetch; git status", 80), "git fetch");
-  assert.equal(commandLabel("mkdir out || true", 80), "mkdir out");
+  assert.equal(commandLabel("npm run build && npm test", 80), "npm run build…");
+  assert.equal(commandLabel("git fetch; git status", 80), "git fetch…");
+  assert.equal(commandLabel("mkdir out || true", 80), "mkdir out…");
 });
 
 test("trailing redirection is plumbing, not the command", () => {
@@ -76,4 +76,30 @@ test("a single unbroken token still fits the budget", () => {
 test("a command that is nothing but a pipeline still gets a name", () => {
   // Nothing before the separator, so falling back to the whole line beats naming it "".
   assert.notEqual(commandLabel("| Select-Object -Last 5", 40), "");
+});
+
+// ── a chain is another COMMAND, and the row must not pretend otherwise ─────
+//
+// The reported shape: `cd app; npm install` rendered as `Run(cd app)`, so a row
+// naming a directory change sat above a screenful of npm install output. Nothing
+// on screen said the label was partial, which left "the tool ran something other
+// than what it says" as the only available reading.
+
+test("but plumbing on the SAME command is not 'more command'", () => {
+  // `2>&1` and `> out.txt` say nothing about what ran, and the name is complete
+  // without them. Marking these would put an ellipsis on half the rows in a session.
+  assert.equal(commandLabel("npm test 2>&1", 80), "npm test");
+  assert.equal(commandLabel("tsc --noEmit > build.log", 80), "tsc --noEmit");
+});
+
+test("a trailing separator with nothing after it is not a chain", () => {
+  assert.equal(commandLabel("npm test;", 80), "npm test");
+  assert.equal(commandLabel("npm test ;  ", 80), "npm test");
+});
+
+test("a chained command too long for the row still ends in exactly one ellipsis", () => {
+  const label = commandLabel("npm run build --workspace=packages/frontend; npm test", 20);
+  assert.ok(label.length <= 20, `${label.length} columns in a 20-column budget`);
+  assert.match(label, /…$/);
+  assert.doesNotMatch(label, /……/);
 });

@@ -24,6 +24,7 @@ import type { ToolGroupItem } from "./transcript.js";
 // never mutate into a DIFFERENT word or grow a body.
 export const ACTIVE_FORM: Record<string, string> = {
   Read: "Reading",
+  Viewed: "Viewing",
   Update: "Updating",
   Write: "Writing",
   Search: "Searching",

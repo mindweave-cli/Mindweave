@@ -150,3 +150,55 @@ test("CodeChassis with LSP returns resolved confidence", { timeout: 45_000 }, as
     await ch.dispose();
   }
 });
+
+// ── Idle servers are reaped to give their memory back ───────────────────────
+//
+// A pyright or tsserver is spawned on the first symbol query and, without a reaper, lives
+// for the rest of the session holding its whole index — hundreds of megabytes each. Most
+// of a session is not symbol lookups, so that memory sat unused. An idle server is now
+// shut down; a later query respawns it, the same cold cost the first query already paid.
+
+test("an idle language server is shut down, and a later query brings it back", { timeout: 60_000 }, async () => {
+  const prev = process.env["MINDWEAVE_LSP_IDLE_MS"];
+  process.env["MINDWEAVE_LSP_IDLE_MS"] = "0"; // anything since the last query counts as idle
+  const dir = await tsProject();
+  const lsp = new LspManager(dir);
+  try {
+    lsp.noteFile(join(dir, "src/util.ts"));
+    await lsp.symbols("helper"); // forces a real launch
+
+    const pids = lsp.pids();
+    assert.ok(pids.length > 0 && pids.every(alive), "a server should be running after the first query");
+
+    // Idle threshold 0 → the reaper shuts it down on the spot.
+    lsp.reapIfIdle();
+    await new Promise((r) => setTimeout(r, 500));
+    assert.deepEqual(pids.filter(alive), [], "the idle server was not shut down");
+    assert.deepEqual(lsp.pids(), [], "the manager still tracks a server it has killed");
+
+    // The manager is NOT disposed — a fresh query relaunches and still answers.
+    const syms = await lsp.symbols("helper");
+    assert.ok(syms.length >= 1, "the server did not come back for a query after idle shutdown");
+    assert.ok(lsp.pids().length > 0, "a fresh server should be running again");
+  } finally {
+    process.env["MINDWEAVE_LSP_IDLE_MS"] = prev;
+    await lsp.dispose();
+  }
+});
+
+test("a server in active use is NOT reaped", { timeout: 60_000 }, async () => {
+  // The threshold defaults to two minutes; a query just happened, so nothing is idle.
+  const dir = await tsProject();
+  const lsp = new LspManager(dir);
+  try {
+    lsp.noteFile(join(dir, "src/util.ts"));
+    await lsp.symbols("helper");
+    const pids = lsp.pids();
+    assert.ok(pids.length > 0);
+
+    lsp.reapIfIdle(); // default 120s idle; the query was moments ago
+    assert.ok(pids.every(alive), "a server was reaped while still in active use");
+  } finally {
+    await lsp.dispose();
+  }
+});

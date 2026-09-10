@@ -32,7 +32,7 @@ Questions are welcome at zallinimann@gmail.com.
 Mindweave 1 is out, tagged `mindweave-1`. It is on npm, and the website is up. Install
 with the steps below.
 
-What landed in it is in the [changelog](CHANGELOG.md): thirteen model providers, a
+What landed in it is in the [changelog](CHANGELOG.md): fourteen model providers, a
 rebuilt terminal interface, reworked prompt caching and token accounting, project notes
 the agent maintains across sessions, and a long list of things that were quietly wrong.
 
@@ -40,8 +40,6 @@ the agent maintains across sessions, and a long list of things that were quietly
 
 Requires **Windows** and **Node.js 20+**. macOS and Linux are not supported yet, and the
 reason is written down in [KNOWN-ISSUES.md](KNOWN-ISSUES.md) rather than glossed over.
-
-Big features coming out soon!
 
 ```bash
 npm install -g mindweave
@@ -71,46 +69,31 @@ else is configured inside a session.
 
 ## What it can do
 
-**14 providers, 53 models, one key.** DeepSeek, Anthropic, OpenAI, Gemini, xAI, Mistral,
-Groq, Cerebras, Qwen, Kimi, GLM, Meta, MiniMax and Tencent. Each family gets its own driver so it
-runs at its best without bloating the shared core, and only the driver you are using is
-ever loaded. Switch with `/provider` and `/model`; the choice is remembered per project.
-Full list: [PROVIDERS.md](src/drivers/PROVIDERS.md).
+Short version, one line each. The depth is in the linked pages.
 
-**Deterministic code intelligence.** A background lane indexes your repo with tree-sitter
-and language servers, costing no tokens, so the agent understands your codebase rather
-than just the file you opened.
-
-**Real tools.** File read and edit, multi-file edits, ripgrep search, a shell with
-background jobs, and sub-agents. Every edit comes back with the language server's own
-errors for that file, so a mistake surfaces where it was made. Read-before-edit is enforced, and
-`/undo` is a real net rather than a hope.
-
-**Session memory.** Long sessions stay sharp through automatic compaction plus a running
-state summary that survives it. The agent can read its own earlier sessions in a project,
-so "what did we do last time" gets a real answer instead of a guess.
-
-**MCP servers.** Connect external tool servers (GitHub, Postgres, your own) with
-`/mcp add` or by asking in plain words. They start with your session, and their output is
-treated as untrusted by default. Full guide: [docs/MCP.md](docs/MCP.md).
-
-**Images and web search.** Drag a screenshot into the prompt or write `@shot.png`; a model
-that can see gets the image, and one that cannot says so plainly. Ask about a recent
-release and the agent looks it up instead of guessing, through your own provider, with no
-second account to manage.
-
-**Seeing your app.** It can capture one window and look at it, which is how you tell an
-app that started from an app that works. One window, never the whole screen, and it asks
-first, naming the window it is about to capture.
-
-**Project notes that carry across sessions.** MINDWEAVE.md is loaded every session and
-maintained by the agent, so a new conversation continues rather than starts over. Split
-it with `@./path` imports, keep machine-wide notes in `~/.mindweave/MINDWEAVE.md`, and
-put a MINDWEAVE.md inside a folder for conventions that are true only there — that one
-is loaded only while the agent works in it. `/init` writes the first one.
-
-**Per-project governor.** Give a project standing rules, reusable skills, and forbidden
-paths or commands the agent has to respect.
+- **14 providers, 54 models, one key** — DeepSeek, Anthropic, OpenAI, Gemini, xAI,
+  Mistral, Groq, Cerebras, Qwen, Kimi, GLM, Meta, MiniMax, Tencent. Only the driver you
+  use is loaded. Switch with `/provider` and `/model`; remembered per project.
+  [PROVIDERS.md](src/drivers/PROVIDERS.md)
+- **Real tools** — read and edit files, multi-file edits, ripgrep search, a shell with
+  background jobs, and sub-agents. Every edit comes back with the language server's own
+  errors for that file. Read-before-edit is enforced, and `/undo` is a real net.
+- **Deterministic code intelligence** — a background lane indexes your repo with
+  tree-sitter and language servers, costing no tokens, so the agent understands the
+  codebase, not just the open file.
+- **Session memory** — automatic compaction plus a running state summary that survives
+  it, and the agent can read its own earlier sessions in a project.
+- **Project notes** — MINDWEAVE.md is loaded every session and maintained by the agent;
+  `@./path` imports split it, a per-folder one applies only there, and `~/.mindweave/`
+  holds machine-wide notes. `/init` writes the first one.
+- **MCP servers** — connect external tool servers with `/mcp add` or in plain words;
+  their output is untrusted by default. [docs/MCP.md](docs/MCP.md)
+- **Images and web search** — drop a screenshot or write `@shot.png`; ask about a recent
+  release and it looks it up, through your own provider.
+- **Seeing your app** — it can capture one named window (never the whole screen, and it
+  asks first) to tell an app that started from one that works.
+- **Per-project governor** — standing rules, reusable skills, and forbidden paths or
+  commands the agent must respect.
 
 ## Using it
 

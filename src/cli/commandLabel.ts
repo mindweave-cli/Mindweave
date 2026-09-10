@@ -66,12 +66,28 @@ const REDIRECTION = /\s*(?:\d?>>?&?\d?|\d?<)\s*\S*\s*$/;
  */
 export function commandLabel(command: string, budget: number): string {
   const room = Math.max(4, budget);
-  let label = firstSegment(command.trim()).trim();
+  const whole = command.trim();
+  const first = firstSegment(whole);
+  // Did dropping the tail lose a further COMMAND, rather than plumbing?
+  //
+  // This matters more than it looks. `cd app; npm install` was named `cd app`, with
+  // nothing to say the label was partial — so a row that reported a directory change
+  // sat above a screenful of npm output, and the only reading available was that the
+  // tool had run something other than what it said. A trailing separator with nothing
+  // after it is not that, so the remainder is checked for content rather than the
+  // separator merely being present.
+  const chained = whole.slice(first.length).replace(/^\s*(?:&&|\|\||[;|])+/, "").trim() !== "";
+  let label = first.trim();
   for (let previous = ""; previous !== label; ) {
     previous = label;
     label = label.replace(REDIRECTION, "").trim();
   }
-  if (label === "") label = command.trim();
+  if (label === "") label = whole;
+  // The ellipsis is the same mark a length cut uses, and it means the same thing here:
+  // the row is a NAME for the command, and there is more of it than the name shows.
+  // Redirection is deliberately not marked — `2>&1` is plumbing on this same command,
+  // not another one, so the name is complete without it.
+  if (chained) return label.length + 1 <= room ? `${label}…` : `${label.slice(0, Math.max(1, room - 1))}…`;
   if (label.length <= room) return label;
 
   // Cut at a space, so the last thing shown is a whole token rather than half a flag —

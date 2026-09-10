@@ -31,6 +31,28 @@ const REQUEST_TIMEOUT = 10_000;
 const SHUTDOWN_TIMEOUT = 2_000;
 
 /**
+ * How long a language server may sit idle before it is shut down to reclaim its memory.
+ *
+ * A pyright or tsserver is spawned on the first symbol query and, without this, lived for
+ * the rest of the session holding its whole index — hundreds of megabytes each, resident
+ * the entire time whether or not another query ever came. Most of a session is reading,
+ * writing and running commands, not looking symbols up, so that memory sat unused far
+ * more often than it was needed. A server is lazy (see `session`), so shutting an idle
+ * one down costs only a cold respawn the next time code intelligence is actually asked
+ * for — the same cost the first query already pays.
+ *
+ * Two minutes because a respawn re-indexes the project, which is the expensive part: long
+ * enough that a burst of related lookups never pays it twice, short enough that the memory
+ * is back soon after the model moves on to other work. The check runs on a coarser timer
+ * so an idle session is not woken four times a minute to look at a clock.
+ */
+function lspIdleMs(): number {
+  const raw = Number(process.env["MINDWEAVE_LSP_IDLE_MS"]);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 120_000;
+}
+const LSP_IDLE_CHECK_MS = 30_000;
+
+/**
  * Ceiling on documents held open in ONE server, across the whole session.
  *
  * `ensureProjectOpen` opens files so `workspace/symbol` has something indexed.
@@ -98,8 +120,47 @@ export class LspManager {
   private diagnosticsByFile = new Map<string, RawDiagnostic[]>();
   /** didChange version counter per file. */
   private versions = new Map<string, number>();
+  /** When a query last touched a server, for the idle shutdown below. */
+  private lastActivity = Date.now();
+  /** The idle-watch timer, unref'd so it never keeps the process alive. */
+  private idleTimer: ReturnType<typeof setInterval> | undefined;
 
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string) {
+    // Watch for idleness from the start. Unref'd, so a session with servers that have
+    // already been shut down (or were never started) does not hold the event loop open.
+    this.idleTimer = setInterval(() => this.reapIfIdle(), LSP_IDLE_CHECK_MS);
+    this.idleTimer.unref?.();
+  }
+
+  /**
+   * Shut idle servers down, keeping the manager usable.
+   *
+   * Everything a killed server held — its `opened` documents, its index — dies with it,
+   * so this only clears the manager's own handles: the sessions map (so the next query
+   * relaunches), the process list, and the diagnostics/versions those servers produced,
+   * which a fresh server will republish from scratch. `languages` and `files` stay: they
+   * are what a respawn is rebuilt from, and they cost nothing.
+   *
+   * Public so the idle threshold can be driven from a test without waiting on the timer;
+   * it is safe to call at any time because it does nothing unless a server is genuinely
+   * idle past the threshold.
+   */
+  reapIfIdle(): void {
+    if (this.disposed || this.procs.length === 0) return;
+    if (Date.now() - this.lastActivity < lspIdleMs()) return;
+    for (const { proc } of this.procs) {
+      try {
+        killTreeSync(proc.pid);
+        proc.kill();
+      } catch {
+        /* already gone */
+      }
+    }
+    this.procs = [];
+    this.sessions.clear();
+    this.diagnosticsByFile.clear();
+    this.versions.clear();
+  }
 
   /** Record that the project contains this file (so we know which servers to
    *  consult, and so we can open the project before a workspace query). */
@@ -304,6 +365,10 @@ export class LspManager {
    */
   dispose(): void {
     this.disposed = true;
+    if (this.idleTimer) {
+      clearInterval(this.idleTimer);
+      this.idleTimer = undefined;
+    }
     for (const { proc } of this.procs) {
       try {
         killTreeSync(proc.pid);
@@ -340,6 +405,8 @@ export class LspManager {
 
   private session(spec: ServerSpec): Promise<Session | null> {
     if (this.disposed) return Promise.resolve(null);
+    // A query, so the idle clock restarts — a server in active use is never reaped.
+    this.lastActivity = Date.now();
     let existing = this.sessions.get(spec.key);
     if (!existing) {
       existing = this.launch(spec).catch(() => null);

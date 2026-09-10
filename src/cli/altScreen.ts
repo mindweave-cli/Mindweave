@@ -17,7 +17,11 @@
  * force-quit — cannot be covered from in here at all. That is what
  * `mindweave --reset-terminal` is for; see `terminalRestore.ts`.
  */
-import { TERMINAL_RESTORE } from "./terminalRestore.js";
+// Imported as a namespace so the call is a property lookup at call time, which is what
+// lets a test observe the restore. A named import is bound at load and cannot be seen.
+import * as nodeFs from "node:fs";
+import { SHOW_CURSOR, TERMINAL_RESTORE } from "./terminalRestore.js";
+import { caretToOutputEnd } from "./exitCursor.js";
 
 const ENTER = "\x1b[?1049h";
 const HIDE_CURSOR = "\x1b[?25l";
@@ -40,14 +44,60 @@ const HIDE_CURSOR = "\x1b[?25l";
 const AUTOWRAP_OFF = "\x1b[?7l";
 
 let active = false;
+/** Whether the process-level restore hooks are installed. Separate from `active`, so
+ *  leaving the alternate screen for the inline shell does not unregister them and
+ *  re-entering does not register a second copy of every signal handler — `enterAltScreen`
+ *  is called again on every switch back, and each call used to add another SIGINT,
+ *  SIGTERM, SIGHUP and uncaughtException listener. */
+let guarded = false;
 
-/** Switches to the alternate screen and registers the restore-on-exit hooks.
- *  No-op outside a real TTY (piped output, CI) — same rule Ink itself uses
- *  for every terminal-control feature. */
-export function enterAltScreen(): void {
-  if (active || !process.stdout.isTTY) return;
-  active = true;
-  process.stdout.write(ENTER + HIDE_CURSOR + AUTOWRAP_OFF);
+/**
+ * Show or hide the terminal's own cursor.
+ *
+ * Hidden in BOTH shells, for opposite reasons. Fullscreen parks it deliberately as the
+ * caret and hides it the rest of the time; the inline shell draws its caret as a cell,
+ * and the real cursor would otherwise sit wherever Ink's output happened to end — a
+ * second, stranded caret on a line of its own below the input.
+ */
+export function setCursorVisible(on: boolean): void {
+  if (!process.stdout.isTTY) return;
+  process.stdout.write(on ? SHOW_CURSOR : HIDE_CURSOR);
+}
+
+/**
+ * Enter or leave the alternate screen at runtime, in either direction.
+ *
+ * The switch `/screen` makes, and the reason it is separate from `enterAltScreen`: that
+ * one is the once-per-process setup, this one is the part that can happen many times.
+ *
+ * An ordinary async write, not `writeSync`, because nobody is exiting — the process
+ * carries on rendering into whichever screen this leaves it on.
+ */
+export function setAltScreen(on: boolean): void {
+  if (!process.stdout.isTTY || on === active) return;
+  active = on;
+  // Leaving restores the whole terminal, not just the buffer: autowrap back on so the
+  // terminal wraps its own scrollback, the cursor visible because Ink owns it in the
+  // inline shell, and mouse reporting off because nothing is reading it there.
+  process.stdout.write(on ? ENTER + HIDE_CURSOR + AUTOWRAP_OFF : TERMINAL_RESTORE);
+}
+
+/**
+ * Registers the restore-on-exit hooks, and by default switches to the alternate screen.
+ *
+ * No-op outside a real TTY (piped output, CI) — same rule Ink itself uses for every
+ * terminal-control feature. Once per process: `setAltScreen` is the one that can be
+ * called again.
+ *
+ * @param buffer Whether to switch to the alternate screen as well as installing the
+ *   hooks. False for a session starting in the inline shell: it owns no screen, but it
+ *   still wants the restore — bracketed paste and the cursor are turned on there too,
+ *   and a signal that skipped the restore would leave the terminal swallowing pastes.
+ */
+export function enterAltScreen(options: { buffer?: boolean } = {}): void {
+  if (guarded || !process.stdout.isTTY) return;
+  guarded = true;
+  if (options.buffer !== false) setAltScreen(true);
   process.on("exit", exitAltScreen);
   process.on("SIGINT", () => {
     exitAltScreen();
@@ -79,7 +129,25 @@ export function enterAltScreen(): void {
  *  unmount, but a signal or a crash skips React entirely, so it is turned off here
  *  unconditionally rather than being left to a component that may never unmount. */
 export function exitAltScreen(): void {
-  if (!active) return;
+  if (!guarded && !active) return;
+  guarded = false;
   active = false;
-  process.stdout.write(TERMINAL_RESTORE);
+  // writeSync, NOT process.stdout.write, because every caller of this is on its way out.
+  //
+  // A write to a TTY is ASYNCHRONOUS on Windows: the bytes are queued and flushed on a
+  // later tick. Every path here — SIGINT, SIGTERM, SIGHUP, uncaughtException — calls
+  // process.exit immediately afterwards, and exit does not wait for that queue. So the
+  // restore was written and then discarded, and Ctrl+C left the terminal still in the
+  // alternate screen with mouse reporting on: a window that is neither the app nor the
+  // shell, and cannot be typed into. Writing to the file descriptor returns only once the
+  // bytes are gone, which is the whole difference.
+  try {
+    // The cursor move goes FIRST and in the same write. It has to precede the restore
+    // because it is about where the NEXT program prints, and it has to share the write
+    // because every caller here is on its way out — a second writeSync is a second chance
+    // to be cut off half way. See exitCursor.ts for what is being corrected.
+    nodeFs.writeSync(1, caretToOutputEnd() + TERMINAL_RESTORE);
+  } catch {
+    // A closed or redirected stdout. Nothing to restore and nothing to report.
+  }
 }

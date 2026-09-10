@@ -654,6 +654,33 @@ test("a search does NOT count as having read the file", async () => {
   assert.match(r.output, /hasn't been read this session/, "a grep opened the overwrite gate");
 });
 
+test("the overwrite gate refuses QUIETLY — it is a correction, not an outcome", async () => {
+  // The model reads the file and writes it a moment later, in the same turn, with no
+  // help from anyone. Painted as a red row it is worse than noise: a file the session
+  // never created — one a scaffolder or an installer left there — is reported to the
+  // user as a problem with a file they have never seen mentioned, and then the write
+  // succeeds anyway, which explains nothing.
+  const ctx = freshCtx();
+  await seed(ctx);
+  const r = await writeFile.execute({ path: "src/a.ts", content: "replacement\n" }, ctx);
+
+  assert.equal(r.isError, true, "the model must still be refused and still have to read first");
+  assert.match(r.output, /hasn't been read this session/, "the model's instructions are unchanged");
+  assert.equal(r.quiet, true, "the UI must not paint a row the user can do nothing about");
+});
+
+test("a refusal the user CAN act on stays loud", async () => {
+  // The quiet mark belongs to the one refusal the model resolves by itself. A write to a
+  // directory is not that: nothing the model does next fixes it, so the row must show.
+  const ctx = freshCtx();
+  await seed(ctx);
+  await fs.mkdir(join(ctx.cwd, "src/adir"), { recursive: true });
+  const r = await writeFile.execute({ path: "src/adir", content: "x\n" }, ctx);
+
+  assert.equal(r.isError, true);
+  assert.notEqual(r.quiet, true, "a refusal with no self-correction must not be hidden");
+});
+
 test("one search cannot flood the working set", async () => {
   const ctx = freshCtx();
   await fs.mkdir(join(ctx.cwd, "many"), { recursive: true });

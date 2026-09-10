@@ -28,6 +28,7 @@ export const BASE_COMMANDS: CommandInfo[] = [
   { name: "/key", description: "add or replace an API key" },
   { name: "/model", description: "choose which model answers, from the current provider" },
   { name: "/think", description: "set the reasoning level for the model" },
+  { name: "/screen", description: "choose the shell: fullscreen, or inline (beta)" },
   { name: "/rules", description: "list rules, or add one: /rules <directive>" },
   { name: "/skills", description: "list skills, or make one: /skills <description>" },
   { name: "/forbidden", description: "list protected paths, or add: /forbidden <path>" },

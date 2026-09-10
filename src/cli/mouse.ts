@@ -16,17 +16,25 @@
  * `[<64;25;26M` into the prompt. Anything reading typed input must strip them
  * first.
  *
- * The trade this makes, stated plainly: while wheel reporting is on, dragging to
- * select text is captured by the app instead of the terminal. Every terminal
- * worth using keeps selection available on Shift+drag, the same deal vim, htop,
- * and every other full-screen tool strikes.
+ * The trade this makes, stated plainly: while reporting is on, the terminal stops
+ * selecting text for us, because it has handed the mouse to the app. That is not a
+ * setting that can be had both ways — a terminal either owns the mouse or the app
+ * does. So the app owns it and does the selecting itself; see selection.ts.
  */
 
 import { MOUSE_OFF } from "./terminalRestore.js";
 
-/** Report wheel/button presses (1000) using SGR encoding (1006), the only
- *  encoding that stays correct past column 223. */
-const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
+/**
+ * Report button presses AND movement while a button is held (1002), using SGR encoding
+ * (1006), the only encoding that stays correct past column 223.
+ *
+ * 1002 rather than 1000 because 1000 reports only the press and the release. A drag is
+ * the movement BETWEEN them, so under 1000 a selection could only ever be told where it
+ * started and where it stopped, and nothing could be highlighted while the button was
+ * still down. 1002 is the narrower of the two motion modes: it stays quiet until a
+ * button is held, where 1003 reports every idle mouse movement across the window.
+ */
+const MOUSE_ON = "\x1b[?1002h\x1b[?1006h";
 
 /**
  * An SGR mouse report: `ESC [ < button ; col ; row (M|m)`.
@@ -53,6 +61,41 @@ export function readWheel(data: string): WheelDirection[] {
     // Bit 6 (64) marks a wheel event; bit 0 then separates up (0) from down (1).
     if ((button & 64) === 0) continue;
     out.push((button & 1) === 0 ? "up" : "down");
+  }
+  return out;
+}
+
+/** What the pointer did. `drag` is movement with a button still held. */
+export type MouseKind = "press" | "drag" | "release";
+
+/** One pointer event, in ZERO-based cell coordinates — the terminal reports 1-based, and
+ *  converting here means nothing downstream has to remember to. */
+export interface MouseEvent {
+  kind: MouseKind;
+  x: number;
+  y: number;
+}
+
+/**
+ * Every left-button pointer event in a chunk of terminal input, in order (pure).
+ *
+ * Only the left button, because that is the one that selects. The wheel is read
+ * separately by `readWheel`, and the two never collide: a wheel report sets bit 6, which
+ * is checked for and skipped here.
+ */
+export function readMouse(data: string): MouseEvent[] {
+  const out: MouseEvent[] = [];
+  for (const match of data.matchAll(SGR)) {
+    const button = Number(match[1]);
+    if ((button & 64) !== 0) continue; // a wheel notch, not a button
+    // Bits 0-1 name the button. A RELEASE under SGR reports the button that was let go,
+    // so this stays correct for both ends of a drag.
+    if ((button & 3) !== 0) continue; // middle or right button
+    const x = Number(match[2]) - 1;
+    const y = Number(match[3]) - 1;
+    // Bit 5 marks movement; the final `m` (rather than `M`) marks a release.
+    const kind: MouseKind = match[4] === "m" ? "release" : (button & 32) !== 0 ? "drag" : "press";
+    out.push({ kind, x, y });
   }
   return out;
 }

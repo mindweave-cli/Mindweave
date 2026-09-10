@@ -45,6 +45,38 @@ const QUOTED_RE = /'([^']+)'|"([^"]+)"/g;
 // (`\\host\…`), or POSIX (`/…`). Must start at a word boundary; stops at
 // whitespace or a quote. Real-file gating (below) keeps stray matches harmless.
 const BARE_ABS_RE = /(^|\s)((?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"']+)/g;
+// The same root shapes, anchored: "does this string start like an absolute path".
+// Used to tell a dropped file from ordinary quoted prose without touching the disk.
+const ABSOLUTE_RE = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/;
+
+/** One dropped path found in a chunk of typed/pasted text. */
+export interface DroppedPath {
+  start: number;
+  end: number;
+  /** The path itself, quotes stripped. */
+  path: string;
+}
+
+/**
+ * Find the absolute paths a terminal drops into the input when a file is dragged onto it,
+ * quoted or bare. Syntactic only, and deliberately so: this runs on a keystroke, where
+ * touching the disk is not an option, and requiring a drive letter, a UNC prefix or a
+ * leading slash is enough to keep ordinary quoted prose ("hello world") out. Anything
+ * that turns out not to be a file is still handled correctly later, because resolution
+ * against the disk happens at send time exactly as it always did.
+ */
+export function findDroppedPaths(text: string): DroppedPath[] {
+  const out: DroppedPath[] = [];
+  for (const m of text.matchAll(QUOTED_RE)) {
+    const path = (m[1] ?? m[2])!;
+    if (ABSOLUTE_RE.test(path)) out.push({ start: m.index!, end: m.index! + m[0].length, path });
+  }
+  for (const m of text.matchAll(BARE_ABS_RE)) {
+    const start = m.index! + m[1]!.length;
+    out.push({ start, end: start + m[2]!.length, path: trimEnds(m[2]!) });
+  }
+  return out.sort((x, y) => x.start - y.start);
+}
 
 interface Candidate {
   start: number; // index of the token in the source text
@@ -76,6 +108,7 @@ export async function resolveAttachments(
   text: string,
   cwd: string,
   canSeeImages = false,
+  labelFor?: (absPath: string) => string | undefined,
 ): Promise<ResolvedAttachments> {
   const candidates = findCandidates(text);
   const seen = new Set<string>();
@@ -105,7 +138,7 @@ export async function resolveAttachments(
     // named-but-unseen note when it doesn't. Either way the file name reaches the
     // model, so it can ask about it rather than being unaware anything was shared.
     if (isImage(abs)) {
-      if (c.kind === "path") collapses.push({ start: c.start, end: c.end, label: basename(abs) });
+      if (c.kind === "path") collapses.push({ start: c.start, end: c.end, label: labelFor?.(abs) ?? basename(abs) });
 
       if (!canSeeImages) {
         notes.push(`attached image ${shown} (this model can't see images — describe it, or switch with /provider)`);
@@ -145,7 +178,7 @@ export async function resolveAttachments(
     notes.push(`attached ${shown} (+${lineCount} lines)`);
     // A dropped/quoted path is long and ugly in the chat — collapse it to the file
     // name. An `@mention` is already short, so leave it visible as typed.
-    if (c.kind === "path") collapses.push({ start: c.start, end: c.end, label: basename(abs) });
+    if (c.kind === "path") collapses.push({ start: c.start, end: c.end, label: labelFor?.(abs) ?? basename(abs) });
   }
 
   const displayText = applyCollapses(text, collapses);

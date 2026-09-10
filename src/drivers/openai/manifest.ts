@@ -5,11 +5,12 @@
  * data and pure functions. The wire code (and the SDK) live in `client.ts`, which
  * only loads once a GPT model is actually selected.
  *
- * v1 ships the GPT-5.6 family — Sol, Terra and Luna. They are one model at three
- * price/latency points rather than three different surfaces: identical context
- * window, identical output ceiling, identical reasoning ladder. So unlike the
- * Anthropic manifest, which has to carry a table of per-model wire rules, this one
- * needs a single set of facts and a price row per model.
+ * The GPT-5.6 family — Sol, Terra and Luna — plus the newer GPT-6 flagship, Astra. They
+ * share one request surface: the same context window, output ceiling and reasoning
+ * ladder, so unlike the Anthropic manifest, which has to carry a table of per-model wire
+ * rules, this one needs a single set of facts and a price row per model. Astra sits above
+ * the 5.6 tiers on capability and on price; it is offered, not the default, because the
+ * default should be the tier that is rarely the wrong answer, not the dearest one.
  *
  * Older GPT tiers (5.5, 5.4, 4.1, the o-series) are deliberately not offered. They
  * are still served, but they bring older request surfaces with different reasoning
@@ -18,6 +19,7 @@
  */
 import type { DriverManifest, Effort, ModelChoice, ModelConfig, ModelId, ModelPrice, ThinkLevel } from "../types.js";
 
+export const ASTRA = "gpt-6-astra";
 export const SOL = "gpt-5.6-sol";
 export const TERRA = "gpt-5.6-terra";
 export const LUNA = "gpt-5.6-luna";
@@ -34,7 +36,8 @@ export const DEFAULT_MODEL = TERRA;
  */
 export const MODELS: ModelChoice[] = [
   { id: TERRA, label: "GPT-5.6 Terra", description: "balanced intelligence and cost — the default" },
-  { id: SOL, label: "GPT-5.6 Sol", description: "the frontier tier, for the hardest problems" },
+  { id: ASTRA, label: "GPT-6 Astra", description: "the newest flagship — the most capable, and the priciest" },
+  { id: SOL, label: "GPT-5.6 Sol", description: "the GPT-5.6 frontier tier" },
   { id: LUNA, label: "GPT-5.6 Luna", description: "cheap and quick, for high-volume work" },
 ];
 
@@ -64,6 +67,7 @@ export function thinkLevels(_model: ModelId): ThinkLevel[] {
  * which is what keeps a re-sent conversation cheap.
  */
 const PRICES: Record<string, ModelPrice> = {
+  [ASTRA]: { cacheHit: 1, cacheMiss: 10, output: 50 },
   [SOL]: { cacheHit: 0.5, cacheMiss: 5, output: 30 },
   [TERRA]: { cacheHit: 0.2, cacheMiss: 2, output: 12 },
   [LUNA]: { cacheHit: 0.02, cacheMiss: 0.2, output: 1.2 },

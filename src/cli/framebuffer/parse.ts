@@ -219,10 +219,42 @@ export function parseFrame(screen: Screen, frame: string, top = 0): void {
         i = j + 1;
         continue;
       }
-      // A non-CSI escape (OSC, single-character escapes). Skip the ESC and let the
-      // following bytes be read normally; Ink does not emit these inside a frame,
-      // and dropping one byte is far less damaging than misparsing a run.
-      i += 1;
+      const introducer = frame[i + 1];
+      if (introducer === "]" || introducer === "P" || introducer === "X" || introducer === "^" || introducer === "_") {
+        // A STRING sequence: OSC, DCS, SOS, PM, APC. What follows the introducer is
+        // data, not text to draw — a window title, a hyperlink target, a clipboard
+        // payload — and it runs until a string terminator, either BEL or `ESC \`.
+        let j = i + 2;
+        while (j < frame.length) {
+          if (frame[j] === "\x07") {
+            j += 1;
+            break;
+          }
+          if (frame[j] === "\x1b" && frame[j + 1] === "\\") {
+            j += 2;
+            break;
+          }
+          j++;
+        }
+        i = j;
+        continue;
+      }
+
+      // Any other escape: optional intermediate bytes (0x20-0x2F) and one final byte.
+      // `ESC ( B` selects a character set, `ESC M` scrolls back a line, `ESC 7` and
+      // `ESC 8` save and restore the cursor. None of them draw anything.
+      //
+      // Consuming only the ESC left the rest to be read as text, and every one of these
+      // ends in a LETTER — which is how a bare `M` or `B` appeared in the middle of a
+      // line. The cell it landed in then held that letter in the model as well as on the
+      // screen, so the diff saw nothing wrong with it and no later frame took it away.
+      let j = i + 1;
+      while (j < frame.length) {
+        const c = frame.charCodeAt(j);
+        j++;
+        if (c < 0x20 || c > 0x2f) break;
+      }
+      i = j;
       continue;
     }
 
@@ -235,6 +267,25 @@ export function parseFrame(screen: Screen, frame: string, top = 0): void {
 
     if (ch === "\r") {
       x = 0;
+      i += 1;
+      continue;
+    }
+
+    if (ch === "\t") {
+      // Tab stops every eight columns. Stamping the tab itself would put a character in
+      // the model that `paint` then writes back out, and the terminal would advance the
+      // cursor for it — knocking the rest of the row, and everything the diff believes
+      // about it, out of alignment.
+      x = (Math.floor(x / 8) + 1) * 8;
+      i += 1;
+      continue;
+    }
+
+    const control = frame.charCodeAt(i);
+    if (control < 0x20 || control === 0x7f) {
+      // Every remaining C0 control and DEL. A terminal acts on these; none of them leave
+      // a glyph behind, so neither may the model.
+      if (control === 0x08) x = Math.max(0, x - 1);
       i += 1;
       continue;
     }

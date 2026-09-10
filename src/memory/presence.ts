@@ -74,3 +74,46 @@ export function fullReadPaths(entries: Entry[], resolve: (path: string) => strin
   }
   return present;
 }
+
+/**
+ * Absolute paths the model has WRITTEN or EDITED, from tool calls that succeeded.
+ *
+ * The companion to `fullReadPaths`, and needed for the same reason on resume: a file the
+ * model wrote last session is a file it has seen. Its whole content was in the call's own
+ * arguments, and an edit could only have happened after a read. Without this the
+ * read-before-overwrite gate refuses a file the model itself created, and the model
+ * re-reads it — appending another full copy to the transcript, which is the cost the
+ * ledger restore exists to stop.
+ *
+ * Failures are skipped: a write that was refused wrote nothing, and claiming it would
+ * open the gate on a file nobody has seen.
+ */
+export function writtenPaths(entries: Entry[], resolve: (path: string) => string | undefined): Set<string> {
+  const callById = new Map<string, { name: string; arguments: string }>();
+  for (const e of entries) {
+    if (e.role === "assistant" && e.toolCalls) {
+      for (const tc of e.toolCalls) callById.set(tc.id, { name: tc.name, arguments: tc.arguments });
+    }
+  }
+
+  const written = new Set<string>();
+  for (const e of entries) {
+    if (e.role !== "tool") continue;
+    if (e.isError || e.content.startsWith("Error:")) continue;
+    const call = callById.get(e.toolCallId ?? "");
+    if (!call || !WRITING_TOOLS.has(call.name)) continue;
+    let args: { path?: unknown };
+    try {
+      args = JSON.parse(call.arguments) as typeof args;
+    } catch {
+      continue;
+    }
+    if (typeof args.path !== "string") continue;
+    const abs = resolve(args.path);
+    if (abs) written.add(abs);
+  }
+  return written;
+}
+
+/** Tools whose successful use means the model has seen the file it names. */
+const WRITING_TOOLS = new Set(["write_file", "edit", "replace_symbol_body"]);

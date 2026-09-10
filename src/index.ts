@@ -21,7 +21,12 @@ import { enterAltScreen, exitAltScreen } from "./cli/altScreen.js";
 import { TERMINAL_RESTORE } from "./cli/terminalRestore.js";
 import { instrumentStdout, flush as flushPerf, perf, perfEnabled } from "./cli/perfLog.js";
 import { MAX_FPS } from "./cli/frameRate.js";
-import { framebufferStdout } from "./cli/framebuffer/writer.js";
+import { framebufferStdout, setFramebufferEnabled } from "./cli/framebuffer/writer.js";
+import { startupMode } from "./cli/screenMode.js";
+import { loadScreenMode } from "./cli/screenStore.js";
+import { silenceConsole } from "./cli/quietConsole.js";
+import { nameSession } from "./cli/appIdentity.js";
+import { tuneMemory } from "./cli/memoryTuning.js";
 import { spawn } from "node:child_process";
 import { relaunch } from "./cli/restart.js";
 import { takePendingRestart } from "./cli/updateRunner.js";
@@ -59,6 +64,9 @@ if (startup.kind === "reset") {
   process.exit(0);
 }
 
+// Bias V8 toward a smaller footprint before anything heavy allocates. See memoryTuning.ts.
+tuneMemory();
+
 // Load config (global ~/.mindweave/.env + project .env) so provider API keys are
 // available no matter which project we're launched in.
 loadConfig();
@@ -76,7 +84,19 @@ sweepTempInBackground();
 instrumentStdout(process.stdout);
 process.on("exit", flushPerf);
 
-enterAltScreen();
+// The shell the session starts in decides whether we take the screen at all. Applied
+// HERE rather than being left to the app to correct on its first effect: entering and
+// then immediately leaving is a visible flash of an empty alternate screen, and one
+// frame of Ink output diffed by a framebuffer that is about to stand down.
+// The saved choice is read here, not in the app, because the same answer decides whether
+// to take the alternate screen at all — which happens before the first render.
+const startupShell = startupMode(process.env["MINDWEAVE_SCREEN"], await loadScreenMode(process.cwd()));
+// Name the session in the terminal tab and the process list, before the screen is taken
+// (the title is a plain control write; doing it first keeps it out of the framebuffer's
+// frame parsing). See appIdentity.ts.
+nameSession();
+enterAltScreen({ buffer: startupShell === "fullscreen" });
+setFramebufferEnabled(startupShell === "fullscreen");
 
 // Ink renders into a FRAMEBUFFER rather than straight to the terminal: each frame is
 // parsed into a cell grid, diffed against what is already on screen, and only the
@@ -91,8 +111,27 @@ enterAltScreen();
 // ours is per-cell where Ink's is per-line.
 // The frame-rate cap is what sets typing latency — see `cli/frameRate.ts` for the
 // measurements and for why it is a timer rather than a cost.
-const instance = render(createElement(App, { resumeSessionId: startup.resumeSessionId }), {
+// Nothing but the renderer may write to the screen while the UI owns it.
+const restoreConsole = silenceConsole();
+const instance = render(createElement(App, { resumeSessionId: startup.resumeSessionId, initialScreen: startupShell }), {
   maxFps: MAX_FPS,
+  // Ctrl+C is handled by the app, not by Ink.
+  //
+  // Raw mode is on, so Ctrl+C arrives as a BYTE rather than as SIGINT — none of the
+  // signal handlers in altScreen.ts ever see it. Ink's default was then to unmount and
+  // nothing else: painting stopped, the process stayed alive with the turn still running,
+  // and because nothing exited, neither the terminal restore nor the synchronous kill of
+  // background shells (both `exit` hooks) ever ran. What that left on screen was a window
+  // that was no longer the app and not yet the shell, over work that was still going.
+  exitOnCtrlC: false,
+  // Console output is NOT a frame, and must not be routed into the stream of them.
+  //
+  // Ink offers to capture it and write it above the UI. Through the framebuffer that
+  // means the parser reads a log line as a frame and stamps foreign text into the model
+  // of the screen — and a cell the model has wrong is never revisited, because as far as
+  // a diff can see nothing about it changed. See `cli/quietConsole.ts`, which stops the
+  // output at the source instead.
+  patchConsole: false,
   stdout: framebufferStdout(process.stdout, perfEnabled() ? (s) => perf(`frame in=${s.inBytes} out=${s.outBytes}`) : undefined) as unknown as NodeJS.WriteStream,
 });
 
@@ -101,6 +140,7 @@ const instance = render(createElement(App, { resumeSessionId: startup.resumeSess
 // what it wants and the app closes the way it always closes; this is where the intention
 // is read, with the screen already given back.
 await instance.waitUntilExit();
+restoreConsole();
 const restart = takePendingRestart();
 if (restart) {
   process.exit(

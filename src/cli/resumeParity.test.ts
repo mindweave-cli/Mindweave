@@ -75,3 +75,31 @@ test("the calls the live path never draws are not drawn on resume either", () =>
   const loop = replay.slice(replay.indexOf("for (const call of"), replay.indexOf('type: "toolStart"'));
   assert.match(loop, /spawn_subagent/, "the replay draws the spawn call as an ordinary row");
 });
+
+test("a resumed paste comes back as a chip, not as itself", async () => {
+  // What `/continue` looked like after a big paste: the whole thing replayed into the
+  // chat, line by line, as if the person had typed it. The chat and the transcript hold
+  // deliberately different things — a chip and the full text — and the resume path is
+  // where that split has to be honoured a second time.
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+
+  // Written wrapped, so there is a boundary to find it by. Spliced in bare it is
+  // indistinguishable from typing and nothing downstream can collapse it.
+  assert.match(app, /join\(wrapPastedText\(content\)\)/, "pastes go into the transcript unwrapped again");
+  // And collapsed on the way back to the chat, alongside the attachment strip.
+  assert.match(
+    app,
+    /collapsePastes\(stripAttachments\(e\.content\)\)/,
+    "the resume path replays the paste body instead of its chip",
+  );
+});
+
+test("the session picker labels a session by what was TYPED", async () => {
+  // The label is the last thing the person said, clipped. Uncollapsed, a session that
+  // opened with a paste was labelled by the paste — and once the paste is wrapped, by the
+  // wrapper, which is worse.
+  const { readFile } = await import("node:fs/promises");
+  const store = await readFile(new URL("../memory/store.ts", import.meta.url), "utf8");
+  assert.match(store, /collapsePastes\(e\.content\)/, "the picker still labels sessions with paste bodies");
+});

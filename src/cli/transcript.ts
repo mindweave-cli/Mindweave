@@ -77,6 +77,17 @@ export type Block =
       /** Whether `detail` is a genuine +/- diff (colour it) or ordinary text (do not).
        *  Absent means text. See ToolResult.detailKind for why this is not inferred. */
       detailKind?: "diff" | "text" | "shell";
+      /**
+       * When the result landed, for a tool the model has to THINK about before it can
+       * speak again — an image handed to vision, which answers far slower than text.
+       *
+       * Only such a tool sets it. The row counts up from here while the turn is live,
+       * so a silence that used to look like nothing happening now shows what is being
+       * waited on, and the total is written into the detail once the wait ends.
+       */
+      since?: number;
+      /** Seconds the wait took, once it is over. Absent while it is still running. */
+      waited?: number;
       /** Does this row belong to the turn still in progress? Drives the VERB only
        *  ("Reading" vs "Read"), and is cleared for every row at once by `endTurn`. */
       live?: boolean;
@@ -131,6 +142,11 @@ export type Action =
   | { type: "user"; text: string }
   | { type: "token"; delta: string }
   | { type: "toolStart"; toolId: string; name: string; arg?: string; meta?: string; action?: ToolKind; group?: boolean; covers?: number }
+  /** Output from a call that has NOT finished, so a command running for minutes says
+   *  what it is doing instead of sitting silent. Carries the latest tail rather than an
+   *  increment: the row replaces what it shows, so a dropped update costs nothing and
+   *  neither side keeps state the other has to agree with. */
+  | { type: "toolProgress"; toolId: string; text: string }
   | {
       type: "toolEnd";
       toolId: string;
@@ -139,6 +155,9 @@ export type Action =
       detail?: string;
       detailKind?: "diff" | "text" | "shell";
       quiet?: boolean;
+      /** This result leaves the model with real work to do before it can answer — an
+       *  image going to vision. The row shows the wait rather than sitting silent. */
+      awaitsModel?: boolean;
       /** Override the row's category/name — set when the RESULT (not the call) is
        *  what makes this a governor decision rather than an ordinary tool outcome,
        *  discovered only once the call actually runs (see ToolResult.displayKind). */
@@ -268,6 +287,33 @@ function sealAssistant(s: TranscriptState, asReply: boolean): TranscriptState {
   return drain(next);
 }
 
+/**
+ * Close any wait that is still counting, because the model has just spoken or acted.
+ *
+ * The number belongs to the gap between handing something over and getting an answer,
+ * so it is stopped by the first sign of that answer — a token, or the next tool call —
+ * rather than at the end of the turn. Stopping at the turn would fold in every step the
+ * model took afterwards and report a wait that never happened.
+ *
+ * Idempotent: a row that already has its number is left exactly as it is.
+ */
+function settleWaits(s: TranscriptState): TranscriptState {
+  const now = Date.now();
+  const settle = (b: Block): Block =>
+    b.kind === "tool" && b.since !== undefined && b.waited === undefined
+      ? ({ ...b, waited: Math.max(0, Math.round((now - b.since) / 1000)) } as Block)
+      : b;
+  // BOTH lists, the same as endTurn. A finished tool row drains into `committed` almost
+  // immediately, so by the time the model answers, the row holding the clock is no longer
+  // in the tail — and a version that only walked the tail left every wait unstamped.
+  const tail: Block[] = s.tail.map(settle);
+  const committed: Block[] = s.committed.map(settle);
+  const changed =
+    tail.some((b: Block, i: number) => b !== s.tail[i]) ||
+    committed.some((b: Block, i: number) => b !== s.committed[i]);
+  return changed ? { ...s, tail, committed } : s;
+}
+
 export function reduce(s: TranscriptState, a: Action): TranscriptState {
   switch (a.type) {
     case "clear":
@@ -279,11 +325,21 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
       // outlive the conversation it belonged to.
       return { ...initialState(), seq: s.seq };
     case "user": {
-      const id = s.seq + 1;
-      // A new turn: the narration budget refills here and nowhere else.
-      return drain({ ...s, seq: id, narrated: false, tail: s.tail.concat({ kind: "user", id, done: true, text: a.text }) });
+      // The open tool group is closed FIRST, like every other block that can arrive
+      // mid-turn. A user message used to be able to arrive only between turns, when
+      // nothing was open; it can now be steered into a running one, and a group left
+      // open would keep collecting rows that happened AFTER this line while sitting
+      // above it. The group is a claim about what ran together, and that would make it
+      // a false one.
+      const c = closeToolGroup(s);
+      const id = c.seq + 1;
+      // The narration budget refills here and nowhere else — including for a message
+      // steered mid-turn, which is a new instruction and worth one line of answer.
+      return drain({ ...c, seq: id, narrated: false, tail: c.tail.concat({ kind: "user", id, done: true, text: a.text }) });
     }
     case "token": {
+      // The model answering IS the end of the wait, and this is the first sign of it.
+      s = settleWaits(s);
       // Accumulate SILENTLY — the assistant block renders nothing until it seals,
       // then the whole text appears at once. We still open the block so a later
       // seal can find it. Narration after a discovery burst closes the group.
@@ -302,6 +358,8 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
       return { ...next, raw: next.raw + a.delta };
     }
     case "toolStart": {
+      // The next call is also the model having moved on: stop any wait still running.
+      s = settleWaits(s);
       // Seal any narration before the tool (commit it) first.
       const sealed = sealAssistant(s, false);
 
@@ -355,6 +413,18 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
         }),
       });
     }
+    case "toolProgress": {
+      const blockId = s.toolMap[a.toolId];
+      if (blockId == null) return s;
+      const block = s.tail.find((b) => b.id === blockId);
+      // Only a standalone row, and only while it is still running. A grouped call folds
+      // into a one-line summary that has nowhere to put output, and a row that has already
+      // resolved must keep the result it settled on rather than being overwritten by a
+      // late tail from before it finished.
+      if (!block || block.kind !== "tool" || block.done) return s;
+      return patchTail(s, blockId, { detail: a.text, detailKind: "shell" } as Partial<Block>);
+    }
+
     case "toolEnd": {
       const blockId = s.toolMap[a.toolId];
       if (blockId == null) return s;
@@ -383,6 +453,7 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
           done: true,
           ...(a.action ? { action: a.action } : {}),
           ...(a.name ? { name: a.name } : {}),
+          ...(a.awaitsModel ? { since: Date.now() } : {}),
         }),
       );
     }
@@ -397,6 +468,7 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
       // rows are patched as well as tail ones — every block is re-rendered each
       // frame (there is no <Static>), so a row that has already scrolled up still
       // settles into the past tense with the rest of the turn.
+      s = settleWaits(s);
       const clear = (b: Block): Block =>
         (b.kind === "tool" || b.kind === "tools") && b.live ? ({ ...b, live: false } as Block) : b;
       return { ...s, committed: s.committed.map(clear), tail: s.tail.map(clear) };

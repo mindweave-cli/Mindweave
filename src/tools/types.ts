@@ -123,6 +123,13 @@ export interface ToolResult {
    * where the file is rather than handed a message claiming a picture it can't read.
    */
   images?: import("../memory/images.js").ImageRef[];
+
+  /**
+   * This result leaves the MODEL with work to do before it can answer — an image going
+   * to vision, which is far slower than text. The row shows the wait counting instead of
+   * sitting there finished while nothing appears to happen.
+   */
+  awaitsModel?: boolean;
 }
 
 /**
@@ -152,6 +159,18 @@ export interface ReadRecord {
 }
 
 /** One item on the session task list (see todo_write). */
+/** What a running tool can report back before it finishes. */
+export interface ToolCallChannel {
+  /**
+   * Output so far, for a call that has not finished.
+   *
+   * Called repeatedly with the LATEST tail, not with increments — the receiver replaces
+   * rather than appends, so a dropped update costs nothing and there is no state to keep
+   * in sync on either side.
+   */
+  progress(text: string): void;
+}
+
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export interface TodoItem {
   /** Imperative form: "Run the tests". */
@@ -553,7 +572,14 @@ export interface Tool {
    * Do the work. `args` is the parsed arguments object from the model; `ctx` is
    * the shared per-session state (cwd + read ledger).
    */
-  execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
+  /**
+   * @param call Per-call channel, supplied by the engine. Separate from `ctx`, which is
+   *   ONE object shared by every tool in a turn: a tool that runs for minutes needs to
+   *   report while it runs, and it can only be told apart from its siblings by something
+   *   scoped to this call. Optional so a tool that has nothing to say ignores it, and so
+   *   a caller with no UI (a test, a sub-agent) can leave it out.
+   */
+  execute(args: Record<string, unknown>, ctx: ToolContext, call?: ToolCallChannel): Promise<ToolResult>;
 }
 
 /**

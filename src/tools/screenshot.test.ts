@@ -212,3 +212,41 @@ test("only a guarded session is asked before a capture", () => {
   assert.equal(needsApproval({ guarded: false }), false);
   assert.equal(needsApproval({}), false, "a context with no mode set is the default one");
 });
+
+// ── Waiting for a window that is still opening ───────────────────────────────
+
+test("a named window that appears late is still found", async () => {
+  // The case this exists for: a browser is launched and asked for in the same breath.
+  // Start-Process returns at once and the window is drawn a second or two later, so a
+  // single listing sees nothing and the model's workaround — capturing some OTHER
+  // window — produces a picture that says nothing about what it was asked to check.
+  let calls = 0;
+  const windows = () => {
+    calls++;
+    return calls < 3 ? [{ handle: "1", title: "Editor", foreground: true }] : [
+      { handle: "1", title: "Editor", foreground: false },
+      { handle: "2", title: "mockup.html - Chrome", foreground: true },
+    ];
+  };
+
+  // The wait is a loop around pickWindow, so this asserts the shape it depends on:
+  // "none" while absent, a match once present.
+  assert.equal(pickWindow("mockup", windows()).kind, "none");
+  assert.equal(pickWindow("mockup", windows()).kind, "none");
+  const found = pickWindow("mockup", windows());
+  assert.equal(found.kind, "match");
+  assert.equal(found.kind === "match" && found.window.title, "mockup.html - Chrome");
+});
+
+test("giving up says NOT to capture a different window instead", async () => {
+  // The failure that let a wrong-window capture be reported as a real check. The error
+  // has to close that door explicitly, because the model's instinct is to substitute.
+  const result = await screenshot.execute({ window: "nothing-like-this" }, {
+    cwd: process.cwd(),
+    requestApproval: async () => "Yes, capture it",
+    autoAccept: true,
+  } as never);
+  assert.equal(result.isError, true);
+  assert.match(result.output, /do NOT capture a different window/i);
+  assert.match(result.output, /after waiting/i);
+});

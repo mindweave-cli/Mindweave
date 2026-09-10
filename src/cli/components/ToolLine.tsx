@@ -12,6 +12,7 @@
  * never a live, line-by-line scroll (that churn is what made the old version
  * glitch).
  */
+import { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { KIND_COLOR, ERROR_COLOR, type ToolKind } from "../toolDisplay.js";
 import { activeForm } from "../toolItems.js";
@@ -63,9 +64,14 @@ export interface ToolLineProps {
   live?: boolean;
   /** Consecutive tool rows hug; one after prose keeps a blank line above. */
   tightTop?: boolean;
+  /** When the wait this row is responsible for began, for a tool the model has to think
+   *  about before it can answer. Only such a row counts. */
+  since?: number;
+  /** Seconds the wait took, once it is over. Written into the end of the detail. */
+  waited?: number;
 }
 
-export function ToolLine({ name, arg, status, action, summary, detail, detailKind, meta, columns, live, tightTop }: ToolLineProps) {
+export function ToolLine({ name, arg, status, action, summary, detail, detailKind, meta, columns, live, tightTop, since, waited }: ToolLineProps) {
   const errored = status === "error";
   // "Updating(home.html)" while the turn runs, "Update(home.html)" once it ends —
   // the same row, one word apart. The row is not shown at all until its result is
@@ -77,7 +83,14 @@ export function ToolLine({ name, arg, status, action, summary, detail, detailKin
   const metaRoom = meta ? meta.length + 1 : 0;
 
   // The branch content: rich detail lines if present, else the one-line summary.
-  const allLines = detail ? detail.split("\n") : summary ? [summary] : [];
+  const rawLines = detail ? detail.split("\n") : summary ? [summary] : [];
+  // The wait joins the END of the facts line, beside the size and the format, rather than
+  // taking a line of its own: it is another fact about the same thing, and a row that grew
+  // a line once it settled would change shape after the fact.
+  const allLines =
+    waited !== undefined && rawLines.length > 0
+      ? rawLines.map((l, i) => (i === rawLines.length - 1 ? `${l} · looked at in ${waited}s` : l))
+      : rawLines;
 
   // A command's verdict is LIFTED out of its output and set against the right margin of
   // this row.
@@ -141,6 +154,12 @@ export function ToolLine({ name, arg, status, action, summary, detail, detailKin
         {meta ? (
           <Box flexShrink={0}>
             <Text dimColor wrap="truncate-end">{" "}{meta}</Text>
+          </Box>
+        ) : null}
+        {/* The wait, counting, while the model works on what this row handed it. */}
+        {live && since !== undefined ? (
+          <Box flexShrink={0}>
+            <Elapsed since={since} />
           </Box>
         ) : null}
         {/* Beside the command, not at the right margin. Pinned to the right it was in the
@@ -304,4 +323,25 @@ function diffStyle(line: string): DiffStyle | undefined {
   if (line.startsWith("+")) return { color: "green", backgroundColor: ADDED_BG };
   if (line.startsWith("-")) return { color: "red", backgroundColor: REMOVED_BG };
   return undefined;
+}
+
+/**
+ * Seconds since `since`, ticking.
+ *
+ * Its own component with its own timer, so the row it sits in is the only thing that
+ * re-renders each second. Lifting the clock any higher would re-render the transcript
+ * once a second for one number, which is the cost the framebuffer and the memoized
+ * block view exist to avoid.
+ *
+ * Whole seconds: a wait is read at a glance, and a tenths place would be motion for its
+ * own sake right next to text someone is trying to read.
+ */
+function Elapsed({ since }: { since: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const seconds = Math.max(0, Math.round((now - since) / 1000));
+  return <Text dimColor>{"  "}{seconds}s</Text>;
 }

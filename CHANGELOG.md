@@ -3,6 +3,37 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.4.0 (2026-09-10): scroll without losing the prompt
+
+Both shells let you scroll back now with the prompt staying put. The inline shell pins
+it while you scroll (wheel, PgUp) and drops back to normal the moment you reach the
+bottom. `/screen` picks between the two instead of toggling, with inline marked beta,
+because it takes the mouse and the terminal's own scrollbar and selection stop while it
+is up. Scrolled up in fullscreen you get a jump-to-bottom chip: click it, or press
+ctrl+End.
+
+The fullscreen frame reaches the bottom edge. On Windows it floated above a band of dead
+rows, because the terminal size came from a value the console caches and rarely refreshes.
+It reads the live size now and fills the screen.
+
+Ctrl+C copies your selection instead of quitting. Drag, copy, done, with no session ending
+under you; nothing selected still quits. Selected text is one clean colour too, not a red
+block over an error line and a cyan one over a hint.
+
+Lighter on memory. A language server used to spawn on the first symbol lookup and hold its
+whole index for the rest of the session, hundreds of megabytes sitting idle most of the
+time. Idle servers shut down and respawn on demand now, and V8 is told to favour a smaller
+footprint.
+
+The terminal tab says Mindweave. GPT-6 Astra is available under OpenAI.
+
+Menus got a pass: `/key` fills its box with its row numbers lined up, `/continue` reads as
+a table with the times pinned right, and a long option description wraps below the list
+instead of being cut off. Plus a stack of rendering fixes: resizing no longer flashes
+half-drawn shapes, switching shells no longer lands on a blank screen, quitting no longer
+prints the shell prompt over the conversation, and a first-run crash that could blank the
+screen the moment a key was accepted is closed.
+
 ## v2.3.1 (2026-09-05): a count of how many people are running it
 
 Mindweave has no account and no server of its own, which meant nobody could answer the

@@ -129,15 +129,39 @@ export function condense(lines: string[]): string[] {
 }
 
 /**
- * Keep the last `max` lines, naming what was dropped.
+ * Keep the first line and the last `max - 1`, naming what was dropped between them.
  *
- * The notice goes ABOVE the kept lines, where it reads as "this is the end of something
- * longer". Below them it reads as more output, which is how the old middle-drop marker
- * ended up looking like a line the command had printed.
+ * The tail alone was not enough, and the case that showed it is worth stating. A
+ * scaffolder — `npm create`, a generator, an installer — announces what it BUILT in its
+ * opening line and finishes with boilerplate about what you might do next. Capped from
+ * the end, a command that wrote an entire project directory displayed three lines of
+ * advice about Android builds, and the twenty files it had just created were never
+ * mentioned on screen at all. The user's next sight of them was a write being refused
+ * because a file "already exists", about files they had never seen created.
+ *
+ * So the first line is kept. One row, and it is the row that says what a command that
+ * SUCCEEDED actually did — where a failure keeps saying its news at the end, which the
+ * remaining budget still covers in full.
+ *
+ * The notice sits directly ABOVE the tail, unchanged: there it reads as "this is the end
+ * of something longer", where below them it reads as more output — which is how an
+ * earlier middle-drop marker ended up looking like a line the command had printed. The
+ * opening line above it is not that; it is where the output genuinely starts.
  */
-export function tailCap(lines: string[], max: number): string[] {
+export function capEnds(lines: string[], max: number): string[] {
   const limit = Math.max(1, max);
   if (lines.length <= limit) return lines;
+  // No room for both ends: one line of budget can only be the end, which is where a
+  // failure's news is, and a failure is the case that cannot afford to lose it.
+  if (limit === 1) {
+    const dropped = lines.length - 1;
+    return [`… ${dropped.toLocaleString("en-US")} earlier line${dropped === 1 ? "" : "s"} hidden`, ...lines.slice(-1)];
+  }
+  const head = lines[0]!;
+  const tail = lines.slice(-(limit - 1));
   const hidden = lines.length - limit;
-  return [`… ${hidden.toLocaleString("en-US")} earlier line${hidden === 1 ? "" : "s"} hidden`, ...lines.slice(-limit)];
+  // Every line accounted for. Nothing hidden between the two ends means they meet, and a
+  // notice claiming "0 lines hidden" would be a hole reported where there is none.
+  if (hidden <= 0) return [head, ...tail];
+  return [head, `… ${hidden.toLocaleString("en-US")} earlier line${hidden === 1 ? "" : "s"} hidden`, ...tail];
 }

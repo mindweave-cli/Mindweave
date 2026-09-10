@@ -22,8 +22,9 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { isAbsolute, resolve } from "node:path";
-import { Box, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from "ink";
+import { Box, Static, Text, measureElement, useApp, useInput, useStdout, type DOMElement } from "ink";
 import { compactNow, contextUsed, respond } from "../dynamo/engine.js";
+import type { SteeredMessage } from "../dynamo/engine.js";
 import { contextPressure, sharpContextWindow } from "../dynamo/contextWindow.js";
 import { createSession, resumeSession, reloadProjectMemory } from "../memory/session.js";
 import { saveSession, listSessions } from "../memory/store.js";
@@ -47,6 +48,9 @@ import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProv
 import { allProviders, manifestForModel, modelsOf } from "../drivers/registry.js";
 import { accessRefusal } from "../drivers/providerError.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
+import { collapsePastes, wrapPastedText } from "../memory/pastedText.js";
+import { createDropHandles, expandHandles } from "./dropHandles.js";
+import { TIPS, TipLine, nextTip, randomTipIndex } from "./components/TipLine.js";
 import { completePath } from "./pathComplete.js";
 import { formatHelp } from "./help.js";
 import { hasApiKey, saveApiKey, removeApiKey, useApiKey, globalEnvPath, reloadConfig } from "./bootstrap.js";
@@ -65,15 +69,26 @@ import { ApprovalBox } from "./components/ApprovalBox.js";
 import { BlockView } from "./components/BlockView.js";
 import { initialState, reduce, trimNarration, type Action, type Block, type TranscriptState } from "./transcript.js";
 import { isTight } from "./blockSpacing.js";
+import { parseScreenArg, screenChoices, screenNotice, startupMode, type ScreenMode } from "./screenMode.js";
+import { applyScreenMode } from "./screenShell.js";
+import { saveScreenMode } from "./screenStore.js";
+import { needsMeasure, pruneHeights } from "./blockHeights.js";
 import { BASE_COMMANDS } from "./commands.js";
 import { manualCommand, refusalReason } from "./selfUpdate.js";
 import { currentInstall, requestRestart, runUpdate } from "./updateRunner.js";
-import { enableMouse, readWheel, stripMouse } from "./mouse.js";
+import { enableMouse, readMouse, readWheel, stripMouse } from "./mouse.js";
+import { applySelection, ctrlCShouldCopy, isEmpty, selectionText, type Selection } from "./selection.js";
+import { latestScreen, repaintOverlay, setFrameOverlay } from "./framebuffer/overlay.js";
+import { copyToClipboard } from "./clipboard.js";
 import { chatLayout, reflowScroll } from "./chatAnchor.js";
+import { growFill, INLINE_LIVE_RESERVE, NO_FILL } from "./startupFill.js";
+import { setRowsBelowCaret } from "./exitCursor.js";
+import { caretCell } from "./caretPark.js";
+import { countNewReplies, hitsPill, pillBounds, scrollPill, type PillBounds } from "./scrollPill.js";
 import { virtualWindow } from "./virtualWindow.js";
 import { perf, perfEnabled } from "./perfLog.js";
-import { isGroupMember, groupSettled, planGroupReveal, resultQueued } from "./groupReveal.js";
-import { drain as drainQueue, popAll as popAllQueued, visibleQueue } from "./messageQueue.js";
+import { isGroupMember, groupSettled, planGroupReveal, planStandaloneReveal, resultQueued, STANDALONE_HOLD_MS } from "./groupReveal.js";
+import { drain as drainQueue, popAll as popAllQueued, queueMessage, takeSteerable, visibleQueue, type Queued } from "./messageQueue.js";
 import { routeCommand, parseCommandLine, unknownCommandMessage } from "./commandRoute.js";
 import { resolveChoice } from "./commandArgs.js";
 import { carryAcrossFreshSession } from "./sessionCarry.js";
@@ -92,6 +107,10 @@ import { DEFAULT_MODE, modeById, modeFromFlags, nextMode, type ModeId } from "./
 import { ApprovalChannel } from "./approvalChannel.js";
 
 const MINDWEAVE_DOCS_URL = "https://mindweave.dev";
+
+/** How long each hint under the input box stays up. Long enough to read twice without
+ *  hurrying, short enough that a session sees the whole set rather than one of them. */
+const TIP_ROTATE_MS = 12_000;
 
 /** Commands whose whole job is to open a surface in the box under the input. Written out
  *  in full, because only a bare invocation opens anything: given an argument each of these
@@ -146,6 +165,7 @@ type Overlay =
   | { kind: "provider" }
   | { kind: "model" }
   | { kind: "think" }
+  | { kind: "screen" }
   | { kind: "shells"; items: ShellInfo[] }
   | { kind: "mcp"; items: McpStatus[] }
   | {
@@ -171,9 +191,14 @@ const RESUME_MODES = [
 export interface AppProps {
   /** Set only by a relaunch after `/update`. */
   resumeSessionId?: string;
+  /** The shell to open in, already resolved from the env var and the project's saved
+   *  choice. Resolved by the caller because reading it touches the disk, and because the
+   *  same answer decides whether to take the alternate screen at all — before this ever
+   *  renders. See index.ts. */
+  initialScreen?: ScreenMode;
 }
 
-export function App({ resumeSessionId }: AppProps) {
+export function App({ resumeSessionId, initialScreen }: AppProps) {
   // The transcript state machine lives in a ref and is advanced by the reducer as
   // the stream arrives; `render` forces a paint. A ref (not useState) so the async
   // streaming loop always reads/writes the latest state without stale closures.
@@ -211,12 +236,68 @@ export function App({ resumeSessionId }: AppProps) {
   // flag the engine actually acts on (set by applyMode / attachApproval).
   const [mode, setMode] = useState<ModeId>(DEFAULT_MODE);
   const modeRef = useRef<ModeId>(DEFAULT_MODE);
-  // Picked once per session, rendered inside the input box (PromptInput's `tip` prop).
-  const [tip] = useState(() => TIPS[Math.floor(Math.random() * TIPS.length)]);
+  // The hint under the input box. It ADVANCES (see TipLine): picking one at startup and
+  // holding it meant a whole session showed a single hint out of the set, so the rest were
+  // written and never read. Starts somewhere random so consecutive launches differ.
+  // The drag in progress, or the one just finished and still highlighted. A REF and not
+  // state: it is painted by the framebuffer overlay rather than by React, so changing it
+  // must not cost a render (see the pointer effect).
+  const selection = useRef<Selection | null>(null);
+  /**
+   * Drop the highlight, if there is one, and stop tinting frames.
+   *
+   * The overlay is installed only for as long as a selection exists, which matters
+   * because the renderer keeps a spare copy of every frame while one is installed (so a
+   * drag can be re-tinted without a re-render). That copy is worth its cost during a drag
+   * and is pure waste the rest of the time, which is nearly all of it. Repaint FIRST,
+   * then uninstall: the repaint is what takes the highlight off the screen.
+   */
+  const clearSelection = useCallback(() => {
+    if (!selection.current) return;
+    selection.current = null;
+    repaintOverlay();
+    setFrameOverlay(null);
+  }, []);
+  // PromptInput installs the handler that turns a click into a caret position; only it
+  // knows what its rows currently hold. Null until the input is on screen.
+  const caretClick = useRef<((x: number, y: number) => void) | null>(null);
+  /** Offers a finished drag to the input as an editable range; false if it was not text
+   *  the input owns. */
+  const textSelect = useRef<((a: { x: number; y: number }, b: { x: number; y: number }) => boolean) | null>(null);
+  const placeCaretAt = useCallback((x: number, y: number) => {
+    caretClick.current?.(x, y);
+  }, []);
+
+  const [tipIdx, setTipIdx] = useState(randomTipIndex);
+  // Slow on purpose. The line sits under the box the user is typing in, so it has to read
+  // as something that changed while they were not looking, never as movement competing
+  // for attention. One interval for the process, not one per render.
+  useEffect(() => {
+    const timer = setInterval(() => setTipIdx((i) => nextTip(i)), TIP_ROTATE_MS);
+    return () => clearInterval(timer);
+  }, []);
   // How far the transcript is scrolled back, in LINES from the bottom. Alt-screen
   // has no terminal scrollback of its own (altScreen.ts), so this is ours to
   // implement; 0 means pinned to the newest.
   const [scrollUp, setScrollUp] = useState(0);
+  /**
+   * The newest block id at the moment the view left the bottom, or null while pinned.
+   *
+   * This is what "new since you scrolled away" is counted from. A REF rather than
+   * state, and that is the point: it is written in an effect and read during render,
+   * so recording it costs no re-render of its own. The count it feeds only changes
+   * when a block arrives — which is a render already.
+   */
+  const scrollMark = useRef<number | null>(null);
+  /**
+   * How far the transcript can actually travel, from the last frame.
+   *
+   * Only the render knows it — it needs the measured content and viewport heights —
+   * but the scroll handlers, which run between frames, are what have to respect it.
+   * A ref is the one thing both can reach without the handlers being rebuilt on every
+   * height change.
+   */
+  const maxScrollRef = useRef(0);
   // The transcript's real rendered height, from measureElement — never estimated.
   const contentRef = useRef<DOMElement | null>(null);
   const [contentHeight, setContentHeight] = useState(0);
@@ -228,18 +309,25 @@ export function App({ resumeSessionId }: AppProps) {
   // `virtualWindow.ts` for why that is the whole performance story, and why exact
   // is the word that matters.
   //
-  // Keyed by the BLOCK OBJECT, not its id, and that is load-bearing rather than
+  // Each entry keeps the BLOCK OBJECT it was measured from, and a lookup only counts
+  // when that object is still the current one. That is load-bearing rather than
   // stylistic: the transcript reducer returns a NEW object whenever a block changes
   // (streaming text growing, `live` flipping at turn end) and the same object when it
-  // does not. So a changed block simply has no cached height, is rendered in full, and
+  // does not. So a changed block simply has no usable height, is rendered in full, and
   // is re-measured — cache invalidation falls out of the data model instead of needing
-  // a rule that could be forgotten for some future block type. Weak, so blocks dropped
-  // past the scrollback cap do not pin their heights in memory forever.
-  const blockHeights = useRef<WeakMap<Block, number>>(new WeakMap());
+  // a rule that could be forgotten for some future block type.
+  //
+  // A Map keyed by id rather than a WeakMap keyed by the object, for one reason: a
+  // WeakMap cannot be iterated, and a resize needs to walk every height to rescale it
+  // (see the width-change block below). The identity check gives the same invalidation
+  // a WeakMap gave for free; `pruneHeights` gives the same bounded memory.
+  /** `scaled` marks a height that was RESCALED by a width change rather than measured:
+   *  good enough to size a spacer with, and still owed a real measurement. See the
+   *  width-change branch in the render. */
+  const blockHeights = useRef<Map<number, { height: number; block: Block; scaled?: boolean }>>(new Map());
   // Nodes captured this render, waiting to be measured once Yoga has laid them out.
   const toMeasure = useRef<Map<Block, DOMElement>>(new Map());
-  // Every height is only true for the width it was measured at, so a resize throws
-  // the whole table away rather than scrolling against stale numbers.
+  // The width every cached height was measured at. A height is only true for one width.
   const heightsWidth = useRef(0);
   // Bumped when a measurement lands, purely to re-render so the new height can be
   // used. Never read.
@@ -252,6 +340,14 @@ export function App({ resumeSessionId }: AppProps) {
   // the terminal, which corrupts the whole frame if that's the row that tips
   // outputHeight to stdout.rows. Measured, this can't drift.
   const footerRef = useRef<DOMElement | null>(null);
+  /** The inline shell's whole live region, measured so the exit path knows how far the
+   *  caret sits above the last row drawn. See exitCursor.ts. */
+  const liveRef = useRef<DOMElement | null>(null);
+  /** The chip's row WITHIN the live region, from the layout, or null when it is not up. */
+  const pillRow = useRef<number | null>(null);
+  /** The chip's cells in SCREEN coordinates, for the pointer handler. Null when there is
+   *  nothing to click. Published by the render, read between frames. */
+  const pillHit = useRef<PillBounds | null>(null);
   const [footerHeight, setFooterHeight] = useState(0);
   // The chat viewport's REAL height. Yoga decides it now (flexGrow beside a
   // flexShrink:0 footer); this is read back purely so the scroll maths knows how
@@ -323,10 +419,140 @@ export function App({ resumeSessionId }: AppProps) {
   const needsKey = setupOpen || keysOpen;
   // Sent-message history, oldest-first — walked with ↑/↓ in the input.
   const [history, setHistory] = useState<string[]>([]);
-  // Messages typed while Mindweave is working — queued, then sent in order when the
-  // turn ends; the input stays live while busy.
-  const queueRef = useRef<string[]>([]);
-  const [queued, setQueued] = useState<string[]>([]);
+  // Which shell the app is wearing. See `screenMode.ts`; `/screen` switches it.
+  //
+  // State rather than a ref, because the render branches on it. The terminal side of the
+  // switch — alternate screen, mouse, framebuffer — is applied by the effect below, not
+  // here, so the escape codes never go out during a render.
+  const [shell, setShell] = useState<ScreenMode>(() => initialScreen ?? startupMode());
+  /**
+   * Reading mode: the inline shell, scrolling with the prompt PINNED.
+   *
+   * The inline shell prints into the terminal's scrollback and the terminal owns the
+   * wheel, so looking back at anything carries the prompt off the top of the screen
+   * with everything else. That is how a shell prompt behaves and it is what the shell
+   * is for — right up until you want to read the middle of a long answer and reply to
+   * it, which is most of the time.
+   *
+   * A pinned prompt is normally something only a full-screen layout offers, because
+   * pinning means owning the screen. Offering it here without owning the screen is what
+   * this mode is, and it is built to cost nothing while it is not in use.
+   *
+   * While reading, the app renders a frame of its own into the live region and scrolls
+   * INSIDE it — the same viewport, offset and measurement the full-screen shell uses,
+   * with the footer pinned under it. Leaving it hands the terminal back.
+   *
+   * DERIVED from `scrollUp`, not its own state, and that is what fixes the flicker an
+   * earlier version had. That version tracked reading separately and opened it with
+   * `setReading(true)` followed by `setScrollUp(...)` — two calls, and Ink runs React
+   * in LegacyRoot mode, where state updates outside a React event are NOT batched. Each
+   * call flushed its own synchronous render: one frame painted with reading true and
+   * `scrollUp` still at its old value (0, on the way in — the "at rest" shape), and the
+   * very next painted the real scrolled position. Two different frames for one
+   * keystroke is a flicker by definition, and the same shape hit on the way out — a
+   * separate effect watched for `scrollUp` reaching 0 and called `setReading(false)` a
+   * render late, so the screen showed the framed view sitting at the bottom for one
+   * frame before dropping to the tail view.
+   *
+   * `scrollUp > 0` means the same thing `reading` did, computed in the SAME render as
+   * the scroll position that decides it, in the same commit. Entering and leaving both
+   * become the ordinary case of one state value changing once — no closing effect, no
+   * second render, nothing for the terminal to paint twice.
+   */
+  const reading = shell === "inline" && scrollUp > 0;
+  // Where the reprint starts, and how many blank rows go above it. Both are decided ONCE
+  // when the inline shell is entered and then held: <Static> prints its items a single
+  // time, so anything that changed between renders would either never be printed or be
+  // printed twice.
+  const reprintFrom = useRef(0);
+  const startFill = useRef(0);
+  // Bumped to remount <Static> when the inline shell is entered. See below.
+  const [staticEpoch, setStaticEpoch] = useState(0);
+  /**
+   * A second remount counter, bumped DURING RENDER when the reading view closes.
+   *
+   * Separate from `staticEpoch` because of WHEN it changes, not what it means. The shell
+   * switch can afford an effect; closing the reading view cannot — see the block that
+   * writes this, next to the inline return.
+   */
+  const closeEpoch = useRef(0);
+  /** The inline startup fill and the terminal height it was sized for. Declared here,
+   *  above the effects that also seat the fill, so all of them share one basis and the
+   *  render-phase grow does not re-fire on a switch that already sized it. See
+   *  startupFill.ts. */
+  const fillState = useRef(NO_FILL);
+  /** Whether the inline reading view was open on the previous render — declared here,
+   *  above the first-run gates, because a hook below them changes the hook count when a
+   *  gate closes and React crashes the app. Its render-phase logic stays near the inline
+   *  return. */
+  const wasReadingInline = useRef(false);
+  /** How far <Static> was allowed to reach while the reading viewport is open, or null
+   *  when closed. Declared above the gates for the same reason as wasReadingInline. */
+  const frozenStatic = useRef<number | null>(null);
+  /**
+   * Whether a `<Static>` remount should reprint the one-time header.
+   *
+   * True for a remount that is replacing a screen the header is genuinely absent from —
+   * arriving from the full-screen shell, whose alternate buffer discarded it. False for
+   * one that is only refilling rows below a header still sitting in scrollback, where
+   * printing it again would put a second banner in the middle of the conversation.
+   */
+  const showHeader = useRef(true);
+  const shellBefore = useRef<ScreenMode | null>(null);
+  useEffect(() => {
+    applyScreenMode(shell);
+    // Arriving in the inline shell from the other one, the conversation so far has to be
+    // REPRINTED, and nothing else will do it.
+    //
+    // Ink's <Static> keeps a count of how many items it has already emitted and renders
+    // only `items.slice(index)` — printed once is its whole contract. Every one of those
+    // items was written into the ALTERNATE screen buffer, which leaving just discarded.
+    // So the terminal came back to the primary buffer holding whatever was there before
+    // the session started, and the transcript existed only in a counter's memory: no
+    // banner, no history, and nothing to scroll back to.
+    //
+    // A new key remounts it, which resets that counter to zero and prints the whole list
+    // into the buffer the user is actually looking at. Only on the transition, never on
+    // first mount — there, <Static> has printed nothing yet and remounting would emit
+    // every block a second time.
+    if (shell === "inline" && (shellBefore.current === null || shellBefore.current !== shell)) {
+      // Only the RECENT conversation is reprinted, not the whole session.
+      //
+      // Everything printed while fullscreen went into the alternate screen buffer and is
+      // gone whatever we do; reprinting all of it costs about 1.7ms a block, measured, so
+      // a long session spent a third of a second on a blank screen printing scrollback
+      // nobody asked to see. A couple of screens is all that can be looked at anyway.
+      reprintFrom.current = Math.max(0, committed.length - INLINE_REPRINT_BLOCKS);
+      // Blank rows so the conversation lands at the BOTTOM of the screen rather than the
+      // top. A terminal prints from wherever the cursor is, which after leaving the
+      // alternate screen is wherever the shell left it — usually near the top, with the
+      // prompt then floating in the middle of an empty window. These push it down. They
+      // are printed ONCE, into scrollback, so they cost nothing after the first screen
+      // and disappear the moment there is enough conversation to fill it.
+      startFill.current = Math.max(0, rows - INLINE_LIVE_RESERVE);
+    fillState.current = { fill: startFill.current, basis: rows };
+      // Keep the render-phase grow in step, so it does not treat this as a fresh void.
+      fillState.current = { fill: startFill.current, basis: rows };
+      // This reprint IS replacing a discarded screen, so it owns the header.
+      showHeader.current = true;
+    }
+    if (shellBefore.current !== null && shellBefore.current !== shell && shell === "inline") {
+      setStaticEpoch((n) => n + 1);
+    }
+    shellBefore.current = shell;
+  }, [shell]);
+
+
+
+  // Messages typed while Mindweave is working — the input stays live. Ordinary prose is
+  // handed to the RUNNING turn at its next step boundary; a slash command, and anything
+  // typed after Esc, waits for the turn to be over. See messageQueue.ts.
+  const queueRef = useRef<Queued[]>([]);
+  const [queued, setQueued] = useState<Queued[]>([]);
+  // Esc has been pressed and the turn is still winding down. Anything typed in that gap
+  // belongs to the NEXT turn: steering it would carry out a correction inside the very
+  // turn the user just stopped. Cleared when the next turn starts.
+  const interrupting = useRef(false);
   // An interactive overlay (session picker, model/think chooser, or an approval
   // prompt). When set, it owns the keyboard and the input box is hidden.
   const [overlay, setOverlay] = useState<Overlay | null>(null);
@@ -415,7 +641,7 @@ export function App({ resumeSessionId }: AppProps) {
         // but they are ours, not the person's. Replaying one draws it as a `>` prompt
         // the user never typed — seen live as "> That was 3 sentences between tool
         // calls…" sitting in their own chat history.
-        if (!e.synthetic) dispatch({ type: "user", text: stripAttachments(e.content) });
+        if (!e.synthetic) dispatch({ type: "user", text: collapsePastes(stripAttachments(e.content)) });
       } else if (e.role === "summary") {
         dispatch({ type: "note", text: "— resumed; earlier context summarized —" });
       } else if (e.role === "assistant") {
@@ -456,6 +682,7 @@ export function App({ resumeSessionId }: AppProps) {
           ...(e.quiet ? { quiet: true } : {}),
           ...(e.displayName ? { name: e.displayName } : {}),
           ...(e.displayKind ? { action: e.displayKind } : {}),
+          ...(e.awaitsModel ? { awaitsModel: true } : {}),
         });
       }
     }
@@ -562,10 +789,17 @@ export function App({ resumeSessionId }: AppProps) {
   function expandPastes(text: string): string {
     let out = text;
     for (const [chip, content] of pasteStore.current) {
-      if (out.includes(chip)) out = out.split(chip).join(content);
+      if (out.includes(chip)) out = out.split(chip).join(wrapPastedText(content));
     }
     return out;
   }
+
+  // The same trade for dropped files: the buffer holds `mwimg1`, this holds the path it
+  // stands for. Resolution against the session's cwd happens here so the store is keyed
+  // by one canonical form however the path was spelled when it landed.
+  const dropHandles = useRef(
+    createDropHandles((p) => (isAbsolute(p) ? resolve(p) : resolve(session.current?.cwd ?? process.cwd(), p))),
+  );
 
   // File-path completion for the input's `@mention` picker (primary root).
   const pathComplete = useRef((prefix: string) => {
@@ -575,11 +809,39 @@ export function App({ resumeSessionId }: AppProps) {
 
   // Live terminal width — drives message wrapping (Static items capture it at
   // commit time; the live input reflows on resize for free).
-  const { columns: width, rows } = useTerminalSize();
+  // The inline shell defers a resize until the drag settles; the full-screen one takes
+  // it immediately. See useTerminalSize for why the two differ.
+  const { columns: width, rows } = useTerminalSize(shell === "inline");
   // Read live at render time as well as from the polled state above: mid-resize
   // the state can lag the real terminal by a tick, and a frame one row too TALL
   // is the failure that corrupts the screen (see the layout comment below).
   const { stdout } = useStdout();
+
+  // A width change in the inline shell: reprint, rather than trust the erase.
+  //
+  // Ink redraws its live region by erasing the number of LINES it last wrote. After a
+  // resize that number is wrong — the same content wraps differently at the new width, and
+  // the terminal has reflowed what was already on screen — so it erases too few and leaves
+  // half of the old region behind: a second status line, a fragment of the input box's
+  // border, a ladder of them down a slow drag.
+  //
+  // Predicting the right number means predicting the post-resize wrapping of everything on
+  // screen, which is the layout itself. So it is not predicted. The region is printed
+  // again, below the mess, with the usual fill above it — the stale copy goes up into
+  // scrollback where it belongs and the screen comes back clean with the conversation at
+  // the bottom. A resize is rare enough to pay for that.
+  //
+  // Only on WIDTH. Height changes do not re-wrap anything, and reprinting on one would
+  // fire on every vertical drag for nothing.
+  const widthBefore = useRef(width);
+  useEffect(() => {
+    if (widthBefore.current === width) return;
+    widthBefore.current = width;
+    if (shell !== "inline") return;
+    reprintFrom.current = Math.max(0, committed.length - INLINE_REPRINT_BLOCKS);
+    startFill.current = Math.max(0, rows - INLINE_LIVE_RESERVE);
+    setStaticEpoch((n) => n + 1);
+  }, [width, shell]);
 
   // One session for the whole conversation (a ref so it survives re-renders).
   const session = useRef<Session | null>(null);
@@ -657,7 +919,7 @@ export function App({ resumeSessionId }: AppProps) {
     if (!next) return;
     queueRef.current = next.rest;
     setQueued(next.rest);
-    void handleSubmit(next.send);
+    void handleSubmit(next.send, { arrival: next.priority === "now" ? "interrupting" : undefined });
   }, [busy, ready, needsKey, overlay]);
 
   // ↑ or Esc takes the queue back into the input box, editable, and empties it. This
@@ -686,6 +948,7 @@ export function App({ resumeSessionId }: AppProps) {
     usageSamples.current = [];
     meter.current = meterReset();
     setTaskUsage(null); // clear the previous task's summary while this one runs
+    interrupting.current = false;
     abortRef.current = new AbortController();
     setBusy(true);
   }
@@ -693,12 +956,51 @@ export function App({ resumeSessionId }: AppProps) {
   // Esc interrupts the current turn: it aborts the model call AND kills a running
   // command — run_command listens to this same signal (see runShell), so a hung
   // command (e.g. an installer waiting on a GUI) can no longer freeze the agent.
+  /**
+   * Ctrl+C quits, all the way.
+   *
+   * Ink no longer does anything with it (`exitOnCtrlC: false` in index.ts), because what
+   * it did was unmount and stop there: the process stayed up with the turn still running,
+   * and the two `exit` hooks that matter — restoring the terminal, and synchronously
+   * killing background shells — never ran, because nothing exited.
+   *
+   * `process.exit` is what runs them. 130 is the conventional code for a program ended by
+   * SIGINT, so a shell script wrapping this reads the interruption correctly.
+   *
+   * Esc remains the way to stop a TURN without leaving. This is the way to leave.
+   *
+   * EXCEPT while a selection is on screen. The app owns the mouse in the full-screen
+   * shell, so text is selected by dragging and Ctrl+C is the reflex to copy it — and
+   * quitting on that reflex, right after someone highlighted something to keep, loses
+   * both the selection and the session. So a Ctrl+C with a highlight up COPIES it (the
+   * drag already did on release; this re-copies so the keystroke is never a no-op) and
+   * takes the highlight down, and does not quit. With nothing selected it quits as
+   * before — so a second Ctrl+C, once the highlight is gone, still leaves.
+   */
+  useInput(
+    (input, key) => {
+      if (!key.ctrl || input !== "c") return;
+      const sel = selection.current;
+      if (ctrlCShouldCopy(sel)) {
+        const screen = latestScreen();
+        if (screen) copyToClipboard(selectionText(screen, sel));
+        clearSelection();
+        return;
+      }
+      abortRef.current?.abort();
+      process.exit(130);
+    },
+    { isActive: true },
+  );
+
   // Only while working AND no overlay is open (an open Picker owns Esc for its own
   // cancel). The input ignores Esc, so typing-while-busy is safe.
   useInput(
     (_input, key) => {
       if (key.escape) {
         abortRef.current?.abort();
+        // From here until the next turn starts, anything typed is for the NEXT turn.
+        interrupting.current = true;
         // Anything still waiting to be asked is answered as declined. A queued approval
         // has no overlay to press Esc on, so without this the tool holding it would wait
         // for the rest of the session on a question the user has already stopped.
@@ -751,21 +1053,149 @@ export function App({ resumeSessionId }: AppProps) {
   // the animation explains a movement the user did not make. A wheel notch is a direct
   // manipulation, and direct manipulation must be 1:1
   // with the input or it reads as lag, because it IS lag. Do not re-add it here.
+  //
+  // CLAMPED AT BOTH ENDS, and the top one is not cosmetic. `chatLayout` clamps for
+  // DISPLAY, so scrolling up past the first line looked like it had stopped while the
+  // counter kept climbing — and every one of those phantom lines then had to be
+  // scrolled back down before the view moved at all. A flick or two past the top bought
+  // a second of a wheel that did nothing, which reads as the app having frozen.
   const scrollBy = useCallback((lines: number) => {
-    setScrollUp((s) => Math.max(0, s + lines));
+    setScrollUp((s) => Math.max(0, Math.min(maxScrollRef.current, s + lines)));
+  }, []);
+
+  /**
+   * Open the inline shell's reading view, moving by `lines` in the same gesture.
+   *
+   * ONE state change, `scrollUp` alone — `reading` is derived from it, so this cannot
+   * reintroduce the two-render flicker a separate `setReading(true)` used to cause.
+   *
+   * UNCLAMPED, and that half has to stay. `maxScrollRef` is published by the render,
+   * and until this frame exists there is no viewport, nothing measured, and the last
+   * value it holds is zero. Routed through `scrollBy`, the very first notch would
+   * therefore be clamped to nothing — `reading` would compute false, and the wheel
+   * would appear to do nothing at all.
+   *
+   * Overshooting is the safe direction and it is self-correcting: `chatLayout` clamps
+   * for display, so the frame shows the top rather than anything invalid, and the next
+   * notch goes through `scrollBy` with a real measurement and pulls the number back to
+   * what actually exists.
+   */
+  const openReading = useCallback((lines: number) => {
+    setScrollUp((s) => Math.max(1, s + Math.abs(lines)));
   }, []);
 
   useInput(
     (_input, key) => {
+      // In the inline shell, scrolling back is a MODE, and any of these opens it.
+      //
+      // Nothing below can do anything until the app is drawing its own frame — the
+      // inline shell has no viewport to offset — so the first press has to build one.
+      // The scroll it was asking for then happens in the same keystroke, because a key
+      // that only "gets ready" and moves nothing reads as a key that did nothing.
+      const back = key.pageUp || (key.upArrow && key.shift);
+      if (shell === "inline" && back && !reading) {
+        // Same first-notch problem the wheel has: there is no viewport yet, so nothing
+        // is measured and a clamped scroll would move nothing. See openReading.
+        openReading(key.pageUp ? PAGE_LINES : 1);
+        return;
+      }
+
       // Shift+arrows as well as PageUp/PageDown: Windows consoles routinely eat
       // the paging keys before an app sees them, so there has to be a second way in.
       if (key.pageUp) scrollBy(PAGE_LINES);
       else if (key.pageDown) scrollBy(-PAGE_LINES);
       else if (key.upArrow && key.shift) scrollBy(1);
       else if (key.downArrow && key.shift) scrollBy(-1);
+      // Back to the newest in one keystroke, and back to the start of the conversation
+      // in the other. Without these, the only way out of a long scroll was to scroll
+      // the whole distance again by hand — and the chip that appears while scrolled
+      // back (see scrollPill.ts) names ctrl+End, so this is the half that makes the
+      // chip true. CTRL is what keeps them off the input: plain End and Home belong to
+      // the caret, whether or not the input claims them yet.
+      else if (key.end && key.ctrl) setScrollUp(0);
+      else if (key.home && key.ctrl) setScrollUp(maxScrollRef.current);
     },
     { isActive: ready && overlay === null },
   );
+
+  // Leaving the reading view when it reaches the bottom needs no effect of its own:
+  // `reading` is `scrollUp > 0`, so landing on zero — the wheel, the keys, ctrl+End, or
+  // a sent message snapping the view back before it delivers — closes it in the same
+  // render that moved the scroll, not a render later. See the derivation above for why
+  // a separate effect here was the other half of the flicker.
+
+  /**
+   * The wheel, for as long as the reading view is up.
+   *
+   * ON FOR THE WHOLE INLINE SESSION, not only while the reading view is up, and the
+   * reason is that the wheel is how anyone actually scrolls.
+   *
+   * Reporting is what makes a wheel notch reach this process at all. Switched on only
+   * once reading had already started, the gesture that starts reading could never be the
+   * wheel — the first notch went to the terminal, which scrolled its own buffer and
+   * carried the prompt off the top, which is the whole thing being fixed. There is no
+   * way to watch for a wheel notch without taking the wheel.
+   *
+   * So the trade is made openly: while an inline session is running, the terminal's own
+   * wheel scrolls nothing and this app scrolls instead. Its scrollbar still drags and
+   * Shift still selects, both being the terminal's own doing, and everything printed is
+   * still in the terminal's scrollback where it has always been.
+   *
+   * The full-screen shell is untouched here: it takes the mouse through
+   * `applyScreenMode`, which is also what releases it on the way into this one — so this
+   * effect runs after that release and is what puts it back for the inline shell.
+   */
+  useEffect(() => {
+    if (shell !== "inline") return;
+    const off = enableMouse();
+    return () => off();
+  }, [shell]);
+
+  // Leaving the reading view needs no reprint, and an earlier version of this that
+  // forced one is what actually caused the reported flicker — a full transcript area
+  // going black for a frame, footer untouched, right at the instant the view landed on
+  // the bottom.
+  //
+  // The reasoning that led there was borrowed from the wrong case. Coming back from the
+  // FULL-SCREEN shell genuinely needs a reprint: everything <Static> had printed went
+  // into the ALTERNATE screen buffer, which leaving it discards outright — nothing of
+  // it survives in the terminal the user is now looking at. The reading view never
+  // leaves the primary buffer at all. Every line it ever showed was already sitting in
+  // real scrollback the moment <Static> printed it, before reading even opened, and nothing
+  // about opening or closing the reading frame touches that. Shrinking the live region
+  // from the frame's height back down to the ordinary tail is exactly the same erase the
+  // live region already goes through many times an ordinary conversation — a reply
+  // finishing and its block draining into <Static> shrinks the tail the same way, with
+  // no special handling, because Ink's own line-count bookkeeping is what makes an
+  // ordinary shrink safe.
+  //
+  // What the reprint bought instead was a REMOUNT: a new `<Static>` key forces every
+  // held item — up to `INLINE_REPRINT_BLOCKS` of them, full diffs, syntax highlighting
+  // and all — to be laid out and printed again, all in the same instant the frame is
+  // already shrinking. That is real, synchronous work sitting between the erase and the
+  // redraw, for content the terminal already had. Removed rather than budgeted, since
+  // there was never a hole here to fill.
+
+  // Reading mode belongs to the inline shell alone: the full-screen one is always
+  // drawing its own frame, so there is no mode to be in.
+  const readingInline = shell === "inline" && reading;
+
+  /**
+   * Where "new since you scrolled away" counts from.
+   *
+   * Set on the frame the view leaves the bottom and cleared the moment it returns, so
+   * a reader who scrolls back, reads, and comes back down starts the next scroll with
+   * a clean count rather than one carried over from the last.
+   *
+   * Depends on `scrollUp` alone. The transcript's own id is read at effect time, which
+   * is after the render that moved the view — the same frame, nothing appended in
+   * between, so the mark is exactly the newest block the reader had seen.
+   *
+   */
+  useEffect(() => {
+    if (scrollUp === 0) scrollMark.current = null;
+    else if (scrollMark.current === null) scrollMark.current = stateRef.current.seq;
+  }, [scrollUp]);
 
   // Measure the transcript's real rendered height after every render. Deliberately
   // has no dependency list: the height changes for reasons no dep could name — a
@@ -799,18 +1229,33 @@ export function App({ resumeSessionId }: AppProps) {
     if (toMeasure.current.size === 0) return;
     let learned = false;
     for (const [block, node] of toMeasure.current) {
-      if (blockHeights.current.has(block)) continue;
+      // A block that is still OPEN is deliberately not recorded.
+      //
+      // Its content changes on every delta, so the reducer hands back a new object each
+      // time and the height taken a moment ago is already wrong. Recording it anyway
+      // cost a measurement AND a re-render per delta — the state bump below — which on
+      // a streaming reply is the hottest path in the app. An open block is always the
+      // last one, so leaving it out of the table costs a single block laid out in full.
+      if (!block.done) continue;
+      // The same rule the ref callback used to queue it, so the two can never disagree
+      // about what still owes a measurement. See blockHeights.needsMeasure.
+      if (!needsMeasure(blockHeights.current.get(block.id), block)) continue;
       const { height } = measureElement(node);
       // A height of 0 is not a measurement, it is a block that has not been laid out
       // yet. Recording it would collapse the block to nothing the moment it scrolled
       // off — the exact class of silent, permanent corruption this cache must not have.
       if (height > 0) {
-        blockHeights.current.set(block, height);
+        blockHeights.current.set(block.id, { height, block });
         learned = true;
       }
     }
     toMeasure.current.clear();
-    if (learned) bumpHeights((t) => t + 1);
+    // Only when something was actually recorded, which is now once per block rather
+    // than once per delta: a height that nothing can use is not worth a frame.
+    if (learned) {
+      pruneHeights(blockHeights.current);
+      bumpHeights((t) => t + 1);
+    }
   });
 
   // Same measurement, for the footer — see footerHeight above.
@@ -829,23 +1274,168 @@ export function App({ resumeSessionId }: AppProps) {
     setChatHeight((h) => (h === height ? h : height));
   });
 
-  // The wheel. Read straight off stdin rather than through useInput, because a
-  // mouse report is not a keypress and Ink's key parser has no notion of one.
+  /**
+   * How far the caret sits above the last row this app drew.
+   *
+   * Published for the exit path, which writes it as a cursor move so the shell that
+   * takes the terminal back prints its prompt BELOW the conversation instead of on top
+   * of it. See exitCursor.ts for what that fixes; the number has to be measured here
+   * because only the layout knows it.
+   *
+   * No dependency list, like the measurements around it: what is under the caret changes
+   * for reasons no dep could name — a wrapped input line, an opened palette, a picker, an
+   * approval — and each one is a different distance.
+   *
+   * Zero for the full-screen shell, which needs no correction: it hands the terminal back
+   * by leaving the alternate screen, and that restores the primary buffer's cursor too.
+   */
+  useEffect(() => {
+    if (shell !== "inline" || !liveRef.current) {
+      setRowsBelowCaret(0);
+      return;
+    }
+    const caret = caretCell();
+    if (!caret) {
+      setRowsBelowCaret(0);
+      return;
+    }
+    const { height, y } = measureElement(liveRef.current) as { height: number; y?: number };
+    // `caretCell` reports the caret's row within the live region; `liveRef` measures that
+    // region. The last row it drew is `height - 1`, so the gap is what remains below.
+    setRowsBelowCaret(height - 1 - (caret.y - (y ?? 0)));
+  });
+
+  /**
+   * The pointer: the wheel, and dragging to select.
+   *
+   * Read straight off stdin rather than through useInput, because a mouse report is not
+   * a keypress and Ink's key parser has no notion of one.
+   *
+   * The selection lives in a REF and is painted by the framebuffer overlay, so a drag
+   * never causes a React render. That is deliberate: the pointer moves a column at a
+   * time, and re-rendering the whole app on each of those would be both wasteful and a
+   * chance to reflow the screen under a user who is only trying to highlight a word.
+   * `repaintOverlay` re-tints the frame already on screen instead.
+   */
+  // Mouse reporting itself is switched on and off by  — it belongs to
+  // the shell, not to this component, because the inline shell must never have it on.
+  // What is left here is the highlight, which has to come down when the app unmounts.
   useEffect(() => {
     if (!ready) return;
-    const off = enableMouse();
-    const stdin = process.stdin;
-    const onData = (chunk: Buffer | string) => {
-      for (const dir of readWheel(chunk.toString("utf8"))) {
-        scrollBy(dir === "up" ? WHEEL_LINES : -WHEEL_LINES);
+    return () => setFrameOverlay(null);
+  }, [ready]);
+
+  /**
+   * Everything the pointer does, read through `useInput`.
+   *
+   * NOT through a `data` listener on stdin, which is where this lived and why none of it
+   * worked: Ink 7 pulls input by calling `read()` on a `readable` event, so it has taken
+   * the bytes before a `data` handler is ever offered them. A listener attached that way
+   * is not called at all — no error, no warning, simply nothing, which is the hardest
+   * kind of wrong to see. Ink hands the same bytes here instead, with the ESC of a report
+   * already eaten, which is why the parser in mouse.ts matches it optionally.
+   *
+   * One handler for the wheel, the drag and the keystroke that dismisses a highlight,
+   * because they have to agree about what just happened: a mouse report arrives as
+   * "input" too, and a separate handler that treated any input as a keystroke would clear
+   * the selection on the very first drag event.
+   */
+  useInput(
+    (input) => {
+      const events = readMouse(input);
+      const notches = readWheel(input);
+
+      // ONE scroll for the whole flick, not one per notch.
+      //
+      // A single turn of the wheel arrives as several reports in one chunk (see
+      // mouse.ts), and Ink runs React in LegacyRoot mode, so state updates from here are
+      // NOT batched: every setState flushes its own synchronous render and its own full
+      // terminal redraw. Scrolling a notch at a time therefore did three renders for one
+      // flick, back to back, and the scroll lagged behind the hand turning the wheel.
+      //
+      // This is the same rule the input box already follows for keystrokes — one event
+      // in, one render out — applied to the other thing that arrives in bursts.
+      if (notches.length > 0) {
+        // Content moves out from under a selection when the view scrolls, so the
+        // highlight would be sitting on text that is no longer the text it copied.
+        clearSelection();
+        const lines = notches.reduce((n, dir) => n + (dir === "up" ? WHEEL_LINES : -WHEEL_LINES), 0);
+        // The wheel is how anyone actually scrolls, so in the inline shell it is what
+        // opens the reading view. Turning it UP is the gesture: the reader is going back
+        // through the conversation and wants the prompt to stay where they can type into
+        // it. Turning it down while already at the bottom is not — there is nothing
+        // below to go to, and building a frame for it would mean the view snapping open
+        // on a flick in the direction of the newest line.
+        if (shell === "inline" && !reading && lines > 0) openReading(lines);
+        else if (lines !== 0) scrollBy(lines);
       }
-    };
-    stdin.on("data", onData);
-    return () => {
-      stdin.off("data", onData);
-      off();
-    };
-  }, [ready, scrollBy]);
+
+      // ONE re-tint for a whole drag, not one per motion report — the same rule the
+      // wheel follows above, for the same reason. A terminal reports motion continuously
+      // while a button is held, so a single sweep of the hand arrives as a chunk of
+      // several reports; each one used to re-tint the entire screen and write it out,
+      // which is thousands of cells re-scanned per report. Only the LAST focus position
+      // in a chunk is on screen at the end of it, so the ones before it are painted for
+      // nobody. Cleared by press and release, which do their own painting.
+      let pendingDrag = false;
+      for (const event of events) {
+        if (event.kind === "press") {
+          pendingDrag = false;
+          // The chip is a button. It is the only thing on screen that says what it does,
+          // so a press on it does that and nothing else — no selection is begun, because
+          // starting one under a click that just moved the view would leave a highlight
+          // sitting on text that is no longer there.
+          //
+          // On PRESS rather than release: the chip is a single row and the view moves out
+          // from under the pointer the instant it is hit, so a release-matched-to-press
+          // would be testing the pointer against a screen that had already changed.
+          const hit = pillHit.current;
+          if (hit && hitsPill(hit, event.x, event.y)) {
+            clearSelection();
+            setScrollUp(0);
+            continue;
+          }
+          selection.current = { anchor: { x: event.x, y: event.y }, focus: { x: event.x, y: event.y } };
+          // Installed here rather than for the life of the session: see clearSelection.
+          setFrameOverlay((screen) => applySelection(screen, selection.current));
+          repaintOverlay();
+        } else if (event.kind === "drag") {
+          if (!selection.current) continue;
+          selection.current = { anchor: selection.current.anchor, focus: { x: event.x, y: event.y } };
+          pendingDrag = true;
+        } else {
+          pendingDrag = false;
+          const sel = selection.current;
+          if (!sel) continue;
+          if (isEmpty(sel)) {
+            // A click, not a drag. Nothing to copy; put the caret where it landed, and
+            // take the overlay back down — a press installs it, and a click that selects
+            // nothing would otherwise leave it running for the rest of the session.
+            selection.current = null;
+            repaintOverlay();
+            setFrameOverlay(null);
+            placeCaretAt(event.x, event.y);
+            continue;
+          }
+          // Copied on release, so selecting IS copying. The highlight stays up afterwards
+          // as the receipt for it, and goes when the next thing happens.
+          const screen = latestScreen();
+          if (screen) copyToClipboard(selectionText(screen, sel));
+          // If what was dragged is text in the input box, hand the range to the input as
+          // well, so Backspace takes the whole selection and typing replaces it — what
+          // selecting text means anywhere else. A drag over the transcript is not editable
+          // and the input declines it, leaving the selection as a copy and nothing more.
+          textSelect.current?.(sel.anchor, sel.focus);
+        }
+      }
+      if (pendingDrag) repaintOverlay();
+
+      // A real keystroke, so put any highlight away — the same as a terminal's own
+      // selection does the moment you type.
+      if (events.length === 0 && notches.length === 0) clearSelection();
+    },
+    { isActive: true },
+  );
 
   function endTurn() {
     if (turnStart.current != null) setLastMs(Date.now() - turnStart.current);
@@ -970,6 +1560,10 @@ export function App({ resumeSessionId }: AppProps) {
   // decision it drives (does the NEXT grouped toolStart need to be held) has to
   // be made before that action is even dispatched.
   const groupOpen = useRef(false);
+  // When the row currently at the front of the queue began waiting for its own result,
+  // and the timer that gives up on it. See the hold in pump().
+  const heldStart = useRef<{ toolId: string; at: number } | null>(null);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // A new block appears (paced); a token (silent), a tool resolution (in place), a
   // discovery call folding into an ALREADY-OPEN group, or a sub-agent's nested
@@ -988,6 +1582,7 @@ export function App({ resumeSessionId }: AppProps) {
     return (
       a.type !== "token" &&
       a.type !== "toolEnd" &&
+      a.type !== "toolProgress" &&
       a.type !== "subToolStart" &&
       a.type !== "subToolEnd" &&
       a.type !== "subagentEnd"
@@ -996,6 +1591,13 @@ export function App({ resumeSessionId }: AppProps) {
 
   function enqueueReveal(a: Action) {
     revealQ.current.push(a);
+    // A result arriving is exactly what the hold below is waiting for, so its deadline is
+    // cancelled rather than waited out — otherwise every quick tool would sit out the
+    // full grace before its pair could be shown.
+    if (holdTimer.current) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = null;
+    }
     if (!pumpTimer.current) pump();
   }
 
@@ -1069,8 +1671,36 @@ export function App({ resumeSessionId }: AppProps) {
       const isNewGroup = front.group && !groupOpen.current;
       if (isNewGroup) {
         if (planGroupReveal(groupSettled(revealQ.current.slice(1)), flush.current) === "hold") return;
-      } else if (!(resultQueued(front.toolId, revealQ.current) || flush.current || streamDone.current)) {
-        return;
+      } else {
+        // A standalone row is held for its own result, but only for so long.
+        //
+        // Held with no limit, a  row was invisible for the ten
+        // minutes the build took: the last thing on screen stayed the tool before it, and
+        // an agent working steadily was indistinguishable from one that had hung. It was
+        // reported as a hang. It was not one — the command ran, the timeout fired, the
+        // shell was backgrounded, all of it correct and none of it visible.
+        if (heldStart.current?.toolId !== front.toolId) {
+          heldStart.current = { toolId: front.toolId, at: Date.now() };
+        }
+        const heldForMs = Date.now() - heldStart.current.at;
+        const plan = planStandaloneReveal({
+          resultQueued: resultQueued(front.toolId, revealQ.current),
+          flushing: flush.current,
+          streamDone: streamDone.current,
+          heldForMs,
+        });
+        if (plan === "hold") {
+          // Re-enter when the deadline passes. Its OWN timer, not the pacing one: the
+          // result arriving must be able to cancel this and reveal the pair at once, and
+          // clearing the pacing timer instead would drop the beat.
+          if (!holdTimer.current) {
+            holdTimer.current = setTimeout(() => {
+              holdTimer.current = null;
+              pump();
+            }, Math.max(0, STANDALONE_HOLD_MS - heldForMs));
+          }
+          return;
+        }
       }
       schedulePaced(() => {
         // Measured HERE, not when the beat was scheduled: the queue keeps growing
@@ -1125,6 +1755,65 @@ export function App({ resumeSessionId }: AppProps) {
    * reveal), each tool bookends a `toolStart`/`toolEnd`, and the reply seals on
    * completion. busy stays true until every paced reveal has been shown.
    */
+  /**
+   * Turn typed text into what the model gets and what the chat shows.
+   *
+   * Shared by the two ways a message reaches a turn — submitted when idle, and steered
+   * into one already running — because they must resolve identically. A dropped path is
+   * a short handle in the buffer either way, a paste is collapsed either way, and an
+   * image only rides along if the model running RIGHT NOW can see one. Two copies of
+   * that would drift, and the drift would show up as a queued message behaving unlike
+   * the same message typed a second later.
+   */
+  async function prepareMessage(s: Session, text: string) {
+    // Whether an attached image is sent or merely named depends on the running model,
+    // and that is a fact we ask the driver for — never a provider name in this file.
+    const manifest = manifestForModel(s.modelConfig.model);
+    const canSeeImages = manifest.acceptsImages?.(s.modelConfig.model) ?? false;
+    // Dropped files are carried in the buffer as short handles. Put the real paths back
+    // before anything is resolved against the disk, and hand the same handle back as the
+    // label so the chat shows what the user typed rather than a third name for the file.
+    const { modelText, displayText, notes, images } = await resolveAttachments(
+      expandHandles(text, dropHandles.current),
+      s.cwd,
+      canSeeImages,
+      (abs) => dropHandles.current.labelFor(abs),
+    );
+    // Restore any collapsed pastes into the model's copy only (the chat keeps chips).
+    return { content: expandPastes(modelText), displayText, notes, images };
+  }
+
+  /**
+   * Hand the running turn whatever was typed at it, at a step boundary.
+   *
+   * Called by the engine, not by us, and only at the one moment a user message may be
+   * appended without malforming the conversation. The queue is drained SYNCHRONOUSLY
+   * first and resolved after, so a ↑ that pulls the queue back mid-resolution takes the
+   * messages that are still queued rather than racing the ones already on their way.
+   *
+   * Each message gets its own chat line, queued through the reveal pacer like every
+   * other row so it lands in the order it happened instead of jumping ahead of the tool
+   * rows around it.
+   */
+  async function steerRunningTurn(s: Session): Promise<SteeredMessage[]> {
+    const { send, rest } = takeSteerable(queueRef.current);
+    if (send.length === 0) return [];
+    queueRef.current = rest;
+    setQueued(rest);
+    const out: SteeredMessage[] = [];
+    for (const { text } of send) {
+      // No history write here: `onSend` records every message the moment it is typed,
+      // queued or not, so ↑ walks them in the order they were written rather than the
+      // order they happened to go out. Recording again on the way out appended each one
+      // a second time.
+      const { content, displayText, notes, images } = await prepareMessage(s, text);
+      enqueueReveal({ type: "user", text: displayText });
+      for (const n of notes) enqueueReveal({ type: "note", text: n });
+      out.push({ content, ...(images.length > 0 ? { images } : {}) });
+    }
+    return out;
+  }
+
   async function streamRespond(s: Session) {
     startTurn();
     // Pick up an edit the model made to MINDWEAVE.md, but only if one actually happened
@@ -1136,8 +1825,18 @@ export function App({ resumeSessionId }: AppProps) {
     lastRevealAt.current = 0;
     streamDone.current = false;
     flush.current = false;
+    // A hold belongs to one turn. Left standing, its deadline fires into the next one and
+    // pumps a queue that has nothing to do with it.
+    heldStart.current = null;
+    if (holdTimer.current) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = null;
+    }
     try {
       await respond(s, {
+        // Messages typed while this turn runs reach it here, at each step boundary,
+        // rather than waiting for it to end and starting another one.
+        steer: () => steerRunningTurn(s),
         onActivity: (line, opts) =>
           enqueueReveal(
             opts?.context ? { type: "context", text: line } : opts?.error ? { type: "error", text: line } : { type: "note", text: line },
@@ -1165,6 +1864,9 @@ export function App({ resumeSessionId }: AppProps) {
             } else {
               enqueueReveal({ type: "toolStart", toolId: e.id, name: d.name, arg: d.arg, meta: d.meta, action: d.kind, group: isGroupable(e.name), ...(d.covers ? { covers: d.covers } : {}) });
             }
+          } else if (e.type === "tool" && e.phase === "progress") {
+            // A worker's own calls fold into its rail, which has no room for output.
+            if (!e.agent) enqueueReveal({ type: "toolProgress", toolId: e.id, text: e.text });
           } else if (e.type === "tool" && e.phase === "end") {
             if (e.name === "spawn_subagent") return;
             if (e.agent) {
@@ -1427,6 +2129,28 @@ export function App({ resumeSessionId }: AppProps) {
 
   // Route a Picker selection/cancel back to whatever opened the overlay. Picking a
   // session opens the second step — the three resume choices.
+  /**
+   * Move to a shell, from either route into `/screen` — the chooser or a named argument.
+   *
+   * One function because the two routes must not drift: they save the same preference,
+   * announce the same line, and both have to leave the terminal work to the effect that
+   * watches `shell`. Two copies is how one of them ends up switching without remembering.
+   */
+  function applyScreen(next: ScreenMode): void {
+    if (next === shell) {
+      note(`already ${screenNotice(next)}`);
+      return;
+    }
+    // The terminal is moved by the effect that watches this, not from here: the escapes
+    // must not go out in the middle of handling a keypress, with a render still to come.
+    setShell(next);
+    // Remembered for the project, so the choice is made once rather than at the start of
+    // every session. Best-effort and not awaited: the switch has already happened, and a
+    // preference that failed to save is not worth holding the UI for.
+    void saveScreenMode(session.current?.cwd ?? process.cwd(), next);
+    note(screenNotice(next));
+  }
+
   function onOverlaySelect(index: number) {
     const o = overlay;
     if (!o) return;
@@ -1442,6 +2166,10 @@ export function App({ resumeSessionId }: AppProps) {
     else if (o.kind === "provider") void applyProvider(index);
     else if (o.kind === "model") void applyModel(index);
     else if (o.kind === "think") void applyThink(index);
+    else if (o.kind === "screen") {
+      const picked = screenChoices(shell)[index];
+      if (picked) applyScreen(picked.mode);
+    }
     else if (o.kind === "shells") {
       const sh = o.items[index];
       if (sh && sh.status === "running" && session.current?.toolContext.backgroundShells?.kill(sh.id, "user")) {
@@ -1847,6 +2575,26 @@ export function App({ resumeSessionId }: AppProps) {
       return;
     }
 
+    if (name === "/screen") {
+      // Bare `/screen` now CHOOSES rather than swaps. Swapping was fine while the two
+      // shells were equals; they are not, and a toggle gives no room to say so. The two
+      // differ in what they take from the terminal — the inline one takes the mouse, so
+      // the scrollbar and text selection stop working — and that is worth reading before
+      // picking rather than discovering afterwards.
+      //
+      // Naming a mode still applies it directly: `/screen inline` is someone who already
+      // knows which they want, and making them confirm through a list would be the
+      // command asking a question it was just given the answer to.
+      if (!arg?.trim()) {
+        setOverlay({ kind: "screen" });
+        return;
+      }
+      const next = parseScreenArg(arg);
+      if (!next) return say("`/screen` takes `fullscreen` or `inline`, or nothing at all to choose.");
+      applyScreen(next);
+      return;
+    }
+
     if (name === "/think") {
       if (arg) {
         const picked = resolveChoice(arg, thinkLevels(s.modelConfig.model), "reasoning level");
@@ -2075,7 +2823,7 @@ export function App({ resumeSessionId }: AppProps) {
 
   }
 
-  async function handleSubmit(value: string) {
+  async function handleSubmit(value: string, opts: { arrival?: "interrupting" } = {}) {
     const trimmed = value.trim();
     if (trimmed.length === 0 || busy || !ready) return;
 
@@ -2104,17 +2852,16 @@ export function App({ resumeSessionId }: AppProps) {
     // file path collapses to just its name — never the file dump. The model gets
     // the full content via resolved <attached_file> blocks, and each attachment
     // leaves one compact activity note (counts only).
-    // Whether an attached image is sent or merely named depends on the running model,
-    // and that is a fact we ask the driver for — never a provider name in this file.
-    const manifest = manifestForModel(s.modelConfig.model);
-    const canSeeImages = manifest.acceptsImages?.(s.modelConfig.model) ?? false;
-    const { modelText, displayText, notes, images } = await resolveAttachments(trimmed, s.cwd, canSeeImages);
+    const { content, displayText, notes, images } = await prepareMessage(s, trimmed);
     dispatch({ type: "user", text: displayText });
     for (const n of notes) note(n);
-    // Restore any collapsed pastes into the model's copy only (the chat keeps chips).
     s.transcript.push({
       role: "user",
-      content: expandPastes(modelText),
+      content,
+      // Sent straight after an Esc. The model is told the work was cut off on purpose,
+      // or a message landing after a half-finished round of tools reads as if it had
+      // always been the request and it picks up where it was stopped.
+      ...(opts.arrival ? { arrival: opts.arrival } : {}),
       ...(images.length > 0 ? { images } : {}),
     });
     await streamRespond(s);
@@ -2206,7 +2953,7 @@ export function App({ resumeSessionId }: AppProps) {
     setScrollUp(0);
     setHistory((h) => (h[h.length - 1] === text ? h : [...h, text]));
     if (busy) {
-      queueRef.current.push(text);
+      queueRef.current.push(queueMessage(text, { interrupting: interrupting.current }));
       setQueued([...queueRef.current]);
       return;
     }
@@ -2302,7 +3049,7 @@ export function App({ resumeSessionId }: AppProps) {
         description: `${timeAgo(m.updatedAt)} · ${m.entryCount} msg${m.entryCount === 1 ? "" : "s"}`,
       }));
       return (
-        <Picker title="Continue which session?" items={items} width={width} maxRows={maxRows} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
+        <Picker title="Continue which session?" items={items} width={width} maxRows={maxRows} rightAlignDescription onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
       );
     }
     if (overlay.kind === "resumeMode") {
@@ -2409,6 +3156,25 @@ export function App({ resumeSessionId }: AppProps) {
         />
       );
     }
+    if (overlay.kind === "screen") {
+      const choices = screenChoices(shell);
+      return (
+        <Picker
+          title="Which shell?"
+          items={choices.map((c) => ({ label: c.label, description: c.description }))}
+          width={width}
+          maxRows={maxRows}
+          // The shell descriptions explain a real trade-off, so they are shown in full
+          // below the list — wrapping down rather than truncating on the row.
+          describeSelection
+          // Opens on the one in use, so Enter alone changes nothing. A chooser that opens
+          // somewhere else turns a glance at the options into an accidental switch.
+          initialIndex={Math.max(0, choices.findIndex((c) => c.mode === shell))}
+          onSelect={onOverlaySelect}
+          onCancel={onOverlayCancel}
+        />
+      );
+    }
     // approval — a plan, a Sentinel action, a forbidden-path lift. It interrupts the user's
     // work and the answer commits them to something, so it reads as a stop; it renders in
     // the same fixed menu box as everything else, the answers always visible.
@@ -2455,12 +3221,23 @@ export function App({ resumeSessionId }: AppProps) {
   const tail = stateRef.current.tail;
   const allBlocks: Block[] = [...committed, ...tail];
 
-  // Never render a frame as tall as the terminal (constraint 1). `stdout.rows`
-  // is read live as well as from state, because during a resize the polled
-  // state can briefly lag the real terminal, and being one row too TALL is the
-  // failure mode that corrupts the screen.
-  const liveRows = stdout?.rows ?? rows;
-  const frameHeight = Math.max(3, Math.min(rows, liveRows) - 1);
+  // The terminal's height RIGHT NOW, by live syscall — see liveTerminalSize. The SOLE
+  // authority for the frame: no min or max against the polled state, which can lag a
+  // resize, and a live syscall never can.
+  const liveRows = liveTerminalSize(stdout).rows;
+  // The FULL height, so the footer sits on the very last row with nothing below it.
+  //
+  // This was `liveRows - 1` for a real reason that no longer applies. Ink's own renderer
+  // switches, at a frame as tall as the terminal, from erasing and redrawing to clearing
+  // the whole screen — and that clear desynchronises its line bookkeeping, so the next
+  // ordinary frame erases the wrong count and old text is left behind under new. The one
+  // row held back kept the frame under that threshold. But the framebuffer replaces that
+  // renderer entirely in the full-screen shell: it addresses cells absolutely and diffs
+  // its own model, never leaning on Ink's erase-and-redraw, so the threshold is not
+  // reached and the row is pure dead space at the bottom edge. Verified by driving a
+  // full-height frame and a change through the real framebuffer — the footer lands on the
+  // last row and nothing is left behind.
+  const frameHeight = Math.max(3, liveRows);
   // The chat's HEIGHT is no longer computed here — Yoga is given the job instead
   // (the viewport below is flexGrow:1 beside a flexShrink:0 footer), and this
   // measurement is now only read for the SCROLL maths.
@@ -2485,7 +3262,17 @@ export function App({ resumeSessionId }: AppProps) {
   // border/title/hint. What's left becomes item rows, floored at a usable
   // minimum and capped so a huge terminal doesn't show an ungainly wall.
   const menuBudget = frameHeight - BANNER_ROWS - MIN_CHAT_ROWS - FOOTER_BASE_ROWS - MENU_CHROME_ROWS;
-  const maxMenuItems = Math.max(3, Math.min(12, menuBudget));
+  //
+  // The inline shell gets a much smaller window, and the reason is not taste. There is no
+  // frame to shrink there: every row the palette adds makes the live region taller than
+  // the room below it, so the TERMINAL scrolls to fit — and that scroll is one-way. Twelve
+  // rows is twelve rows of the conversation gone up past the top edge, for a list nobody
+  // reads twelve of. Three plus the hint is about one line of visible movement, and the
+  // list is not shortened by it: `SuggestionMenu` windows around the selection, so the
+  // whole catalog is still reachable with the arrows, three at a time.
+  const maxMenuItems = shell === "inline"
+    ? Math.max(2, Math.min(INLINE_MENU_ROWS, menuBudget))
+    : Math.max(3, Math.min(12, menuBudget));
   // Built here, after maxMenuItems, so a picker's contents respect the same row budget as
   // the command menu and can never grow the footer past the screen. EVERY interactive
   // surface — the pickers, the key manager, and the approval prompt — is content-only and
@@ -2497,7 +3284,34 @@ export function App({ resumeSessionId }: AppProps) {
   // to `chatAnchor.ts` so the rule is unit-tested rather than eyeballed — see there
   // for why a short transcript now rests ON the input box instead of stranding
   // itself at the top of the screen, and why that cannot disturb a scrolled frame.
-  const { marginTop: chatOffset, restsOnFooter } = chatLayout(contentHeight, chatRows, scrollUp);
+  const { marginTop: chatOffset, restsOnFooter, maxScroll, scrolled } = chatLayout(contentHeight, chatRows, scrollUp);
+  // Published for the scroll handlers, which run between frames and cannot compute it.
+  maxScrollRef.current = maxScroll;
+  // The chip that says the view is not at the bottom. `scrolled` and not `scrollUp`:
+  // the clamped number is the one that is zero whenever the whole transcript already
+  // fits, which is exactly when there is nothing to jump to. See scrollPill.ts.
+  const pill = scrollPill({
+    scrolled,
+    newReplies: countNewReplies(allBlocks, scrollMark.current),
+    overlayOpen: overlay !== null,
+    width,
+  });
+  /**
+   * The chip's cells in SCREEN coordinates, so a click can be tested against them.
+   *
+   * The layout reports the chip's row within the LIVE REGION, and a mouse report gives a
+   * row on the screen. Those are the same number in the full-screen shell, where the app
+   * owns every row and Ink draws from the top — and they are NOT in the inline shell,
+   * where the live region is the last `frameHeight` rows of a terminal full of
+   * scrollback. Confusing the two is the same mistake that once had the cursor parked in
+   * the middle of the conversation; the offset is applied once, here, rather than being
+   * rediscovered by whatever reads this.
+   *
+   * Published during the render, because a pointer handler runs BETWEEN frames and can
+   * measure nothing for itself.
+   */
+  const frameTop = readingInline ? Math.max(0, rows - frameHeight) : 0;
+  pillHit.current = pill !== null && pillRow.current !== null ? pillBounds(pill, width, frameTop + pillRow.current) : null;
   // Only the blocks that can still be reached are worth laying out. Yoga lays
   // out every child on every render — including one caused by a keystroke — so
   // an unbounded transcript makes typing slower the longer you have been
@@ -2510,9 +3324,35 @@ export function App({ resumeSessionId }: AppProps) {
   // above, and the whole scroll mechanism — is bit-for-bit what it was when every
   // block was laid out in full. See `virtualWindow.ts`.
   if (heightsWidth.current !== width) {
-    // Every recorded height was measured at a different width and is now a lie. Throw
-    // the table away; the frame below renders in full and re-measures.
-    blockHeights.current = new WeakMap();
+    // Every recorded height was measured at a different width and is now wrong. RESCALED
+    // rather than thrown away, and the difference is the whole cost of a resize.
+    //
+    // Discarding leaves nothing measured, and a block with no height cannot become a
+    // spacer — so the very next frame lays out the entire scrollback at once. Measured
+    // on this machine, idle: about 1.7ms per block, 253ms for a full window, in one
+    // synchronous commit. That is the freeze, and it happened on every resize.
+    //
+    // Narrower text wraps to more rows and wider to fewer, in roughly that proportion,
+    // so the old height times old/new width is close enough to keep the scroll maths
+    // sane for the frame it takes to measure the blocks that are actually on screen.
+    //
+    // Only ROUGHLY, and the gap is why every scaled entry is marked. A paragraph that
+    // wrapped to one row at the old width does not become 1.4 rows at a narrower one, it
+    // becomes two; the error is worst exactly where the terminal is narrowest, and it
+    // does not average out, because each block is rounded on its own. Left as the final
+    // answer those estimates size every spacer in the virtual window, and blocks land
+    // one or two rows from where they belong — text that will not settle.
+    //
+    // `scaled` is what stops that being permanent. The entry stays usable, so the window
+    // is still virtualized and no resize lays out the whole scrollback at once; but it no
+    // longer counts as measured, so the blocks that get RENDERED are laid out again and
+    // replace their estimate with a fact. Bounded by what is on screen, not by the
+    // length of the session.
+    const ratio = heightsWidth.current > 0 ? heightsWidth.current / width : 1;
+    for (const entry of blockHeights.current.values()) {
+      if (ratio !== 1) entry.height = Math.max(1, Math.round(entry.height * ratio));
+      entry.scaled = true;
+    }
     heightsWidth.current = width;
     // Remember WHERE the reader was, as a proportion of the scrollable range, before
     // the re-wrap changes what a line means. `scrollUp` is a line count, and a line is
@@ -2529,9 +3369,12 @@ export function App({ resumeSessionId }: AppProps) {
   let known = 0;
   const knownHeights: number[] = [];
   while (known < rendered.length) {
-    const h = blockHeights.current.get(rendered[known]!);
-    if (h === undefined) break;
-    knownHeights.push(h);
+    const block = rendered[known]!;
+    const entry = blockHeights.current.get(block.id);
+    // The identity check IS the invalidation: a block that changed is a new object, so
+    // its recorded height belongs to the version before the change.
+    if (entry === undefined || entry.block !== block) break;
+    knownHeights.push(entry.height);
     known++;
   }
   const win = virtualWindow(knownHeights, -chatOffset, chatRows);
@@ -2549,88 +3392,10 @@ export function App({ resumeSessionId }: AppProps) {
   // unmeasured tail is not optional — it is how those blocks get measured at all.
   const padMiddle = win.padBottom;
 
-  return (
-    <Box flexDirection="column" height={frameHeight} overflow="hidden">
-      {/* flexShrink:0 on the banner and the chat wrapper below (NOT on anything
-          inside the chat viewport itself — that's untouched) protects against a
-          real, confirmed failure mode: for one frame right when the command
-          palette opens/resizes, chatRows is still computed from the PREVIOUS
-          footerHeight (measurement lags a render), so the frame's total content
-          can transiently exceed frameHeight. Without flexShrink:0 here, Yoga's
-          default (shrink to fit) silently compresses the banner or drops the
-          header text outright — verified with a bare Ink render. With it, the
-          excess instead clips cleanly from the BOTTOM of the frame (the tail of
-          the command palette), which is the harmless direction to lose content
-          in, and only for the one frame until the real footerHeight lands. */}
-      <Box flexShrink={0}>
-        <Banner width={width} mode={mode} modelConfig={session.current?.modelConfig} busy={busy} />
-      </Box>
-
-      {/* flexGrow:1 + minHeight:1, NOT a computed height: the footer takes what it
-          needs and the chat takes the rest, decided in one Yoga pass. This is what
-          stops the tip line being clipped on the frame where the input box grows. */}
-      <Box ref={chatRef} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={1} overflow="hidden">
-        {/* A short conversation rests ON the footer instead of floating at the top
-            of the screen. This is a flex SPACER rather than a computed margin on
-            purpose: Yoga sizes it from the leftover space in the same pass that lays
-            the frame out, where a margin would have to be derived from `chatRows`,
-            which lags a frame and is unknown entirely on the first render. A render
-            probe rejected the margin version — it left a gap on a settled frame and
-            pushed the whole transcript past the clip edge on the first one.
-
-            It shrinks to nothing the moment the transcript overflows, so the
-            scrolling path below is untouched. */}
-        {restsOnFooter ? <Box flexGrow={1} flexShrink={1} /> : null}
-        <Box flexDirection="column" flexShrink={0} marginTop={chatOffset}>
-          {/* The ref sits on a box with NO margin of its own, so the measured
-              height is the content's alone and cannot drift as it scrolls. */}
-          <Box ref={contentRef} flexDirection="column" flexShrink={0}>
-            {/* Blocks scrolled off the top, as one box of exactly their height. */}
-            {win.padTop > 0 ? <Box flexShrink={0} height={win.padTop} /> : null}
-            {rendered.slice(win.start, win.end).map((b, i) => {
-              const idx = win.start + i;
-              return (
-                // flexShrink:0 is load-bearing — without it Yoga compresses an
-                // overfull column and silently drops rows out of the middle.
-                <Box
-                  key={b.id}
-                  ref={(node: DOMElement | null) => {
-                    if (node && !blockHeights.current.has(b)) toMeasure.current.set(b, node);
-                  }}
-                  flexShrink={0}
-                  flexDirection="column"
-                >
-                  <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
-                </Box>
-              );
-            })}
-            {/* Measured blocks between the window and the unmeasured tail. */}
-            {padMiddle > 0 ? <Box flexShrink={0} height={padMiddle} /> : null}
-            {/* The unmeasured tail. Rendered in full because there is no honest
-                spacer height for a block nobody has measured yet — and rendering it
-                is what produces the measurement. */}
-            {rendered.slice(known).map((b, i) => {
-              const idx = known + i;
-              return (
-                <Box
-                  key={b.id}
-                  ref={(node: DOMElement | null) => {
-                    if (node && !blockHeights.current.has(b)) toMeasure.current.set(b, node);
-                  }}
-                  flexShrink={0}
-                  flexDirection="column"
-                >
-                  <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
-                </Box>
-              );
-            })}
-          </Box>
-        </Box>
-      </Box>
-
-      {/* Everything below is what footerHeight (above) measures — one Box, so a
-          single measurement covers the status line, the input box, and whatever
-          the command palette currently costs, whether that's open or closed. */}
+  // The status line, the queued bar, the input and whatever sits under it. Built once
+  // and rendered by BOTH shells: the only thing that differs between them is where it
+  // ends up — pinned to the bottom of a frame we own, or simply the last thing printed.
+  const footerView = (
       <Box ref={footerRef} flexDirection="column" flexShrink={0}>
         {/* One blank row between the conversation and the footer, ALWAYS.
             It lives here rather than as a margin on the status line, because the
@@ -2671,8 +3436,18 @@ export function App({ resumeSessionId }: AppProps) {
               completions={completions}
               pathComplete={pathComplete.current}
               onLargePaste={registerPaste}
+              onDroppedPaths={(text) => dropHandles.current.register(text)}
+              registerCaretClick={(place) => {
+                caretClick.current = place;
+              }}
+              registerTextSelect={(select) => {
+                textSelect.current = select;
+              }}
               maxMenuRows={maxMenuItems}
+              menuAbove={shell === "inline"}
+              settleKey={committed.length}
               onMenuChange={onMenuChange}
+              placeCursor={shell === "inline"}
               onQueuePop={popQueue}
               overlay={overlayView}
             />
@@ -2704,14 +3479,371 @@ export function App({ resumeSessionId }: AppProps) {
             <BackgroundBar shells={runningShells} />
           </Box>
         ) : (
-          <Box flexShrink={0}>
-            <Text dimColor>{"  tip: "}{tip}</Text>
-          </Box>
+          <TipLine tip={TIPS[tipIdx % TIPS.length]!} />
         )}
       </Box>
+  );
+  // The transcript viewport: the scrolled window, its measurements, and the chip.
+  //
+  // Built once and rendered by BOTH shells — the full-screen frame, and the inline
+  // shell's reading view. The two want exactly the same thing there: a clipped box that
+  // Yoga sizes against a pinned footer, with the transcript offset inside it. Kept as
+  // two copies they would drift apart the first time either was touched, and the drift
+  // would show as scrolling behaving differently in one shell than in the other.
+  const chatView = (
+    <Box ref={chatRef} flexDirection="column" flexGrow={1} flexShrink={1} minHeight={1} overflow="hidden">
+      {/* A short conversation rests ON the footer instead of floating at the top
+          of the screen. This is a flex SPACER rather than a computed margin on
+          purpose: Yoga sizes it from the leftover space in the same pass that lays
+          the frame out, where a margin would have to be derived from `chatRows`,
+          which lags a frame and is unknown entirely on the first render. A render
+          probe rejected the margin version — it left a gap on a settled frame and
+          pushed the whole transcript past the clip edge on the first one.
+
+          It shrinks to nothing the moment the transcript overflows, so the
+          scrolling path below is untouched. */}
+      {restsOnFooter ? <Box flexGrow={1} flexShrink={1} /> : null}
+      <Box flexDirection="column" flexShrink={0} marginTop={chatOffset}>
+        {/* The ref sits on a box with NO margin of its own, so the measured
+            height is the content's alone and cannot drift as it scrolls. */}
+        <Box ref={contentRef} flexDirection="column" flexShrink={0}>
+          {/* Blocks scrolled off the top, as one box of exactly their height. */}
+          {win.padTop > 0 ? <Box flexShrink={0} height={win.padTop} /> : null}
+          {rendered.slice(win.start, win.end).map((b, i) => {
+            const idx = win.start + i;
+            return (
+              // flexShrink:0 is load-bearing — without it Yoga compresses an
+              // overfull column and silently drops rows out of the middle.
+              <Box
+                key={b.id}
+                ref={(node: DOMElement | null) => {
+                  if (node && needsMeasure(blockHeights.current.get(b.id), b)) toMeasure.current.set(b, node);
+                }}
+                flexShrink={0}
+                flexDirection="column"
+              >
+                <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
+              </Box>
+            );
+          })}
+          {/* Measured blocks between the window and the unmeasured tail. */}
+          {padMiddle > 0 ? <Box flexShrink={0} height={padMiddle} /> : null}
+          {/* The unmeasured tail. Rendered in full because there is no honest
+              spacer height for a block nobody has measured yet — and rendering it
+              is what produces the measurement. */}
+          {rendered.slice(known).map((b, i) => {
+            const idx = known + i;
+            return (
+              <Box
+                key={b.id}
+                ref={(node: DOMElement | null) => {
+                  if (node && needsMeasure(blockHeights.current.get(b.id), b)) toMeasure.current.set(b, node);
+                }}
+                flexShrink={0}
+                flexDirection="column"
+              >
+                <BlockView block={b} columns={width} tightTop={isTight(allBlocks, offset + idx)} />
+              </Box>
+            );
+          })}
+        </Box>
+      </Box>
+
+      {/* The scrolled-back chip, floating on the viewport's last row.
+          ABSOLUTE, and that is the whole reason it can exist here: an ordinary row
+          would come out of the chat, so the viewport would shrink the moment you
+          scrolled and grow back when you returned — the transcript re-laid-out and
+          shifted under the reader by the act of looking at it. Out of flow, it costs
+          no rows at all, contributes nothing to the height chatRef measures, and the
+          viewport's own overflow:hidden clips it. Verified by render probe, not by
+          reasoning about Yoga.
+
+          It covers a few columns of one transcript row while it is up, which is the
+          right trade: the row underneath is one the reader has already scrolled past,
+          and the alternative is a chip that moves the text it is telling you about. */}
+      {pill ? (
+        <Box
+          // Measured so a CLICK can find it. The row is the only part of the chip's
+          // position the layout owns — the columns fall out of centring, which
+          // `pillBounds` reproduces — and a pointer handler runs between frames, where
+          // it could not measure anything for itself.
+          ref={(node: DOMElement | null) => {
+            pillRow.current = node ? measureElement(node).y : null;
+          }}
+          position="absolute"
+          bottom={0}
+          left={0}
+          right={0}
+          justifyContent="center"
+        >
+          <Text inverse>{pill}</Text>
+        </Box>
+      ) : null}
+    </Box>
+  );
+
+
+  /**
+   * Refilling the rows the reading frame leaves behind — IN THE SAME COMMIT.
+   *
+   * Closing the reading view shrinks the live region from a near-full-height frame back
+   * to a couple of rows, and a terminal cannot un-scroll. Measured on the real renderer,
+   * the shrink emits `eraseLine` twenty-four times and then writes two lines: twenty-two
+   * rows erased with nothing put back, which is the band of empty screen below the
+   * prompt. Ink is right to do this — it is how every live region shrinks — and it is
+   * ordinarily invisible because a shrink normally happens when a block DRAINS into
+   * <Static>, which prints the same rows permanently on its way past. Nothing drains
+   * when a viewport closes, so nothing refills them.
+   *
+   * So the close reprints, and the reprint has to be part of the SAME frame as the
+   * shrink. Driven from an effect it was one render late, and that one render is a real
+   * frame the terminal paints: the erased band flashed empty and was then filled — the
+   * blink reported on the way back to the bottom. Refs mutated during render are what
+   * put both in one commit, the same way `maxScrollRef` above is published to handlers
+   * that run between frames.
+   *
+   * The header is suppressed on this one, because unlike the shell switch this replaces
+   * nothing — the original is still in scrollback a screen up, and a second copy in the
+   * middle of the conversation reads as the session having restarted.
+   */
+  /**
+   * The startup fill, decided during the RENDER — which is the only moment it can be.
+   *
+   * `<Static>` prints each item ONCE, in the render that first sees it, and the fill is
+   * one of its items. An effect runs after that render has already been committed and
+   * written, so a height an effect assigns arrives too late by construction: the item has
+   * been printed at whatever the ref held during the render, and Static will never render
+   * it again. Set from an effect, the fill was therefore printed as ZERO rows on first
+   * mount, every time — verified by rendering the same shape and counting the rows it
+   * emitted before the first item.
+   *
+   * The visible cost was the whole reason the fill exists going unpaid: the first screen
+   * sat at the TOP of the terminal, with the prompt part-way up and empty rows below it,
+   * because a terminal prints from wherever the cursor happens to be.
+   *
+   * Only for the FIRST print. Every later remount of `<Static>` — a shell switch, a
+   * width-change reprint, leaving the reading view — sets the fill for its own reasons
+   * before bumping the key, and those must not be overwritten here.
+   */
+  /**
+   * The startup fill, GROWN whenever a void opens below the footer.
+   *
+   * The fill is a run of blank rows printed above the first screen so a short
+   * conversation lands at the BOTTOM of the terminal rather than floating part-way up —
+   * a terminal prints from wherever the cursor is, and prints nothing below. `<Static>`
+   * emits each item once, so the fill's height is whatever `rows` held the render it was
+   * first printed on, and can never change for that mount.
+   *
+   * That is the whole bug behind the void. The first render often runs before the real
+   * terminal height is known — the size hook re-reads a moment later — so the fill was
+   * frozen at a stale, small number: blank rows at the top, the conversation, and then a
+   * band of empty screen all the way to the bottom edge that nothing ever filled.
+   *
+   * `fillBasis` is the height the current fill was sized for. When the terminal turns
+   * out to be TALLER than that — the settle after a wrong first read, or the window
+   * genuinely dragged bigger — the fill is regrown and `<Static>` remounted, which
+   * reprints the recent conversation with the footer back at the edge. Only ever grown,
+   * never shrunk: once the conversation is long enough to overflow the screen the footer
+   * sits at the bottom on its own, and shrinking the fill then would reprint on every
+   * small drag for a void that is not there.
+   */
+  if (shell === "inline") {
+    const grown = growFill(fillState.current, rows);
+    fillState.current = { fill: grown.fill, basis: grown.basis };
+    startFill.current = grown.fill;
+    // A remount reprints the recent conversation with the footer back at the edge —
+    // wanted when a void has opened, skipped on the very first sizing (nothing on screen
+    // yet). See startupFill.ts.
+    if (grown.remount) closeEpoch.current += 1;
+  }
+
+  /**
+   * Where `<Static>` was allowed to reach when the reading view opened, or null while
+   * the view is closed.
+   *
+   * A SCROLLBACK PRINTER AND A VIEWPORT CANNOT BOTH BE WRITING. Every finished block
+   * normally goes to `<Static>`, which prints it into the terminal permanently and
+   * scrolls everything up to make room. That is exactly right when the live region below
+   * it is two rows of prompt. It is destructive when the live region is a near
+   * full-height viewport, because each print scrolls the terminal under a frame that Ink
+   * then has to erase and lay down again from its new position — measured on the real
+   * renderer, three blocks arriving during an open viewport erased seventy-two rows of a
+   * twenty-four row terminal. What that looks like on screen is bands of blank where a
+   * block is about to appear, which is the reported glitch, and it only happens while a
+   * turn is still running because that is the only time new blocks arrive.
+   *
+   * The conflict only exists because this shell has BOTH. A scrolling viewport normally
+   * holds the whole transcript itself and prints nothing permanently; a shell built on
+   * `<Static>` has no viewport for a print to collide with. Running the two together is
+   * this shell's own doing, so the rule it needs has to be stated here: while the
+   * viewport is open, the printer holds.
+   *
+   * Nothing is lost by holding. The close already reprints from `reprintFrom`, which is
+   * behind everything that arrived while the view was open, so those blocks reach the
+   * terminal on the way out — in one frame, with the refill that fills the viewport's
+   * rows, rather than a print at a time underneath it.
+   */
+  if (readingInline && frozenStatic.current === null) frozenStatic.current = committed.length;
+  if (wasReadingInline.current && !readingInline) {
+    reprintFrom.current = Math.max(0, committed.length - INLINE_REPRINT_BLOCKS);
+    startFill.current = 0;
+    showHeader.current = false;
+    closeEpoch.current += 1;
+    frozenStatic.current = null;
+  }
+  wasReadingInline.current = readingInline;
+
+  // ── the inline shell ──────────────────────────────────────────────────────
+  //
+  // Finished blocks go to <Static>, which Ink prints ONCE and never renders again:
+  // they become the terminal's own scrollback. Only the live tail and the footer are
+  // re-rendered, so a frame costs what is happening now rather than what has happened
+  // all session — a four-hour conversation renders exactly as fast as a four-minute one.
+  //
+  // Everything the fullscreen shell exists to do is simply absent here, on purpose.
+  // There is no frame height, because we are not claiming the screen; no virtual window,
+  // because nothing off screen is being re-laid-out; no scroll offset, because scrolling
+  // is the terminal's scrollbar; and no selection layer, because selecting is the
+  // terminal's selection. Each of those is faster than what we would write, and behaves
+  // the way the rest of the user's terminal already does.
+  //
+  // The banner rides as a sentinel item rather than sitting above the list, so it prints
+  // exactly once and scrolls away with the conversation instead of being reprinted at
+  // the top of every frame.
+  if (shell === "inline") {
+    return (
+      <Box flexDirection="column">
+        <Static
+          // Two counters, because the two remounts happen at different MOMENTS: the
+          // shell switch can settle in an effect, the reading-view close has to land in
+          // the frame that shrinks the live region.
+          key={`${staticEpoch}:${closeEpoch.current}`}
+          // `frozenStatic` caps the list while the reading viewport is open — see above.
+          // `slice(from, undefined)` is `slice(from)`, so the closed case is unchanged.
+          items={
+            [
+              FILL_ITEM,
+              BANNER_ITEM,
+              ...committed.slice(reprintFrom.current, frozenStatic.current ?? undefined),
+            ] as StaticItem[]
+          }
+        >
+          {(item, index) => {
+            if (item === FILL_ITEM) return <Box key="fill" height={startFill.current} />;
+            // Kept as an ITEM even when it renders nothing, so the `index - 2` the
+            // blocks below count back is the same either way.
+            if (item === BANNER_ITEM) return showHeader.current ? <InlineHeader key="banner" /> : null;
+            return (
+              <BlockView
+                key={item.id}
+                block={item}
+                columns={width}
+                tightTop={isTight(allBlocks, reprintFrom.current + index - 2)}
+              />
+            );
+          }}
+        </Static>
+        {/* ONE wrapper, always — this is what keeps the footer from flickering.
+            `footerView` is the input box, its cursor, its menu state, everything a
+            reader is looking at while they scroll. It used to sit inside a ternary
+            between two ENTIRELY SEPARATE `<Box>` subtrees — one for reading, one for
+            the plain tail — and React reconciles children by type AND POSITION, not
+            by finding a matching element wherever it moved to. Last child after
+            however many tail blocks happened to exist in one branch, second child
+            right after `chatView` in the other: two different positions is, to React,
+            indistinguishable from two different things being there. So the footer's
+            whole subtree was destroyed and a fresh one built in its place on EVERY
+            transition — both entering and leaving reading — and destroy-then-create is
+            exactly the flicker that was reported from both directions. Reducing this to
+            one wrapper element with `footerView` always its second child, and only the
+            content ABOVE it swapping, is what makes the transition change nothing about
+            the one thing that has to hold still. Pinned by `footerRemount.probe.test.tsx`,
+            which mounts a marker in the footer's position and asserts it survives the
+            switch — a structural regression like the one above passes every other test
+            in the file, since nothing else can see a remount that renders identical
+            content on both sides of it. */}
+        <Box
+          ref={liveRef}
+          flexDirection="column"
+          flexShrink={0}
+          // `frameHeight` and the clip are what makes reading a VIEWPORT rather than a
+          // wall of text — see the shared `chatView` above. Applied to the SAME element
+          // in both states, not one that only exists in one of them.
+          height={readingInline ? frameHeight : undefined}
+          overflow={readingInline ? "hidden" : "visible"}
+        >
+          {readingInline ? (
+            // <Static> stays mounted above and prints nothing new: it has already
+            // emitted every item it holds, and unmounting it would make the next mount
+            // reprint the whole conversation underneath this frame.
+            chatView
+          ) : (
+            tail.map((b, i) => (
+              <BlockView key={b.id} block={b} columns={width} tightTop={isTight(allBlocks, committed.length + i)} />
+            ))
+          )}
+          {footerView}
+        </Box>
+      </Box>
+    );
+  }
+
+  return (
+    <Box flexDirection="column" height={frameHeight} overflow="hidden">
+      {/* flexShrink:0 on the banner and the chat wrapper below (NOT on anything
+          inside the chat viewport itself — that's untouched) protects against a
+          real, confirmed failure mode: for one frame right when the command
+          palette opens/resizes, chatRows is still computed from the PREVIOUS
+          footerHeight (measurement lags a render), so the frame's total content
+          can transiently exceed frameHeight. Without flexShrink:0 here, Yoga's
+          default (shrink to fit) silently compresses the banner or drops the
+          header text outright — verified with a bare Ink render. With it, the
+          excess instead clips cleanly from the BOTTOM of the frame (the tail of
+          the command palette), which is the harmless direction to lose content
+          in, and only for the one frame until the real footerHeight lands. */}
+      <Box flexShrink={0}>
+        <Banner width={width} mode={mode} modelConfig={session.current?.modelConfig} busy={busy} />
+      </Box>
+
+      {/* flexGrow:1 + minHeight:1, NOT a computed height: the footer takes what it
+          needs and the chat takes the rest, decided in one Yoga pass. This is what
+          stops the tip line being clipped on the frame where the input box grows. */}
+      {chatView}
+
+      {/* Everything below is what footerHeight (above) measures — one Box, so a
+          single measurement covers the status line, the input box, and whatever
+          the command palette currently costs, whether that's open or closed. */}
+      {footerView}
     </Box>
   );
 }
+
+/**
+ * The inline shell's header, printed once at the top of the conversation.
+ *
+ * Deliberately NOT the fullscreen banner. That one is a live status bar — mode, model,
+ * whether a turn is running — and <Static> prints a thing once and never touches it
+ * again, so all three would be frozen at whatever they happened to be when the session
+ * opened. A header that quietly lies about which model is answering is worse than no
+ * header. What belongs in scrollback is the part that cannot go stale.
+ */
+function InlineHeader() {
+  return (
+    <Box marginBottom={1}>
+      <Text bold color="yellow">Mindweave</Text>
+      <Text dimColor>{" "}{versionLabel()}</Text>
+    </Box>
+  );
+}
+
+/** A sentinel <Static> item: the one-time header, printed with the transcript so it
+ *  scrolls away rather than being redrawn above every frame. */
+const BANNER_ITEM = "__banner__" as const;
+/** A sentinel for the blank rows that push the first screen of conversation down to the
+ *  bottom of the window. In the list rather than above it so it is printed exactly once,
+ *  the same as the header. */
+const FILL_ITEM = "__fill__" as const;
+type StaticItem = typeof BANNER_ITEM | typeof FILL_ITEM | Block;
 
 // The banner's own rows: the title line, the rule under it, and its bottom
 // margin. Subtracted from the frame so the chat gets exactly what's left —
@@ -2724,6 +3856,9 @@ const MIN_CHAT_ROWS = 3;
 const FOOTER_BASE_ROWS = 7;
 /** The palette's own chrome: title, the "Tab completes" hint, top+bottom border. */
 const MENU_CHROME_ROWS = 4;
+/** Item rows the command palette shows in the INLINE shell. Small on purpose — see the
+ *  note where it is used: there, rows are paid for in terminal scroll. */
+const INLINE_MENU_ROWS = 3;
 
 /** Lines PageUp/PageDown move per press. */
 const PAGE_LINES = 10;
@@ -2733,6 +3868,16 @@ const WHEEL_LINES = 3;
 /** How much of the transcript stays scrollable. Every rendered block is laid out
  *  on every render, so this bounds what typing costs in a long conversation. */
 const SCROLLBACK_BLOCKS = 150;
+/** Blocks reprinted when the inline shell is entered. Two screens or so: enough to look
+ *  back over, few enough that the reprint is not a visible pause. */
+/** How long the INLINE shell waits for a drag to settle before re-reading the size.
+ *  The full-screen shell does not wait — see useTerminalSize. */
+const RESIZE_SETTLE_MS = 150;
+/** How often the size is polled, for Windows consoles where the resize event may never
+ *  fire at all (nodejs/node#13197). Two integer reads; an unchanged size costs nothing. */
+const RESIZE_POLL_MS = 250;
+
+const INLINE_REPRINT_BLOCKS = 40;
 
 /**
  * The loom shuttle that runs beside the name while a turn is working.
@@ -2839,14 +3984,45 @@ export function Banner({ width, mode, modelConfig, busy }: { width: number; mode
  * whatever the header/footer don't use), so a stale row count leaves dead
  * space at the bottom instead of the frame reaching the terminal's actual edge.
  */
-function useTerminalSize(): { columns: number; rows: number } {
+/**
+ * The terminal's size RIGHT NOW, by live syscall where the platform offers one.
+ *
+ * `stdout.columns` / `stdout.rows` are getters that, on Windows, can hand back a value
+ * cached at the last `resize` event — and that event frequently never fires there
+ * (nodejs/node#13197). So a window dragged taller leaves those properties reporting the
+ * old height forever, and everything sized from them, the full-screen frame included,
+ * stops short of the real bottom edge with dead space below it.
+ *
+ * `getWindowSize()` asks the OS for the size on the spot (`uv_tty_get_winsize`), which is
+ * not cached and not tied to the event. Preferred when present; the plain getters are the
+ * fallback for a stream that has no `getWindowSize` (a pipe, a test double).
+ */
+export function liveTerminalSize(stream: { columns?: number; rows?: number; getWindowSize?: () => [number, number] } | undefined): {
+  columns: number;
+  rows: number;
+} {
+  const win = stream?.getWindowSize?.();
+  if (win) return { columns: win[0], rows: win[1] };
+  return { columns: stream?.columns ?? 80, rows: stream?.rows ?? 24 };
+}
+
+export function useTerminalSize(defer: boolean): { columns: number; rows: number } {
   const { stdout } = useStdout();
-  const [size, setSize] = useState({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
+  const [size, setSize] = useState(() => liveTerminalSize(stdout));
+  // Read live so the listeners below never have to be torn down and rebuilt when the
+  // shell changes — resubscribing mid-drag would drop the very events being handled.
+  const deferRef = useRef(defer);
+  deferRef.current = defer;
   useEffect(() => {
     if (!stdout) return;
 
+    // Identical sizes end here, and that matters more than it looks: terminals emit two
+    // or more resize events for a single user action as the window settles, and each one
+    // that reached state would be a re-layout of the whole frame for no change at all.
     const read = () => setSize((prev) => {
-      const next = { columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 };
+      // A LIVE query, so a Windows window dragged bigger is detected even though the
+      // resize event never fired and the cached getters still report the old size.
+      const next = liveTerminalSize(stdout);
       return next.columns === prev.columns && next.rows === prev.rows ? prev : next;
     });
 
@@ -2858,13 +4034,37 @@ function useTerminalSize(): { columns: number; rows: number } {
     // integer reads, ~4x/sec) and it's the standard workaround for that exact gap,
     // not a hack: it's what a resize event is supposed to give us, gotten a
     // different way when the event can't be trusted to arrive at all.
-    let debounce: ReturnType<typeof setTimeout>;
+    // NOT debounced when the app owns the screen, and the debounce that used to be here
+    // unconditionally is what made a drag look broken.
+    //
+    // A debounce opens a window where the terminal has already resized but this app still
+    // believes the old size. Anything that renders during it — the spinner, the clock, a
+    // streaming delta — lays a frame out at dimensions the terminal no longer has, and
+    // the result is the half-drawn shapes that appear while dragging and tidy themselves
+    // up the moment the drag stops. The frame is not settling late; it is being drawn
+    // wrong and then drawn again. Handling the event as it arrives keeps the app's idea
+    // of the size and the terminal's the same at every instant, which is the only state
+    // in which a frame can be right.
+    //
+    // The INLINE shell still defers, and for a reason that does not apply to the other
+    // one. There the transcript is the terminal's own scrollback, printed once; a
+    // re-render mid-drag leaves a stale copy of the live region behind it, so a slow drag
+    // left a ladder of half-drawn input boxes down the screen. Nothing is printed
+    // permanently in the full-screen shell, so nothing can be left behind.
+    let debounce: ReturnType<typeof setTimeout> | undefined;
     const onResize = () => {
       clearTimeout(debounce);
-      debounce = setTimeout(read, 150);
+      if (!deferRef.current) {
+        read();
+        return;
+      }
+      debounce = setTimeout(read, RESIZE_SETTLE_MS);
     };
     stdout.on("resize", onResize);
-    const poll = setInterval(read, 250);
+    // The poll exists for Windows, where the event cannot be relied on at all. It goes
+    // through the same handler, so it inherits whichever policy the shell is using, and
+    // the identical-size check above makes a poll that finds nothing free.
+    const poll = setInterval(onResize, RESIZE_POLL_MS);
 
     // The size read at THIS exact instant can be stale too: entering alt-screen
     // (a raw escape code written before Ink even mounts, see altScreen.ts) makes
@@ -3097,14 +4297,7 @@ function BackgroundBar({ shells }: { shells: ShellInfo[] }) {
 // mode/model/thinking readout already lives in the header, so this slot is
 // free for the shift-tab hint (nothing else states it anymore) and a few of
 // the less-obvious commands.
-const TIPS = [
-  "shift+tab cycles Lightning / Architect / Sentinel",
-  "/help lists every command",
-  "/model switches which model answers, /think sets its reasoning level",
-  "@ mentions a file to attach it",
-  "esc interrupts a running turn",
-  "/undo restores the last checkpoint",
-];
+
 
 /**
  * Messages typed while Mindweave is working, waiting to be sent when the turn ends.
@@ -3118,13 +4311,13 @@ const TIPS = [
  * you cannot see the handle on — ↑ is not a thing anyone guesses, and the cost of not
  * guessing it is a message you no longer wanted being sent anyway.
  */
-function QueuedBar({ queued }: { queued: string[] }) {
+function QueuedBar({ queued }: { queued: Queued[] }) {
   if (queued.length === 0) return null;
   const { rows, hidden } = visibleQueue(queued);
   return (
     <Box flexDirection="column">
       {rows.map((q, i) => (
-        <Text key={i} dimColor wrap="truncate-end">{"⏎ queued: "}{q}</Text>
+        <Text key={i} dimColor wrap="truncate-end">{"⏎ queued: "}{q.text}</Text>
       ))}
       {hidden > 0 ? (
         <Text dimColor>{`  …and ${hidden} more`}</Text>

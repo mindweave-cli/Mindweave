@@ -246,3 +246,67 @@ test("every level fills the box and ends on the hint, so the footer never moves"
   }
   assert.equal(heights.size, 1, "the levels render at different heights inside a fixed box");
 });
+
+test("the provider list fills the box budget instead of a fixed short window", () => {
+  // /key used to cap its list at seven rows even in a box tall enough for a dozen, so a
+  // long provider list showed seven and padded the rest of the box blank while every
+  // other picker filled it. With maxRows set, the list uses the whole budget.
+  const many: ProviderRow[] = Array.from({ length: 14 }, (_, i) => ({
+    id: `p${i}`,
+    label: `Provider${i}`,
+    apiKeyEnv: `P${i}_KEY`,
+    count: 0,
+  }));
+  const out = frame(
+    <KeyManager
+      providers={many}
+      keysOf={() => []}
+      nextSlot={() => 1}
+      reveal={() => ""}
+      width={64}
+      maxRows={12}
+      onActivate={() => {}}
+      onSave={() => {}}
+      onRemove={() => {}}
+      onClose={() => {}}
+      active={false}
+    />,
+  );
+  const shownCount = many.filter((p) => out.includes(p.label)).length;
+  assert.ok(shownCount >= 11, `only ${shownCount} of 14 providers shown; the list is not using the box budget`);
+});
+
+test("labels and their status align in one column, whatever the row number's width", () => {
+  // A one-digit number is one column and a two-digit number is two, so without reserving
+  // the width the label after "10" sat a column right of the label after "3", and the
+  // "no key yet" status shifted with it. The number is right-aligned to a fixed width so
+  // every label starts at the same column.
+  const many: ProviderRow[] = Array.from({ length: 12 }, (_, i) => ({
+    id: `p${i}`,
+    label: `Prov${i}`,
+    apiKeyEnv: `P${i}_KEY`,
+    count: 0,
+  }));
+  const out = frame(
+    <KeyManager
+      providers={many}
+      keysOf={() => []}
+      nextSlot={() => 1}
+      reveal={() => ""}
+      width={64}
+      maxRows={14}
+      onActivate={() => {}}
+      onSave={() => {}}
+      onRemove={() => {}}
+      onClose={() => {}}
+      active={false}
+    />,
+  );
+  const rows = out.split("\n").filter((r) => /no key yet/.test(r));
+  // A single-digit row and a double-digit row.
+  const single = rows.find((r) => /\bProv2\b/.test(r))!;
+  const double = rows.find((r) => /\bProv11\b/.test(r))!;
+  assert.ok(single && double, "both rows painted");
+  assert.equal(single.indexOf("Prov2"), double.indexOf("Prov11"), "labels start in different columns");
+  assert.equal(single.indexOf("no key yet"), double.indexOf("no key yet"), "the status column is not aligned");
+});

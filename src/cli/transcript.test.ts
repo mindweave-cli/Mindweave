@@ -581,3 +581,124 @@ test("clear leaves a state a new conversation can build on", () => {
   assert.ok(!texts.some((t) => t.includes("before")), "a block from the cleared conversation came back");
   assert.equal(s.lastReply, "reply", "the reply after a clear was not recorded");
 });
+
+// ── The wait a vision call leaves behind ─────────────────────────────────────
+
+test("a result that awaits the model starts a clock; an ordinary one does not", () => {
+  let s = reduce(initialState(), { type: "user", text: "look at this" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Viewed", arg: "shot.png" });
+  s = reduce(s, { type: "toolEnd", toolId: "t1", ok: true, detail: "800x600 · PNG · 40 KB", awaitsModel: true });
+  const viewed = [...s.committed, ...s.tail].find((b) => b.kind === "tool");
+  assert.equal(viewed?.kind === "tool" && typeof viewed.since, "number");
+
+  let plain = reduce(initialState(), { type: "user", text: "read it" });
+  plain = reduce(plain, { type: "toolStart", toolId: "t2", name: "Read", arg: "a.ts" });
+  plain = reduce(plain, { type: "toolEnd", toolId: "t2", ok: true, summary: "40 lines" });
+  const read = [...plain.committed, ...plain.tail].find((b) => b.kind === "tool");
+  assert.equal(read?.kind === "tool" && read.since, undefined);
+});
+
+test("the clock stops when the model speaks", () => {
+  let s = reduce(initialState(), { type: "user", text: "look" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Viewed", arg: "shot.png" });
+  s = reduce(s, { type: "toolEnd", toolId: "t1", ok: true, detail: "800x600", awaitsModel: true });
+  s = reduce(s, { type: "token", delta: "I can see" });
+
+  const viewed = [...s.committed, ...s.tail].find((b) => b.kind === "tool");
+  assert.equal(viewed?.kind === "tool" && typeof viewed.waited, "number");
+});
+
+test("the clock also stops on the next tool call, not just on speech", () => {
+  // The model may act on what it saw instead of describing it. That is still the end
+  // of the wait: measuring to the end of the turn would fold in everything after.
+  let s = reduce(initialState(), { type: "user", text: "look" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Viewed", arg: "shot.png" });
+  s = reduce(s, { type: "toolEnd", toolId: "t1", ok: true, detail: "800x600", awaitsModel: true });
+  s = reduce(s, { type: "toolStart", toolId: "t2", name: "Update", arg: "a.css" });
+
+  const viewed = [...s.committed, ...s.tail].find((b) => b.kind === "tool" && b.toolId === "t1");
+  assert.equal(viewed?.kind === "tool" && typeof viewed.waited, "number");
+});
+
+test("a turn that ends without either still leaves no row counting", () => {
+  let s = reduce(initialState(), { type: "user", text: "look" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Viewed", arg: "shot.png" });
+  s = reduce(s, { type: "toolEnd", toolId: "t1", ok: true, detail: "800x600", awaitsModel: true });
+  s = reduce(s, { type: "endTurn" });
+
+  const viewed = [...s.committed, ...s.tail].find((b) => b.kind === "tool");
+  assert.equal(viewed?.kind === "tool" && typeof viewed.waited, "number");
+  assert.equal(viewed?.kind === "tool" && viewed.live, false);
+});
+
+test("a settled wait is never re-stamped by later events", () => {
+  // The number belongs to one gap. A second token arriving must not restart or extend it.
+  let s = reduce(initialState(), { type: "user", text: "look" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Viewed", arg: "shot.png" });
+  s = reduce(s, { type: "toolEnd", toolId: "t1", ok: true, detail: "800x600", awaitsModel: true });
+  s = reduce(s, { type: "token", delta: "a" });
+  const first = [...s.committed, ...s.tail].find((b) => b.kind === "tool");
+  const stamped = first?.kind === "tool" ? first.waited : undefined;
+  s = reduce(s, { type: "token", delta: "b" });
+  s = reduce(s, { type: "endTurn" });
+  const later = [...s.committed, ...s.tail].find((b) => b.kind === "tool");
+  assert.equal(later?.kind === "tool" && later.waited, stamped);
+});
+
+// ── a running command's output, shown before it finishes ─────────────────────
+
+test("progress fills a running row's body", () => {
+  let s = reduce(initialState(), { type: "user", text: "build it" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Run", arg: "cargo build", action: "run" });
+  s = reduce(s, { type: "toolProgress", toolId: "t1", text: "Compiling serde v1.0" });
+  const row = s.tail.find((b) => b.kind === "tool") as { detail?: string; detailKind?: string };
+  assert.equal(row.detail, "Compiling serde v1.0");
+  assert.equal(row.detailKind, "shell", "output must be rendered as shell output, not as a diff");
+});
+
+test("a later update REPLACES the earlier one", () => {
+  // The tail is resent whole rather than as increments, so appending would show every
+  // line twice and grow without bound over a long build.
+  let s = reduce(initialState(), { type: "user", text: "build it" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Run", arg: "cargo build", action: "run" });
+  s = reduce(s, { type: "toolProgress", toolId: "t1", text: "first" });
+  s = reduce(s, { type: "toolProgress", toolId: "t1", text: "second" });
+  const row = s.tail.find((b) => b.kind === "tool") as { detail?: string };
+  assert.equal(row.detail, "second");
+});
+
+test("a finished row is never overwritten by a late tail", () => {
+  // The last progress tick can arrive after the result — it is on a timer, the result is
+  // not. Letting it land would replace the command's real output with a snapshot from
+  // before it ended.
+  //
+  // The row is kept in the TAIL for this, by leaving an earlier call unfinished: a row
+  // that has drained to committed is out of reach anyway, so a test that let it drain
+  // would pass with the guard removed and prove nothing.
+  let s = reduce(initialState(), { type: "user", text: "build it" });
+  s = reduce(s, { type: "toolStart", toolId: "slow", name: "Run", arg: "server", action: "run" });
+  s = reduce(s, { type: "toolStart", toolId: "t1", name: "Run", arg: "cargo build", action: "run" });
+  s = reduce(s, { type: "toolEnd", toolId: "t1", ok: true, detail: "the real output", detailKind: "shell" });
+  s = reduce(s, { type: "toolProgress", toolId: "t1", text: "a stale tail" });
+  const row = s.tail.find((b) => b.kind === "tool" && b.toolId === "t1") as { detail?: string; done: boolean };
+  assert.ok(row, "the finished row drained away, so the guard was never exercised");
+  assert.equal(row.done, true);
+  assert.equal(row.detail, "the real output");
+});
+
+test("progress for an unknown call changes nothing", () => {
+  // A quiet failure drops its row entirely; a tick already in flight then names a block
+  // that no longer exists.
+  const s = reduce(initialState(), { type: "user", text: "hi" });
+  assert.equal(reduce(s, { type: "toolProgress", toolId: "gone", text: "x" }), s);
+});
+
+test("progress never disturbs a grouped call", () => {
+  // A group folds into one row ("Read 8 files") with nowhere to put output, and writing
+  // to it would replace the group's own list.
+  let s = reduce(initialState(), { type: "user", text: "look" });
+  s = reduce(s, { type: "toolStart", toolId: "g1", name: "Read", arg: "a.ts", action: "read", group: true });
+  const before = s;
+  s = reduce(s, { type: "toolProgress", toolId: "g1", text: "should not land" });
+  assert.equal(s, before);
+});

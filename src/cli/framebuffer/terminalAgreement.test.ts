@@ -315,3 +315,86 @@ test("without the repair, the same corruption survives every later frame", () =>
     assert.equal(term.lines()[0]!.trimEnd(), "Zlpha");
   });
 });
+
+/**
+ * An escape sequence never leaves a glyph behind.
+ *
+ * The parser used to treat everything that was not `ESC [` as "skip the ESC and read on",
+ * which meant the REST of the sequence was read as text and stamped into the grid. Every
+ * one of these ends in a letter, so the result was a stray `M`, or `B`, or a clipboard
+ * payload, sitting in the middle of a line — and sitting there permanently, because the
+ * model held the same letter as the screen and the diff had nothing to correct.
+ */
+/** The second byte of a string terminator, `ESC \`. */
+const ST = String.fromCharCode(92);
+const strays: Array<[name: string, sequence: string]> = [
+  ["reverse index", `${ESC}M`],
+  ["save cursor", `${ESC}7`],
+  ["restore cursor", `${ESC}8`],
+  ["select ASCII charset", `${ESC}(B`],
+  ["select graphics charset", `${ESC})0`],
+  ["keypad mode", `${ESC}=`],
+  ["window title", `${ESC}]0;a title${String.fromCharCode(7)}`],
+  ["clipboard payload", `${ESC}]52;c;SGVsbG8gd29ybGQ=${String.fromCharCode(7)}`],
+  ["hyperlink, terminated by ST", `${ESC}]8;;https://example.com${ESC}${ST}`],
+  ["device control string", `${ESC}Pq#0;2;0;0;0${ESC}${ST}`],
+];
+
+for (const [name, sequence] of strays) {
+  test(`${name} leaves no character on the screen`, () => {
+    const width = 24;
+    const height = 3;
+    const clean = frameToScreen("Tools(sessions)", width, height);
+    const dirty = frameToScreen(`${sequence}Tools(sessions)`, width, height);
+    assert.deepEqual(lines(dirty), lines(clean), `${name} put something in the grid`);
+
+    // And it must not reach the terminal either, by any route.
+    const blank = new Screen(width, height);
+    const term = seeded(blank);
+    term.write(paint(blank, dirty, 1));
+    assert.deepEqual(term.lines(), lines(clean));
+  });
+}
+
+test("an escape between two words does not move the text along", () => {
+  // The screenshot: a bullet, then the stray, then the label. The label has to sit where
+  // it would have sat, or every column after it disagrees with the terminal as well.
+  const clean = frameToScreen("* Tools(sessions)", 24, 2);
+  const dirty = frameToScreen(`*${ESC}M Tools(sessions)`, 24, 2);
+  assert.equal(lines(dirty)[0]!.trimEnd(), "* Tools(sessions)");
+  assert.deepEqual(lines(dirty), lines(clean));
+});
+
+test("a tab advances to the next tab stop instead of becoming a cell", () => {
+  // Stamping the tab would write it back out on the next paint, and the terminal would
+  // advance the cursor for it — so the model and the screen would disagree about every
+  // column after it, on a row the diff considers settled.
+  const screen = frameToScreen("ab\tcd", 24, 2);
+  assert.equal(lines(screen)[0]!.trimEnd(), "ab      cd");
+});
+
+test("a bell, a null and a backspace print nothing", () => {
+  const width = 12;
+  const noisy = frameToScreen(`ab${String.fromCharCode(7)}c${String.fromCharCode(0)}d`, width, 2);
+  assert.equal(lines(noisy)[0]!.trimEnd(), "abcd");
+  // Backspace steps back a column, so the next character replaces the one before it.
+  const rubbed = frameToScreen(`abc${String.fromCharCode(8)}X`, width, 2);
+  assert.equal(lines(rubbed)[0]!.trimEnd(), "abX");
+});
+
+test("a cell holding a control code is painted as a blank, never emitted", () => {
+  // The second lock on the same door. Whatever put it there, writing a raw ESC to the
+  // terminal would start an escape sequence and eat the bytes after it — one bad cell
+  // taking the rest of the screen with it.
+  const width = 10;
+  const blank = new Screen(width, 2);
+  const bad = new Screen(width, 2);
+  bad.clear();
+  parseFrame(bad, "ab", 0);
+  bad.chars[bad.index(2, 0)] = 27;
+  bad.chars[bad.index(3, 0)] = 9;
+
+  const written = paint(blank, bad, 1);
+  assert.ok(!written.includes(`${ESC}[`) || !/\x1b(?!\[)/.test(written.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")), "a raw control reached the terminal");
+  assert.ok(!written.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("").some((c) => c.charCodeAt(0) < 0x20));
+});

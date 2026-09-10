@@ -16,7 +16,10 @@ test("the restore turns off reporting first, then the buffer, cursor and wrappin
   // Order is the point: the mode actively writing bytes into the terminal is silenced
   // before anything else, so nothing it emits lands in the middle of the rest.
   assert.equal(TERMINAL_RESTORE, MOUSE_OFF + ALT_SCREEN_OFF + SHOW_CURSOR + AUTOWRAP_ON);
-  assert.equal(MOUSE_OFF, "\x1b[?1006l\x1b[?1000l");
+  // Every mode that was turned on has to be turned off, and 1002 (motion while a button
+  // is held) is one of them since dragging to select was added. A mode left on outlives
+  // the process: the shell that gets the terminal back is the one that suffers for it.
+  assert.equal(MOUSE_OFF, "\x1b[?1006l\x1b[?1002l\x1b[?1000l");
   assert.equal(ALT_SCREEN_OFF, "\x1b[?1049l");
   assert.equal(SHOW_CURSOR, "\x1b[?25h");
   assert.equal(AUTOWRAP_ON, "\x1b[?7h");
@@ -99,12 +102,28 @@ test("the app's exit path writes exactly the canonical restore", () => {
   }
 });
 
-test("the exit path and --reset-terminal send the same bytes", () => {
-  const { value: written } = keepingListeners(() => {
-    onFakeTty(() => enterAltScreen());
-    return onFakeTty(() => exitAltScreen());
+test("the exit path writes the restore to the FILE DESCRIPTOR, and survives exit", async () => {
+  // Run in a child with stdout piped, because that is the only place this can honestly be
+  // observed. The restore is written with writeSync deliberately: every caller is on its
+  // way to process.exit, and a TTY write on Windows is asynchronous, so the queued bytes
+  // were dropped and Ctrl+C left the terminal in the alternate screen — neither the app
+  // nor the shell. Watching process.stdout.write cannot see the fixed version at all.
+  //
+  // `process.exit` immediately after, which is what the signal handlers do, so this fails
+  // if the write ever goes back to being queued.
+  const { execFileSync } = await import("node:child_process");
+  const script = [
+    "const { enterAltScreen, exitAltScreen } = await import('./dist/cli/altScreen.js');",
+    "Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });",
+    "enterAltScreen();",
+    "exitAltScreen();",
+    "process.exit(0);",
+  ].join("\n");
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    encoding: "utf8",
+    cwd: process.cwd(),
   });
-  assert.equal(written, TERMINAL_RESTORE);
+  assert.ok(out.endsWith(TERMINAL_RESTORE), `the restore did not reach the pipe: ${JSON.stringify(out)}`);
 });
 
 test("restoring twice writes nothing the second time", () => {
@@ -115,4 +134,28 @@ test("restoring twice writes nothing the second time", () => {
     onFakeTty(() => exitAltScreen());
     assert.equal(onFakeTty(() => exitAltScreen()), "");
   });
+});
+
+test("the restore is written SYNCHRONOUSLY, enforced in source", async () => {
+  // Enforced by reading the source, because the failure cannot be reproduced from a test.
+  // It only happens on a real TTY: there, a write is queued and flushed on a later tick,
+  // and the process.exit that every signal handler calls next throws the queue away. A
+  // child process with a piped stdout — the only kind a test can create — flushes on exit
+  // either way, so a behavioural test passes with the bug present. Verified: swapping
+  // writeSync back for process.stdout.write leaves every other test in this file green.
+  //
+  // The cost of the bug is a terminal left in the alternate screen with mouse reporting
+  // on, which is neither the app nor the shell and cannot be typed into.
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./altScreen.ts", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export function exitAltScreen"));
+  // The restore must be IN a synchronous write to fd 1. Anything else may share that
+  // write — the exit-path cursor move does, deliberately, so a caller on its way out
+  // makes one syscall rather than two (see exitCursor.ts) — so the match allows a
+  // prefix and pins only what matters: writeSync, fd 1, carrying the restore.
+  assert.match(body, /writeSync\(\s*1\s*,[^;]*TERMINAL_RESTORE/, "the restore is not written synchronously");
+  assert.ok(
+    !/process\.stdout\.write\([^;]*TERMINAL_RESTORE/.test(body),
+    "the restore went back to an asynchronous write",
+  );
 });

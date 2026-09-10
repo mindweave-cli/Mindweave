@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toolKind, toolDisplay, KIND_COLOR, UNKNOWN_TOOL } from "./toolDisplay.js";
 import { TOOLS } from "../tools/registry.js";
+import { toPathList } from "../tools/pathList.js";
 
 test("an mcp__ prefixed name is detected as the mcp kind by prefix, not a static map entry", () => {
   assert.equal(toolKind("mcp__sqlite-local__execute_query"), "mcp");
@@ -110,4 +111,64 @@ test("a multi-file read no longer just repeats the count back", () => {
   // burst of reads was arithmetic instead of information.
   const d = toolDisplay("read_file", { paths: ["a.ts", "b.ts", "c.ts"] });
   assert.doesNotMatch(d.arg ?? "", /^\d+ files$/);
+});
+
+// ── the row must name every file the tool will actually read ───────────────
+//
+// `read_file` accepts the list under `paths` or the older singular `path`, as a
+// list or as a bare string, because a resumed session replays calls made under the
+// previous schema. The row read a narrower set, so a call passing four files under
+// `path` read all four and rendered as "Reading 1 file" with no filenames — the
+// header contradicting its own result line, and the one thing worth showing absent.
+
+test("a list under the older singular `path` is still counted and named", () => {
+  const d = toolDisplay("read_file", { path: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"] });
+  assert.equal(d.covers, 4, "the group header counts this call as four files");
+  assert.equal(d.arg, "a.ts, b.ts, c.ts, d.ts");
+});
+
+test("a list under `paths` is counted and named the same way", () => {
+  const d = toolDisplay("read_file", { paths: ["src/a.ts", "src/b.ts"] });
+  assert.equal(d.covers, 2);
+  assert.equal(d.arg, "a.ts, b.ts");
+});
+
+test("one file is one file — no count, just the name", () => {
+  assert.equal(toolDisplay("read_file", { paths: ["src/cli/App.tsx"] }).covers, undefined);
+  assert.equal(toolDisplay("read_file", { paths: ["src/cli/App.tsx"] }).arg, "App.tsx");
+  assert.equal(toolDisplay("read_file", { path: "src/cli/App.tsx" }).arg, "App.tsx");
+});
+
+test("a bare string under `paths` is one file, not a character list", () => {
+  const d = toolDisplay("read_file", { paths: "src/cli/App.tsx" });
+  assert.equal(d.arg, "App.tsx");
+  assert.equal(d.covers, undefined);
+});
+
+test("blank entries are not files", () => {
+  const d = toolDisplay("read_file", { paths: ["src/a.ts", "", "   ", "src/b.ts"] });
+  assert.equal(d.covers, 2, "two real files, not four");
+  assert.equal(d.arg, "a.ts, b.ts");
+});
+
+test("the display and the tool agree about every shape", () => {
+  // The invariant the shared reader exists for: whatever the tool will read, the row
+  // names. Asserted against the reader itself so a change to either side is caught
+  // here rather than by a header that disagrees with its own result on screen.
+  const shapes: Record<string, unknown>[] = [
+    { paths: ["a.ts", "b.ts"] },
+    { path: ["a.ts", "b.ts", "c.ts"] },
+    { paths: "a.ts" },
+    { path: "a.ts" },
+    { paths: [] },
+    {},
+  ];
+  for (const args of shapes) {
+    const files = toPathList(args);
+    const d = toolDisplay("read_file", args);
+    // What the row claims: `covers` when it names a count, otherwise one file if it
+    // named one and none if it named nothing.
+    const claimed = d.covers ?? (d.arg ? 1 : 0);
+    assert.equal(claimed, files.length, `the row claims ${claimed} for ${JSON.stringify(args)}, the tool reads ${files.length}`);
+  }
 });

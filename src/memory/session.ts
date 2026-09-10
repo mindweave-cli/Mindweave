@@ -13,6 +13,7 @@ import type { ToolContext } from "../tools/types.js";
 import { resolvePath, nextTouch, canonicalRoot } from "../tools/paths.js";
 import type { Session, Entry } from "./types.js";
 import { latestSession, listSessions, loadMeta, loadTranscript, loadSessionNotes } from "./store.js";
+import { fullReadPaths, writtenPaths } from "./presence.js";
 import { startChassis } from "../alternator/lane.js";
 import { BackgroundShells } from "../tools/backgroundShells.js";
 import { Checkpoints } from "../tools/checkpoints.js";
@@ -207,10 +208,10 @@ export function forkSession(parent: Session, task: string, opts: { readOnly?: bo
     // which is the failing direction to pick.
     guardAllowed: undefined,
     // Cleared for the same reason, and it was missed when this one was added: a folder
-    // the user allowed writing to is a judgement about work they were watching. Claude
-    // Code draws the identical line when it scopes a child — it keeps the permissions
-    // given on the command line and clears the SESSION ones, "to prevent unintended
-    // leakage".
+    // the user allowed writing to is a judgement about work they were watching. The line
+    // to draw is between permissions the session was STARTED with, which describe the job
+    // and belong to every part of it, and permissions granted mid-session in answer to a
+    // question about one specific piece of work. Only the first kind is inherited.
     allowedOutsideDirs: undefined,
     // The parent's approved plan is NOT the child's work. Two things go wrong when it
     // rides along: the child is handed a binding instruction to follow a plan it was not
@@ -454,6 +455,9 @@ export async function resumeSession(
   }
   attachMcp(toolContext, cwd);
   await seedProjectMemoryRead(toolContext, projectMemory);
+  // What the model has already read is in the transcript it is about to be handed, so the
+  // ledger has to agree with it. See restoreReadLedger for what a stale ledger cost.
+  await restoreReadLedger(toolContext, transcript, meta.updatedAt ?? 0);
   return {
     id: meta.id,
     cwd,
@@ -488,3 +492,76 @@ export async function resumeSession(
     ...(meta.callLog ? { callLog: meta.callLog } : {}),
   };
 }
+
+/**
+ * Put back what the model has ALREADY READ, on resume.
+ *
+ * The read ledger lives on the tool context, so `/continue` started with it empty while
+ * the transcript still carried whole files the model could plainly see. Everything
+ * downstream then disagreed with what was on screen: the read-before-overwrite gate
+ * refused ("hasn't been read this session") for a file whose contents were three
+ * messages up, and the read-dedup could not fire, so the model re-read it and appended a
+ * SECOND full copy to the transcript.
+ *
+ * That is a compounding cost, not a one-off. Every resume added another copy of the same
+ * file, so each `/continue` replayed a bigger transcript than the last — with a cold
+ * provider cache — and took longer than the last. Restoring the ledger is what stops the
+ * loop; the transcript was always the evidence, it just was not being read.
+ *
+ * SAFETY, and why this cannot simply trust the transcript. A file may have been edited on
+ * disk while the session was closed, and the copy in the transcript is then stale — so
+ * opening the write gate on it would let the model replace a file it has an out-of-date
+ * view of. A path is therefore only restored when the file has NOT been touched since the
+ * session was last saved. The failure direction is the safe one: a file that changed
+ * while away is re-read, exactly as it is today.
+ */
+async function restoreReadLedger(ctx: ToolContext, transcript: Entry[], savedAt: number): Promise<void> {
+  const resolve = (p: string): string | undefined => {
+    try {
+      return resolvePath(ctx, p);
+    } catch {
+      return undefined;
+    }
+  };
+
+  // READ **and** WRITTEN. A file the model wrote last session is a file it has seen: the
+  // whole content was in the call's own arguments, and an edit could only have followed a
+  // read. Restoring reads alone left the gate refusing files the model itself created,
+  // and it re-read them — appending another full copy of each, which is the exact cost
+  // this restore exists to remove.
+  const seen = new Set([...fullReadPaths(transcript, resolve), ...writtenPaths(transcript, resolve)]);
+
+  // When each file was last read or written, so freshness is judged per file rather than
+  // against the moment the session closed. A file touched after the model read it, but
+  // before the session ended, is stale — and comparing everything against one session-wide
+  // time cannot see that. Entries from before stamps existed fall back to the session's
+  // own save time, which is the best that can be said about them.
+  const lastSeenAt = new Map<string, number>();
+  for (const entry of transcript) {
+    const at = entry.ts ?? savedAt;
+    for (const path of new Set([...fullReadPaths([entry], resolve), ...writtenPaths([entry], resolve)])) {
+      lastSeenAt.set(path, Math.max(lastSeenAt.get(path) ?? 0, at));
+    }
+  }
+
+  // Newest first, capped. An unbounded restore turns a long session's every mentioned
+  // file into a stat at startup, and the oldest of them are the least likely to be what
+  // the next turn is about.
+  const ordered = [...seen].sort((a, b) => (lastSeenAt.get(b) ?? 0) - (lastSeenAt.get(a) ?? 0));
+
+  for (const abs of ordered.slice(0, RESTORE_LEDGER_MAX)) {
+    try {
+      const st = await fs.stat(abs);
+      // Touched since the model last saw it: the transcript's copy may be stale, so it is
+      // left out and re-read. The failure direction is the safe one.
+      if (st.mtimeMs > (lastSeenAt.get(abs) ?? savedAt)) continue;
+      ctx.reads.set(abs, { mtimeMs: st.mtimeMs, size: st.size, full: true, touchedAt: nextTouch() });
+    } catch {
+      // Gone from disk. Nothing to claim, and the model will find out when it looks.
+    }
+  }
+}
+
+/** How many files a resume puts back. Past this it stops being "where I was" and becomes
+ *  a stat of the whole session's history at startup. */
+const RESTORE_LEDGER_MAX = 100;

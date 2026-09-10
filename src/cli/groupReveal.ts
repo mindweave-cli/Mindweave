@@ -38,9 +38,19 @@ export function groupSettled(queueAfterFront: readonly { type: string; group?: b
  * queued behind it, so the row arrives already carrying its diff/output instead
  * of appearing as a bare `Update(home.html)` that grows a body a beat later.
  *
- * Same principle as the group hold above, and the same absence of a timer. The
- * caller releases the hold when the stream ends (no further event can arrive) or
- * when the user flushes with Esc.
+ * Same principle as the group hold above — but NOT the same absence of a timer,
+ * and that difference was a real failure. A group is a burst of local reads that
+ * resolve in milliseconds; a standalone call can be a release build. Held
+ * with no limit, its row was invisible for as long as the command ran: the last
+ * thing on screen stayed the tool before it, and an agent quietly building for
+ * ten minutes was indistinguishable from an agent that had hung. Reported as a
+ * hang, and it was not one.
+ *
+ * So the hold has a deadline. Past it the row is shown bare and its body arrives
+ * when the result does — the two-stage reveal this exists to avoid, accepted
+ * deliberately, because it is strictly better than showing nothing at all. The
+ * deadline is set well past any local tool, so a read or an edit still arrives
+ * whole and nothing about the calm case changes.
  */
 export function resultQueued(toolId: string, queue: readonly { type: string; toolId?: string }[]): boolean {
   return queue.some((a) => a.type === "toolEnd" && a.toolId === toolId);
@@ -53,4 +63,31 @@ export type GroupRevealPlan = "flush" | "hold";
  *  is no partial/progress state, see the file header for why. */
 export function planGroupReveal(settled: boolean, flushing: boolean): GroupRevealPlan {
   return settled || flushing ? "flush" : "hold";
+}
+
+/**
+ * How long a standalone tool row may be held waiting for its own result.
+ *
+ * Comfortably past any tool that touches only this machine — a read, an edit, a
+ * search all resolve in single-digit milliseconds — so the calm case is unchanged
+ * and those rows still arrive carrying their body. Comfortably short of the point
+ * where a person starts wondering whether anything is happening.
+ */
+export const STANDALONE_HOLD_MS = 600;
+
+/** Whether a held standalone row may be shown now (pure). */
+export function planStandaloneReveal(input: {
+  /** Its own result is already queued behind it, so the pair can reveal together. */
+  resultQueued: boolean;
+  /** Esc: the user has asked to see the rest now. */
+  flushing: boolean;
+  /** The stream is over, so no further event can arrive — a call whose end never came
+   *  must still be shown rather than stranding the queue and the turn with it. */
+  streamDone: boolean;
+  /** How long this row has been waiting. */
+  heldForMs: number;
+}): "reveal" | "hold" {
+  const { resultQueued, flushing, streamDone, heldForMs } = input;
+  if (resultQueued || flushing || streamDone) return "reveal";
+  return heldForMs >= STANDALONE_HOLD_MS ? "reveal" : "hold";
 }

@@ -33,6 +33,11 @@ const SH = IS_WINDOWS
       exitWith: (n: number) => `exit ${n}`,
       cd: (dir: string) => `Set-Location "${dir}"`,
       sleepLong: "Start-Sleep -Seconds 30",
+      // A long command that is NOT a pure delay. `sleep` is deliberately refused for
+      // backgrounding (see neverBackground): there the wait IS the work, so keeping the
+      // process alive afterwards serves nobody. Anything testing the background path has
+      // to look like real work.
+      workLong: "Write-Output start; Start-Sleep -Seconds 30",
       sleepMedium: "Start-Sleep -Seconds 10",
     }
   : {
@@ -40,6 +45,7 @@ const SH = IS_WINDOWS
       exitWith: (n: number) => `exit ${n}`,
       cd: (dir: string) => `cd "${dir}"`,
       sleepLong: "sleep 30",
+      workLong: "echo start; sleep 30",
       sleepMedium: "sleep 10",
     };
 
@@ -120,7 +126,7 @@ test("an already-aborted signal settles immediately", { timeout: 20000 }, async 
 test("a slow command is MOVED to the background rather than hanging the turn", { timeout: 20000 }, async () => {
   const { c, mgr } = withMgr();
   const started = Date.now();
-  const r = await runCommand.execute({ command: SH.sleepLong, timeout: 1000 }, c);
+  const r = await runCommand.execute({ command: SH.workLong, timeout: 1000 }, c);
   const elapsed = Date.now() - started;
   mgr.dispose();
   assert.match(r.output, /background as shell #\d+/i, `expected a backgrounded result, got: ${r.output.slice(0, 120)}`);
@@ -129,7 +135,7 @@ test("a slow command is MOVED to the background rather than hanging the turn", {
 
 test("run_in_background returns a shell id immediately", { timeout: 20000 }, async () => {
   const { c, mgr } = withMgr();
-  const r = await runCommand.execute({ command: SH.sleepLong, run_in_background: true }, c);
+  const r = await runCommand.execute({ command: SH.workLong, run_in_background: true }, c);
   mgr.dispose();
   assert.match(r.output, /background as shell #\d+/i);
 });

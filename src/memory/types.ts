@@ -45,7 +45,22 @@ export interface ToolCallRecord {
  *  - `summary`   — a compaction summary that replaced older turns; sent to the
  *                  model as a user message (see toChatMessages in the engine).
  */
-export type Entry =
+export type Entry = EntryOf & {
+  /**
+   * When this entry was first written, in epoch ms.
+   *
+   * Stamped once, at its first save (see store.ts). It is what lets a RESUMED session
+   * judge each file against its own read rather than against whenever the session
+   * happened to close — a file touched after the model read it is stale, and without a
+   * per-entry time there is nothing to notice that with.
+   *
+   * Optional because sessions written before it exist and must still load; anything
+   * reading it treats an absent stamp as unknown, never as zero.
+   */
+  ts?: number;
+};
+
+type EntryOf =
   | {
       role: "user";
       content: string;
@@ -61,6 +76,22 @@ export type Entry =
        *  the session list showed a nudge as the session's `lastPrompt`, so the
        *  `/continue` picker described a session by a reminder the user never sent. */
       synthetic?: true;
+      /**
+       * How this message reached the conversation, when it was not simply the next
+       * thing said.
+       *
+       *  - `steered`      — typed while a turn was running and delivered INTO that turn.
+       *  - `interrupting` — typed after the user stopped a turn, so it opens a new one.
+       *
+       * Both mean the model has to be told when it arrived, or a message landing after
+       * a round of tool results reads as if it had always been the request. Stored as a
+       * flag rather than by rewriting `content`, because the two readers need different
+       * things: the wire needs the explanation (see `arrivalNote` in the engine, applied
+       * when the request is built), while the chat, the history and the session's own
+       * label need exactly what was typed. A message wrapped at rest would replay on
+       * `/continue` with the explanation showing, as if the person had typed that too.
+       */
+      arrival?: "steered" | "interrupting";
     }
   | { role: "assistant"; content: string; toolCalls?: ToolCallRecord[] }
   | {
@@ -84,6 +115,9 @@ export type Entry =
        *  what it said at the time. */
       displayName?: string;
       displayKind?: ToolKind;
+      /** The model has real work to do on this result before it can answer (an image
+       *  going to vision). The row counts the wait instead of sitting silently finished. */
+      awaitsModel?: boolean;
       isError?: boolean;
       /** Absolute paths whose WHOLE content this result carries (see ToolResult). While
        *  this entry is unstubbed the model can see those files; `memory/presence.ts`

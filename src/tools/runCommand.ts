@@ -10,10 +10,14 @@
  *    call is still in effect for the next command in the same turn. The engine resets
  *    ctx.cwd to the project root at the start of each turn (see respond()), so a stale
  *    `cd` never carries across turns — the project root is the stable contract.
+ *  - output goes to a FILE, handed to the child as both of its streams, not to a pipe
+ *    this process has to keep draining. A pipe stops the child dead once its buffer
+ *    fills and nothing is reading; a file cannot, so backgrounding is just letting go
+ *    of it, memory is flat however much is printed, and the output survives a crash.
+ *    See commandOutput.ts.
  *  - whole-tree kill on timeout. Killing the shell alone leaves grandchildren
- *    (node → jest, a dev server) holding the output pipe open so it looks hung
- *    forever — so we kill the entire process tree (`taskkill /T` on Windows,
- *    the process group on POSIX).
+ *    (node → jest, a dev server) running unattended — so we kill the entire process
+ *    tree (`taskkill /T` on Windows, the process group on POSIX).
  *  - wall-clock timeout, 2 min default / 10 min max.
  *  - anti-hang environment: GIT_EDITOR=true and a hidden window stop an
  *    interactive editor or prompt from freezing the turn.
@@ -32,8 +36,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
-import type { Tool, ToolContext, ToolResult } from "./types.js";
+import type { Tool, ToolCallChannel, ToolContext, ToolResult } from "./types.js";
 import { catastrophicCommandReason, sensitiveCommandReason } from "./guard.js";
 import { forbiddenCommandReason, forbiddenCommandPatternReason } from "../governor/forbidden.js";
 import { requestForbiddenLift } from "./approval.js";
@@ -46,6 +49,8 @@ import { parseTestRun, testDetail } from "./testSummary.js";
 import { powershellLintReason, powershellParseError, powershellReservedAssignmentReason } from "./shellLint.js";
 import { findRunningDuplicate, findRecentUserClose, guessNotifyPolicy, type NotifyPolicy } from "./backgroundShells.js";
 import { fail, failQuietly } from "./results.js";
+import { defaultOpenRewrite } from "./openDefault.js";
+import { composeFileOutput, createOutputFile, removeOutputFile, tailOf } from "./commandOutput.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -114,7 +119,12 @@ export const runCommand: Tool = {
     `spent for nothing. ` +
     `Write commands for ${commandShellLabel()} (see the shell section of the system prompt)` +
     `${IS_WINDOWS ? "; or pass shell:'cmd' to run in cmd.exe instead (for && / || chaining or cmd-only tools)" : ""}. ` +
-    `Prefer Mindweave's read/edit/search tools over shelling out.`,
+    `Prefer Mindweave's read/edit/search tools over shelling out. ` +
+    `To open a file or a URL for the user, hand it to the system and let it choose the ` +
+    `app: ${IS_WINDOWS ? `'Start-Process \"<path or url>\"' with NO application named` : "'open' (macOS) or 'xdg-open' (Linux)"}. ` +
+    `Never name a browser or a viewer yourself — naming one launches an app the user may ` +
+    `not use and does not want opened, instead of the default they have chosen. ` +
+    `To LOOK at an image file, use view_image; do not open it in anything.`,
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -157,9 +167,17 @@ export const runCommand: Tool = {
     },
   },
 
-  async execute(args, ctx): Promise<ToolResult> {
-    const command = typeof args.command === "string" ? args.command.trim() : "";
-    if (!command) return failQuietly("`command` is required.");
+  async execute(args, ctx, call): Promise<ToolResult> {
+    const requested = typeof args.command === "string" ? args.command.trim() : "";
+    if (!requested) return failQuietly("`command` is required.");
+
+    // Naming a browser opens an application the user did not choose, beside the one they
+    // are already using. Rewritten here rather than asked for in the description, because
+    // the description already asked and the next run named Edge anyway — a rule the model
+    // has to remember is a rule it drops under load. Automation (a browser with flags) is
+    // left alone; see openDefault.ts.
+    const redirected = defaultOpenRewrite(requested);
+    const command = redirected ? redirected.command : requested;
 
     // A shell can change files in ways the checkpoint net never sees (a formatter, a
     // codegen step, a `git checkout`). Flag the turn so /undo says what it did NOT
@@ -281,7 +299,17 @@ export const runCommand: Tool = {
     const watch = !background && !looksReadOnly(command);
     const before = watch ? await snapshotBeforeCommand(ctx) : undefined;
 
-    const result = await runShell(command, ctx, timeout, background, shell, declared);
+    const result = await runShell(command, ctx, timeout, background, shell, declared, call);
+
+    // Told in the OUTPUT, where the model reads it, because it changes what the model may
+    // say afterwards: it asked for one browser and a different one opened. Reporting a
+    // page as "checked in Edge" when Edge never ran is the failure this closes.
+    if (redirected) {
+      result.output =
+        `${result.output}\n\nNote: that command named ${redirected.browser}, so the page was opened ` +
+        `with the user's DEFAULT browser instead. You do not know which browser that is — do not ` +
+        `name one when you describe what happened.`;
+    }
 
     if (before && before.size > 0) {
       // Never let bookkeeping fail a command that already ran and succeeded.
@@ -291,6 +319,54 @@ export const runCommand: Tool = {
   },
 };
 
+/** How long a command runs before it starts reporting. Almost everything finishes inside
+ *  this, and a row that flashed a tail and then settled would be motion for its own sake. */
+const PROGRESS_AFTER_MS = 2000;
+/** How often the tail is resent while it keeps running. */
+const PROGRESS_POLL_MS = 1000;
+/** Lines of tail shown while a command is still going. */
+const PROGRESS_LINES = 6;
+/** How much of the file a progress glance reads. A few lines of any real output fit in
+ *  this, and it is a bounded read against a file that may be gigabytes. */
+const PROGRESS_TAIL_BYTES = 8_192;
+
+/**
+ * The last few lines of what a running command has printed (pure).
+ *
+ * Trailing blank lines are dropped first: a build that ends its output with a newline
+ * would otherwise report a tail of empty rows and look like it had stopped saying
+ * anything. Long lines are clipped rather than wrapped, because this is a progress
+ * glance and a wrapped 400-column line would push the rest of it off screen.
+ */
+export function progressTail(output: string, lines = PROGRESS_LINES, width = 200): string {
+  const rows = output.split("\n");
+  while (rows.length > 0 && rows[rows.length - 1]!.trim() === "") rows.pop();
+  return rows
+    .slice(-lines)
+    .map((r) => (r.length > width ? r.slice(0, width - 1) + "…" : r))
+    .join("\n");
+}
+
+/**
+ * Commands that must never be moved to the background when they run long (pure).
+ *
+ * A pure delay IS the work. Backgrounding one at the timeout keeps a process alive that
+ * exists only to finish and hands back a shell id nobody wants — the wait was the point,
+ * and it is now neither waited on nor cancelled. Killing it is the honest outcome.
+ *
+ * Matched on the first word, after any leading environment assignments, so a wrapped or
+ * chained command is judged on what it actually starts with.
+ */
+export function neverBackground(command: string): boolean {
+  const first = command
+    .trim()
+    .split(/\s+/)
+    .find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  if (!first) return false;
+  const base = first.replace(/^.*[\\/]/, "").toLowerCase();
+  return base === "sleep" || base === "start-sleep";
+}
+
 async function runShell(
   command: string,
   ctx: ToolContext,
@@ -298,6 +374,7 @@ async function runShell(
   background: boolean,
   shell: Shell,
   declaredNotify?: NotifyPolicy,
+  call?: ToolCallChannel,
 ): Promise<ToolResult> {
   // How long the command took, for the row's outcome. Taken here rather than around the
   // spawn so it covers what the user actually waited through.
@@ -314,8 +391,18 @@ async function runShell(
   const cwdBefore = await canonicalRoot(ctx.cwd);
 
   const { bin, args, wrapped, tempFile } = buildInvocation(command, cwdFile, shell);
+
+  // The output file, opened BEFORE the spawn so the child can be handed it as both of
+  // its output streams. Nothing this process does can then block the command: it writes
+  // to a descriptor, not into a pipe somebody has to keep draining.
+  const outFile = await createOutputFile();
+
   const child = spawnManaged(bin, [...args, wrapped], {
     cwd: ctx.cwd,
+    // stdin stays a pipe so an interactive prompt sees a closed stream and gives up
+    // rather than waiting; stdout and stderr are the SAME descriptor, so the two
+    // interleave in the order they were written instead of being reassembled after.
+    stdio: ["pipe", outFile.handle.fd, outFile.handle.fd],
     env: {
       ...process.env,
       GIT_EDITOR: "true", // never drop into an interactive editor and hang
@@ -323,6 +410,11 @@ async function runShell(
       PAGER: "cat",
     },
   });
+
+  // Our copy of the descriptor. The child dup'd it at spawn, so closing here leaves it
+  // writing happily and means the file is released the moment the command ends rather
+  // than whenever this process happens to exit.
+  await outFile.handle.close().catch(() => {});
 
   const mgr = ctx.backgroundShells;
 
@@ -350,53 +442,72 @@ async function runShell(
   }
 
   return new Promise<ToolResult>((resolve) => {
-    let head = "";
-    let tail = "";
-    let dropped = 0;
     let timedOut = false;
     let settled = false;
 
-    // Decode ACROSS chunks. A chunk boundary can fall inside a multi-byte UTF-8
-    // sequence, and decoding each Buffer on its own turns that character into a
-    // replacement glyph — which shows up in any non-English output and in the box
-    // drawing most test runners use. The decoder holds the partial bytes back until
-    // the rest arrives.
-    const decoder = new StringDecoder("utf8");
+    // Nothing collects output here any more: the child writes it straight into a file it
+    // was given as stdout and stderr, and this process never sees the bytes. See
+    // commandOutput.ts for why — a pipe stops the child dead the moment nothing is
+    // draining it, and something always eventually is not.
+    //
+    // The head and the tail are read back from that file once the command ends. Both
+    // ends, weighted toward the tail: a build puts its banner at the start and its
+    // diagnosis at the very end, so keeping only the first bytes throws away the half
+    // that says what happened.
+    const collected = () => composeFileOutput(outFile.path, HEAD_CHARS, TAIL_CHARS);
 
-    const collect = (chunk: Buffer) => {
-      let rest = decoder.write(chunk);
-      if (!rest) return;
-      if (head.length < HEAD_CHARS) {
-        const room = HEAD_CHARS - head.length;
-        head += rest.slice(0, room);
-        rest = rest.slice(room);
-      }
-      if (!rest) return;
-      tail += rest;
-      if (tail.length > TAIL_CHARS) {
-        dropped += tail.length - TAIL_CHARS;
-        tail = tail.slice(tail.length - TAIL_CHARS);
-      }
+    // ── saying what it is doing while it does it ──────────────────────────────
+    //
+    // A command that runs for minutes used to show nothing at all until it finished. The
+    // row itself was not even on screen (the reveal held it for its own result), so a
+    // release build looked exactly like a hung agent — reported as one, and it was not.
+    //
+    // The LAST few lines, resent whole each time rather than as increments: the receiver
+    // replaces what it is showing, so a dropped update costs nothing and neither side
+    // keeps state the other has to agree with.
+    //
+    // Nothing is sent for the first couple of seconds. Almost every command finishes
+    // inside that, and a row that flashed a tail and then settled would be motion for its
+    // own sake on the calm case that makes up most of them.
+    let progressTimer: ReturnType<typeof setInterval> | null = null;
+    let lastSent = "";
+    const stopProgress = () => {
+      if (progressTimer) clearInterval(progressTimer);
+      progressTimer = null;
     };
-    /** Everything kept, with the gap named where it happened. */
-    const collected = () => composeOutput(head, tail, dropped);
-    child.stdout?.on("data", collect);
-    child.stderr?.on("data", collect);
+    const startProgress = setTimeout(() => {
+      if (settled || !call) return;
+      const send = async () => {
+        if (settled) return stopProgress();
+        const text = progressTail(await tailOf(outFile.path, PROGRESS_TAIL_BYTES));
+        // Only when it CHANGED. A quiet command would otherwise repaint the same rows
+        // once a second for as long as it ran.
+        if (text === lastSent) return;
+        lastSent = text;
+        call.progress(text);
+      };
+      send();
+      progressTimer = setInterval(send, PROGRESS_POLL_MS);
+      progressTimer.unref?.();
+    }, PROGRESS_AFTER_MS);
+    startProgress.unref?.();
 
     const timer = setTimeout(() => {
       if (settled) return;
       // Soft timeout: move the LIVE process to the background (preferred), so a long
       // test/build keeps running instead of being lost. With no manager (bare tests)
       // fall back to the old behavior — kill the tree.
-      if (mgr) {
+      if (mgr && !neverBackground(command)) {
         settled = true;
+        clearTimeout(startProgress);
+        stopProgress();
         detachAbort();
-        child.stdout?.off("data", collect);
-        child.stderr?.off("data", collect);
         // Auto-backgrounded after running too long inline. Somebody was waiting on this,
         // so its completion is the point unless the caller said otherwise.
         const notify = declaredNotify ?? "on_finish";
-        const info = mgr.adopt(child, { command, cwd: ctx.cwd, initial: collected(), cwdFile, tempFile, notify });
+        // The manager takes over the same file the child is already writing into, so
+        // nothing is copied and no output can be lost in the handover.
+        const info = mgr.adopt(child, { command, cwd: ctx.cwd, outputPath: outFile.path, cwdFile, tempFile, notify });
         resolve(
           backgroundedResult(
             info.id,
@@ -418,16 +529,17 @@ async function runShell(
     // would stay blocked on this promise forever.
     const signal = ctx.abortSignal;
     const detachAbort = () => signal?.removeEventListener("abort", onAbort);
-    function onAbort() {
+    async function onAbort() {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.stdout?.off("data", collect);
-      child.stderr?.off("data", collect);
+      clearTimeout(startProgress);
+      stopProgress();
       killTree(child.pid);
       void fs.rm(cwdFile, { force: true }).catch(() => {});
       if (tempFile) void fs.rm(tempFile, { force: true }).catch(() => {});
-      const body = collected().trim();
+      const body = (await collected()).text.trim();
+      removeOutputFile(outFile.path);
       resolve({
         output: body ? `${body}\n\n[interrupted]` : "Command interrupted before it finished.",
         isError: true,
@@ -441,11 +553,15 @@ async function runShell(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(startProgress);
+      stopProgress();
       detachAbort();
       await applyCwd(cwdFile, ctx);
       if (tempFile) await fs.rm(tempFile, { force: true }).catch(() => {});
+      const out = await collected();
+      removeOutputFile(outFile.path);
       resolve(
-        format(command, ctx, collected(), dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore, Date.now() - startedAt, child.pid),
+        format(command, ctx, out.text, out.dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore, Date.now() - startedAt, child.pid),
       );
     };
 
@@ -453,6 +569,8 @@ async function runShell(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(startProgress);
+      stopProgress();
       detachAbort();
       void fs.rm(cwdFile, { force: true }).catch(() => {});
       if (tempFile) void fs.rm(tempFile, { force: true }).catch(() => {});
@@ -581,19 +699,6 @@ function buildInvocation(
     `pwd -P > ${shQuote(cwdFile)} 2>/dev/null\n` +
     `exit $__ec`;
   return { bin: posixShell().bin, args: ["-c"], wrapped };
-}
-
-/**
- * Join the kept head and tail of a long output, naming the gap (pure).
- *
- * The marker sits WHERE the loss happened rather than at the end, so the model can
- * see that the two halves are not contiguous. A trailing "output truncated" note
- * after a head-only excerpt reads as "there was a bit more", which is exactly the
- * wrong impression when the missing part is the answer.
- */
-export function composeOutput(head: string, tail: string, dropped: number): string {
-  if (dropped <= 0) return head + tail;
-  return `${head}\n… [${dropped.toLocaleString("en-US")} characters omitted from the middle] …\n${tail}`;
 }
 
 /**

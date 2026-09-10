@@ -82,7 +82,13 @@ export function KeyManager({
   // Rows for the list: the box holds maxRows+2 content rows; the title and the hint (which
   // carries a blank top margin, so two rows) take three, leaving maxRows - 1 for the list
   // (never fewer than 2). It scrolls when there are more; the box never grows.
-  const win = Math.max(2, Math.min(WINDOW, maxRows - 1));
+  //
+  // The whole budget is used, NOT capped at `WINDOW`. Capping it meant the box was sized
+  // to `maxRows` and then only `WINDOW` of it was ever filled — a provider list with
+  // fourteen entries showed seven and left the lower half of the box blank, while every
+  // other picker in the same box filled it. `WINDOW` stays only as the fallback height
+  // for a caller that passes no budget at all.
+  const win = Math.max(2, maxRows - 1);
   const [mode, setMode] = useState<Mode>(() => {
     // Same drill-in the provider list does on Enter: an empty provider goes straight to
     // the field, one with keys goes to its key list.
@@ -250,6 +256,7 @@ export function KeyManager({
             key={r.slot}
             on={start + i === sel}
             n={start + i + 1}
+            numWidth={String(keys.length + 1).length}
             left={`key ${r.slot}`}
             mid={r.hint}
             right={r.active ? "● active" : ""}
@@ -257,7 +264,7 @@ export function KeyManager({
             width={width}
           />
         ))}
-        {addRow ? <Row on={sel === keys.length} n={keys.length + 1} left="Add a new key" width={width} /> : null}
+        {addRow ? <Row on={sel === keys.length} n={keys.length + 1} numWidth={String(keys.length + 1).length} left="Add a new key" width={width} /> : null}
       </Panel>
     );
   }
@@ -277,6 +284,7 @@ export function KeyManager({
           key={p.id}
           on={start + i === sel}
           n={start + i + 1}
+          numWidth={String(providers.length).length}
           left={p.label}
           right={countLabel(p.count)}
           rightColor={p.count > 0 ? "green" : undefined}
@@ -361,6 +369,7 @@ function Panel({
 function Row({
   on,
   n,
+  numWidth = 1,
   left,
   mid,
   right,
@@ -369,6 +378,10 @@ function Row({
 }: {
   on: boolean;
   n: number;
+  /** Digits to reserve for the number, so a two-digit item does not shove a one-digit
+   *  item's label a column to the right. The parent knows the list length; the row does
+   *  not. Right-aligned within it, the way a numbered list reads. */
+  numWidth?: number;
   left: string;
   mid?: string;
   right?: string;
@@ -380,7 +393,7 @@ function Row({
     <Box flexShrink={0} width={inner}>
       <Text color={on ? "cyan" : undefined} bold={on}>
         {on ? " › " : "   "}
-        {`${n}  `}
+        {`${String(n).padStart(numWidth)}  `}
       </Text>
       <Box width={mid === undefined ? 24 : 10}>
         <Text color={on ? "cyan" : undefined} bold={on} wrap="truncate-end">{left}</Text>

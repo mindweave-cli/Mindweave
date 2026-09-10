@@ -8,7 +8,7 @@
  * a diff or a command's stdout. Lines are prefixed so the
  * renderer can colour them: `+ ` added (green), `- ` removed (red), bare = plain.
  */
-import { condense, tailCap } from "./outputShape.js";
+import { capEnds, condense } from "./outputShape.js";
 
 /** Cap a list of display lines, noting how many were hidden. */
 export function capLines(lines: string[], max: number): string {
@@ -126,7 +126,7 @@ export const SHELL_ROWS_FAILED = 12;
  */
 export function shellOutput(body: string, max: number): string {
   if (!body) return "";
-  return tailCap(condense(collapseBlanks(stripAnsi(body).split("\n"))), max).join("\n");
+  return capEnds(condense(collapseBlanks(stripAnsi(body).split("\n"))), max).join("\n");
 }
 
 /**

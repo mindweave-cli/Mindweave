@@ -45,6 +45,19 @@ import { describeImage, isRejection } from "../memory/images.js";
 import { formatBytes } from "./webFetch.js";
 import { captureWindow, listWindows, type WindowInfo } from "./screenshotWin.js";
 
+/**
+ * How long to wait for a NAMED window to appear before giving up.
+ *
+ * Sized for the gap between launching a GUI app and its window being drawn, which on a
+ * cold browser start is a second or two. Long enough to cover that, short enough that a
+ * genuinely absent window is reported quickly rather than hanging the turn.
+ */
+const WINDOW_WAIT_MS = 5000;
+
+/** How often to re-list while waiting. Each list is a PowerShell round trip, so this is
+ *  a compromise between noticing quickly and not spawning a process ten times a second. */
+const WINDOW_POLL_MS = 400;
+
 /** How many titles to name when a match fails, so the model can retry precisely. */
 const MAX_LISTED = 12;
 
@@ -202,17 +215,37 @@ export const screenshot: Tool = {
     }
 
     let windows: WindowInfo[];
+    let pick: WindowPick;
     try {
-      windows = await listWindows(ctx.abortSignal);
+      // An app that was just launched has not drawn its window yet. Starting a browser
+      // and asking for it in the same breath is the ordinary case, not an edge case:
+      // the process returns immediately and the window appears a second or two later.
+      // Listing once and failing made that look like "the window does not exist", and
+      // the answer to it — capturing some OTHER window instead — is worse than waiting,
+      // because a picture of the wrong window can still be described as if it were the
+      // right one. So a named window is waited for.
+      //
+      // Only when a query was given. With no query the target is whatever has focus,
+      // which is true immediately and cannot be waited into existence.
+      const deadline = Date.now() + (query ? WINDOW_WAIT_MS : 0);
+      for (;;) {
+        windows = await listWindows(ctx.abortSignal);
+        pick = pickWindow(query, windows);
+        if (pick.kind !== "none" || Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, WINDOW_POLL_MS));
+      }
     } catch (error) {
       return fail(`Could not list open windows: ${message(error)}`);
     }
 
-    const pick = pickWindow(query, windows);
     if (pick.kind === "none") {
       return fail(
         query
-          ? `No open window's title contains "${query}". ${listTitles(pick.candidates)}`
+          ? `No open window's title contains "${query}", after waiting ${Math.round(WINDOW_WAIT_MS / 1000)}s ` +
+              `for one to appear. ${listTitles(pick.candidates)}\n` +
+              `Do NOT capture a different window instead: a picture of something else cannot tell you ` +
+              `anything about "${query}", and reporting it as if it could is worse than not looking. ` +
+              `Either the app did not start, or its title differs from what you expected.`
           : `There is no window to capture. ${listTitles(pick.candidates)}`,
       );
     }

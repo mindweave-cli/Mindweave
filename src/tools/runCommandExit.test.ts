@@ -9,27 +9,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
-import { runCommand, composeOutput } from "./runCommand.js";
+import { runCommand } from "./runCommand.js";
 
 const IS_WINDOWS = process.platform === "win32";
 
 function ctx(): ToolContext {
   return { cwd: process.cwd(), reads: new Map(), todos: [] };
 }
-
-// ── composeOutput (pure) ─────────────────────────────────────────────────────
-
-test("composeOutput joins the two ends untouched when nothing was dropped", () => {
-  assert.equal(composeOutput("start", "end", 0), "startend");
-  assert.equal(composeOutput("only", "", 0), "only");
-});
-
-test("composeOutput keeps BOTH ends and names the gap between them", () => {
-  const out = composeOutput("FIRST", "LAST", 1234);
-  assert.match(out, /^FIRST/);
-  assert.match(out, /LAST$/);
-  assert.match(out, /1,234 characters omitted from the middle/);
-});
 
 // ── exit codes ───────────────────────────────────────────────────────────────
 

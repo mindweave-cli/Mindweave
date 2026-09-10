@@ -4,7 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { condense, stripCommonPrefix, stripTimestamps, tailCap } from "./outputShape.js";
+import { capEnds, condense, stripCommonPrefix, stripTimestamps } from "./outputShape.js";
 
 test("a CI log loses its job column and its timestamps", () => {
   // The case this exists for. Better than half of every row is the job name and a
@@ -97,20 +97,57 @@ test("one dated line among many is left alone", () => {
   assert.deepEqual(stripTimestamps(lines), lines);
 });
 
-test("the cap keeps the END of the output", () => {
-  // Output is read backwards: what went wrong is on the last line. The previous cap kept
-  // the head, so a failed run showed its banner and dropped its error.
+test("the cap always keeps the END of the output", () => {
+  // Output is read backwards when it FAILED: what went wrong is on the last line. An
+  // even earlier cap kept only the head, so a failed run showed its banner and dropped
+  // its error. Whatever else changes here, the last line survives.
   const lines = ["one", "two", "three", "four", "five"];
-  const capped = tailCap(lines, 2);
-  assert.deepEqual(capped.slice(1), ["four", "five"]);
-  assert.match(capped[0]!, /3 earlier lines hidden/);
+  const capped = capEnds(lines, 3);
+  assert.equal(capped[capped.length - 1], "five");
+  assert.deepEqual(capped.slice(-2), ["four", "five"]);
+});
+
+test("and the FIRST line too — a command that worked says what it did up front", () => {
+  // A scaffolder announces what it built in its opening line and signs off with advice
+  // about what to do next. Capped from the end alone, a command that created a whole
+  // project directory displayed nothing but the sign-off.
+  const lines = ["Template created!", "two", "three", "four", "run npm run tauri dev"];
+  const capped = capEnds(lines, 3);
+  assert.equal(capped[0], "Template created!");
+  assert.match(capped[1]!, /2 earlier lines hidden/);
+  assert.deepEqual(capped.slice(2), ["four", "run npm run tauri dev"]);
+});
+
+test("the notice sits directly above the tail it introduces", () => {
+  // Not at the very top, where it would claim the opening line was hidden too, and not
+  // below the tail, where it reads as one more line the command printed.
+  const capped = capEnds(["first", "a", "b", "c", "last"], 3);
+  const notice = capped.findIndex((l) => l.includes("hidden"));
+  assert.equal(notice, 1, `the notice landed at ${notice}: ${JSON.stringify(capped)}`);
+});
+
+test("with room for one line only, that line is the END", () => {
+  // A failure is the case that cannot afford to lose its last line, so a budget too
+  // small for both ends spends it there rather than on the banner.
+  const capped = capEnds(["one", "two", "three"], 1);
+  assert.equal(capped[capped.length - 1], "three");
+  assert.match(capped[0]!, /2 earlier lines hidden/);
+});
+
+test("no notice when the two ends meet", () => {
+  // Exactly one line over budget: head + tail covers everything, and a notice saying
+  // "0 lines hidden" would report a hole where there is none.
+  const capped = capEnds(["one", "two", "three"], 3);
+  assert.deepEqual(capped, ["one", "two", "three"]);
+  const tight = capEnds(["one", "two", "three", "four"], 4);
+  assert.deepEqual(tight, ["one", "two", "three", "four"]);
 });
 
 test("output that fits is untouched, notice and all", () => {
   const lines = ["one", "two"];
-  assert.deepEqual(tailCap(lines, 5), lines);
+  assert.deepEqual(capEnds(lines, 5), lines);
 });
 
 test("one hidden line is singular", () => {
-  assert.match(tailCap(["one", "two"], 1)[0]!, /1 earlier line hidden/);
+  assert.match(capEnds(["one", "two"], 1)[0]!, /1 earlier line hidden/);
 });

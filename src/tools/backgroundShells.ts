@@ -27,8 +27,23 @@
 import { promises as fs } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { killTree, killTreeSync } from "./killTree.js";
+import { OutputReader, removeOutputFile, sizeOf } from "./commandOutput.js";
 
-const MAX_BUFFER_CHARS = 5_000_000; // cap one shell's retained output (runaway server)
+const MAX_BUFFER_CHARS = 5_000_000;
+/** How often a running shell's output file is read. Fast enough that  returns
+ *  something current, slow enough to be free on a machine doing real work. */
+const POLL_MS = 500;
+/** How much one poll reads. A bound, not a budget: whatever is left arrives next tick. */
+const POLL_READ_BYTES = 256 * 1024;
+/**
+ * How large one shell's output file may grow before the shell is stopped.
+ *
+ * Backgrounded, nothing else limits it. The foreground timeout is gone, the child writes
+ * straight to the descriptor with nothing in the way, and a process stuck in an append
+ * loop will take the disk with it — which is a far worse outcome than losing the command.
+ */
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_OUTPUT_DISPLAY = "2GB"; // cap one shell's retained output (runaway server)
 export const MAX_READ_CHARS = 30_000; // cap a single `shells` read
 const TAIL_CHARS = 2_000; // how much trailing output rides on a completion note
 
@@ -78,7 +93,9 @@ export type ShellStatus = "running" | "exited" | "killed";
 export type NotifyPolicy = "on_finish" | "on_failure" | "never";
 
 /** Who stopped a shell, when somebody did. Absent means it ended on its own. */
-export type StopActor = "agent" | "user";
+/** Who ended a shell.  is this process stepping in — today only when a runaway
+ *  fills the disk, which is nobody's decision and must not read as one. */
+export type StopActor = "agent" | "user" | "system";
 
 /** The two things that can be worth telling the model about a background shell. */
 export type ShellEventKind = "ready" | "ended";
@@ -248,8 +265,15 @@ export interface AdoptOptions {
   cwd: string;
   /** What to tell the model about. Defaults to `guessNotifyPolicy(command)`. */
   notify?: NotifyPolicy;
-  /** Output already collected before the hand-off (foreground → background). */
-  initial?: string;
+  /**
+   * The file the child is ALREADY writing its output into.
+   *
+   * Handed over rather than copied, and that is the whole hand-off: the child keeps
+   * writing to the same descriptor it had before, so not a byte can be lost between the
+   * foreground giving up on it and this taking over. Absent only for a caller that spawned
+   * a child some other way, which then has no output to read.
+   */
+  outputPath?: string;
   /** A temp cwd-file from run_command to clean up when the process ends. */
   cwdFile?: string;
   /**
@@ -265,8 +289,14 @@ export interface AdoptOptions {
 
 interface Entry extends ShellInfo {
   child: ChildProcess | null;
-  buffer: string; // retained output (capped)
-  readOffset: number; // chars already handed out by read()
+  /** The file the child writes into, and a reader holding this session's place in it. */
+  outputPath: string | null;
+  reader: OutputReader | null;
+  /** How much of  has already been handed out by read(). */
+  handed: number;
+  /** Everything read so far, capped — kept because several callers want the LATEST output
+   *  (a port to detect, a tail for the picker) rather than what is new since a read. */
+  seen: string;
   truncated: boolean;
   reported: boolean; // end told to the model yet?
   uiNotified: boolean; // end shown in the chat yet?
@@ -274,6 +304,8 @@ interface Entry extends ShellInfo {
   readyReported: boolean; // "it came up" told to the model yet?
   readyUiNotified: boolean; // "it came up" shown in the chat yet?
   readyTimer: ReturnType<typeof setTimeout> | null;
+  /** Follows the output file while the shell runs. Cleared when it ends. */
+  pollTimer: ReturnType<typeof setInterval> | null;
   cwdFile?: string;
   tempFile?: string;
 }
@@ -306,7 +338,7 @@ export class BackgroundShells {
     this.onChange = cb;
   }
 
-  /** Take ownership of a live child process and start buffering its output. */
+  /** Take ownership of a live child process and the file it is writing into. */
   adopt(child: ChildProcess, opts: AdoptOptions): ShellInfo {
     const id = ++this.seq;
     const entry: Entry = {
@@ -318,8 +350,10 @@ export class BackgroundShells {
       startedAt: Date.now(),
       finishedAt: null,
       child,
-      buffer: "",
-      readOffset: 0,
+      outputPath: opts.outputPath ?? null,
+      reader: opts.outputPath ? new OutputReader(opts.outputPath) : null,
+      seen: "",
+      handed: 0,
       truncated: false,
       notify: opts.notify ?? guessNotifyPolicy(opts.command),
       ready: false,
@@ -329,11 +363,24 @@ export class BackgroundShells {
       readyReported: false,
       readyUiNotified: false,
       readyTimer: null,
+      pollTimer: null,
       cwdFile: opts.cwdFile,
       tempFile: opts.tempFile,
     };
     this.shells.set(id, entry);
-    if (opts.initial) this.append(entry, opts.initial);
+    if (opts.outputPath) {
+      // The child already has this file as its output and keeps writing to it, so nothing
+      // is attached and nothing is copied — the reader starts at the beginning, which
+      // means everything printed before the hand-off is still there to be read.
+      this.poll(entry);
+    } else if (child.stdout || child.stderr) {
+      // A child spawned with pipes by someone else. Its output has nowhere to go unless
+      // something drains it — and an undrained pipe does not merely lose output, it STOPS
+      // the process once the kernel buffer fills. Reading it is what keeps it alive.
+      const collect = (chunk: Buffer | string) => this.append(entry, chunk.toString());
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+    }
 
     // The readiness signal. A server that is still alive after the startup grace has
     // come up, and that is the one positive event worth reporting for something that
@@ -350,9 +397,6 @@ export class BackgroundShells {
       entry.readyTimer.unref?.();
     }
 
-    const collect = (chunk: Buffer) => this.append(entry, chunk.toString("utf8"));
-    child.stdout?.on("data", collect);
-    child.stderr?.on("data", collect);
     // `signal` is captured, not dropped: a process ended by SIGTERM/SIGINT reports
     // `code === null`, and without the signal there is no way to tell that from a
     // crash.
@@ -370,12 +414,43 @@ export class BackgroundShells {
     return view(entry);
   }
 
+  /**
+   * Follow one shell's output file while it runs.
+   *
+   * A poll rather than a watch, because the point of the file is that nothing has to be
+   * listening for the child to keep working. Missing a tick costs nothing: the next one
+   * reads everything since, and the reader carries a partial character across the gap.
+   *
+   * It also guards the disk. Backgrounded, the only limit on what a stuck append loop can
+   * write is free space, and there is no foreground timeout left to stop it — so a file
+   * past the ceiling ends its process rather than the machine.
+   */
+  private poll(entry: Entry): void {
+    const tick = async () => {
+      if (entry.status !== "running" || !entry.reader) return;
+      const chunk = await entry.reader.next(POLL_READ_BYTES);
+      if (chunk) this.append(entry, chunk);
+      if (entry.outputPath && (await sizeOf(entry.outputPath)) > MAX_OUTPUT_BYTES) {
+        this.append(entry, `
+[output passed ${MAX_OUTPUT_DISPLAY}; the command was stopped]
+`);
+        this.kill(entry.id, "system");
+      }
+    };
+    const timer = setInterval(() => void tick(), POLL_MS);
+    timer.unref?.();
+    entry.pollTimer = timer;
+  }
+
   private append(entry: Entry, text: string): void {
-    entry.buffer += text;
-    if (entry.buffer.length > MAX_BUFFER_CHARS) {
-      // Keep the tail — the recent output is what matters for tests/errors.
-      entry.buffer = entry.buffer.slice(entry.buffer.length - MAX_BUFFER_CHARS);
-      entry.readOffset = Math.min(entry.readOffset, entry.buffer.length);
+    entry.seen += text;
+    if (entry.seen.length > MAX_BUFFER_CHARS) {
+      // Keep the tail — the recent output is what matters for tests and errors.
+      const cut = entry.seen.length - MAX_BUFFER_CHARS;
+      entry.seen = entry.seen.slice(cut);
+      // The handed mark moves with the text it points into. Left alone it would point past
+      // the end after a trim and every later read would return nothing.
+      entry.handed = Math.max(0, entry.handed - cut);
       entry.truncated = true;
     }
   }
@@ -394,6 +469,28 @@ export class BackgroundShells {
     entry.finishedAt = Date.now();
     entry.child = null;
     if (by) entry.stoppedBy = by;
+    if (entry.pollTimer) {
+      clearInterval(entry.pollTimer);
+      entry.pollTimer = null;
+    }
+    // ONE more read, after the process is gone.
+    //
+    // A command writes right up to the moment it exits, and the last poll was up to half
+    // a second before that. Stopping here without this loses whatever it said last — which
+    // for a build or a test run is the entire point: the failing assertion, the summary,
+    // the exit reason. Then the file goes, since everything in it is now held in .
+    if (entry.reader && entry.outputPath) {
+      const reader = entry.reader;
+      const path = entry.outputPath;
+      void (async () => {
+        const rest = await reader.next(MAX_BUFFER_CHARS);
+        if (rest) {
+          this.append(entry, rest);
+          this.emit();
+        }
+        removeOutputFile(path);
+      })();
+    }
     if (entry.readyTimer) {
       clearTimeout(entry.readyTimer);
       entry.readyTimer = null;
@@ -422,8 +519,13 @@ export class BackgroundShells {
   async read(id: number): Promise<{ info: ShellInfo; chunk: string } | null> {
     const entry = this.shells.get(id);
     if (!entry) return null;
-    let chunk = entry.buffer.slice(entry.readOffset);
-    entry.readOffset = entry.buffer.length;
+    // Read the file NOW rather than trusting the poll to have caught up. A read arriving
+    // between ticks would otherwise miss whatever was written in the gap, which is exactly
+    // the output somebody asked for.
+    const fresh = entry.reader ? await entry.reader.next(POLL_READ_BYTES) : "";
+    if (fresh) this.append(entry, fresh);
+    let chunk = entry.seen.slice(entry.handed);
+    entry.handed = entry.seen.length;
     if (chunk.length > MAX_READ_CHARS) {
       chunk = `… (earlier output omitted)\n${chunk.slice(chunk.length - MAX_READ_CHARS)}`;
     }
@@ -500,7 +602,7 @@ export class BackgroundShells {
     { info: ShellInfo; kind: ShellEventKind; tail: string; wake: boolean }[]
   > {
     const out: { info: ShellInfo; kind: ShellEventKind; tail: string; wake: boolean }[] = [];
-    const tailOf = (entry: Entry) => entry.buffer.slice(Math.max(0, entry.buffer.length - TAIL_CHARS));
+    const tailOf = (entry: Entry) => entry.seen.slice(Math.max(0, entry.seen.length - TAIL_CHARS));
     for (const entry of this.shells.values()) {
       if (entry.ready && !entry.readyReported) {
         entry.readyReported = true;
@@ -561,7 +663,7 @@ function view(e: Entry): ShellInfo {
     ...(e.signal ? { signal: e.signal } : {}),
     ...(e.stoppedBy ? { stoppedBy: e.stoppedBy } : {}),
     ...(e.truncated ? { truncated: true } : {}),
-    ...(detectPort(e.buffer) !== undefined ? { port: detectPort(e.buffer) } : {}),
+    ...(detectPort(e.seen) !== undefined ? { port: detectPort(e.seen) } : {}),
   };
 }
 

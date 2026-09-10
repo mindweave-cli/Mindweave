@@ -32,6 +32,7 @@ import { promises as fsp } from "node:fs";
 import { relativize, resolvePath, rootLabel, rootsOf } from "../tools/paths.js";
 import { renderRules, renderSkillCatalog, reloadGovernance, governanceStamp, rescope } from "../governor/index.js";
 import type { Session, Entry, ToolCallRecord } from "../memory/types.js";
+import type { ImageRef } from "../memory/images.js";
 import { forkSession, reloadProjectMemory } from "../memory/session.js";
 import { selectActiveFiles } from "../memory/workingSet.js";
 import { directoryNotesFor } from "../memory/projectNotes.js";
@@ -367,13 +368,34 @@ function taskLimits(): TaskLimits {
   };
 }
 
-// Max model turns (tool rounds) in one reply. A generous ceiling: real multi-file
-// work — a feature across a dozen files, a refactor — should finish in one go, so
-// this is a circuit-breaker against a runaway loop, NOT a work limit. When it is
-// hit the loop pauses LOSSLESSLY (the transcript, task list, and working set are
-// intact) and hands the decision to continue back to the user, so it can never
-// silently burn tokens. Env-overridable for power users.
-const STEP_BUDGET = envInt("MINDWEAVE_STEP_BUDGET", 50);
+/**
+ * How many tool rounds one turn may take, or undefined for no ceiling (pure).
+ *
+ * A ceiling is for a loop NOBODY IS WATCHING. That is the whole rule, and it is what
+ * decides who gets one:
+ *
+ *  - A **sub-agent** always gets one. It runs unattended by definition: there is no
+ *    prompt to interrupt, no screen showing its steps, and nothing between a worker
+ *    that has misread its task and an unbounded bill. `subagent.ts` passes its budget
+ *    explicitly, so a worker is capped whatever this returns.
+ *  - The **interactive turn** does not, by default. Someone is sitting in front of it
+ *    watching every tool row appear, and Esc stops the turn at the next boundary. A
+ *    counter is a worse circuit breaker than the person already holding one.
+ *
+ * The previous default capped the interactive loop at fifty rounds, and what that
+ * actually stopped was work: a task across a dozen files spends fifty rounds without
+ * anything going wrong, and it ended mid-flight with a pause the user then had to
+ * step over. A guard that fires on ordinary work is not a guard, it is a limit.
+ *
+ * `MINDWEAVE_STEP_BUDGET` puts a ceiling back for anyone who wants one — an unattended
+ * run, a script, a machine that must not be able to spend past a point. Unset, the
+ * turn ends when the model is finished or the user stops it.
+ */
+export function resolveStepLimit(maxSteps: number | undefined, envValue: string | undefined): number | undefined {
+  if (maxSteps !== undefined) return maxSteps;
+  const n = Number(envValue);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
 // Verification gate: when the model edits files then tries to finish without
 // running any check, nudge it once to verify. On by default; MINDWEAVE_VERIFY_GATE=0
 // disables it. See verify.ts for the (pure, tested) fact detectors.
@@ -406,6 +428,9 @@ export type EngineEvent =
   // UI can nest it under that worker's row instead of the main stream. Absent on the
   // lead agent's own calls.
   | { type: "tool"; phase: "start"; id: string; name: string; args: Record<string, unknown>; agent?: string }
+  /** Output from a call that has NOT finished. Carries the latest tail, not an increment:
+   *  the receiver replaces what it is showing, so a dropped update costs nothing. */
+  | { type: "tool"; phase: "progress"; id: string; text: string; agent?: string }
   | {
       type: "tool";
       phase: "end";
@@ -464,9 +489,79 @@ export interface RespondOptions {
    *  in-flight step, not the whole turn. Best-effort; awaited so the write lands before
    *  the next model call. Omit for callers that don't persist (e.g. sub-agents). */
   persist?: () => Promise<unknown> | void;
-  /** Cap on tool rounds for THIS run, overriding the default step budget. Used to
-   *  give a spawned sub-agent a smaller budget than the main agent. */
+  /** Cap on tool rounds for THIS run. There is no default one: an unattended caller
+   *  (a sub-agent) sets its own, and an interactive turn runs until it is finished or
+   *  the user stops it. See `resolveStepLimit`. */
   maxSteps?: number;
+  /**
+   * Messages the user typed while this turn was running, asked for at each step
+   * boundary and delivered into the SAME turn.
+   *
+   * Without it a message typed during a long task waits for the whole task to end and
+   * then starts a new one, so a correction arrives after the thing it was correcting was
+   * finished. With it the turn changes course.
+   *
+   * A pull, not a push, and asked for at one specific moment: after a round's tool
+   * results are recorded and before the next model call. Anywhere else is wrong — a
+   * message landing between a tool call and its result leaves the conversation malformed,
+   * which every provider rejects.
+   *
+   * Async because the caller resolves attachments (dropped paths, pastes, images) against
+   * the working directory before answering, and awaiting that here is what stops a
+   * half-resolved message being appended. Omitted by unattended callers: a sub-agent has
+   * no user typing at it, and `subagent.ts` leaves this unset so a prompt meant for the
+   * main turn can never leak into a worker's context.
+   */
+  steer?: () => Promise<SteeredMessage[]>;
+}
+
+/** A message that arrived mid-turn, resolved and ready to append. */
+export interface SteeredMessage {
+  /** What to send: attachments already expanded, the same as a normal submit. */
+  content: string;
+  /** Images attached to it, if the running model can see them. */
+  images?: ImageRef[];
+}
+
+/**
+ * How a mid-turn message is put to the model (pure).
+ *
+ * The framing is the whole reason this exists. A bare user message appearing after a
+ * round of tool results is ambiguous: it reads as if it had always been the request, so
+ * the model either restarts on it or, having already been told to do something else,
+ * ignores it. Saying when it arrived resolves both, and the second sentence is what
+ * makes it a steer rather than an interruption — the work in flight is not thrown away.
+ *
+ * Applied when the request is BUILT, never stored. The transcript keeps what the person
+ * typed; see `steered` in `memory/types.ts`.
+ */
+export function steeredMessage(text: string): string {
+  return (
+    `The user sent this while you were working:\n\n${text}\n\n` +
+    `If it changes what you should be doing, change course now. Otherwise finish the ` +
+    `current step, then answer it before you stop.`
+  );
+}
+
+/**
+ * How a message sent straight after an interrupt is put to the model (pure).
+ *
+ * A different fact from a steer, and it has to read differently. The work was STOPPED —
+ * the model is not deciding whether to change course, that decision was made for it by
+ * the person who pressed the key. Telling it to "finish the current step" here would be
+ * telling it to resume the thing it was just stopped from doing.
+ */
+export function interruptedMessage(text: string): string {
+  return (
+    `The user stopped you and sent this:\n\n${text}\n\n` +
+    `The work you were doing was cut off on purpose. Take it from here rather than ` +
+    `picking up where you left off, unless this asks you to.`
+  );
+}
+
+/** The wire form of a message that did not simply arrive in its turn (pure). */
+export function arrivalNote(arrival: "steered" | "interrupting", text: string): string {
+  return arrival === "steered" ? steeredMessage(text) : interruptedMessage(text);
 }
 
 /** True if an error is an AbortError (the model call was cancelled). */
@@ -591,6 +686,10 @@ function buildRequest(
       // since it was attached simply isn't in the payload map. Either way the model is
       // TOLD rather than quietly handed a message that claims an image it cannot see.
       const refs = e.role === "user" ? e.images : undefined;
+      // A message that arrived mid-turn is framed HERE rather than being stored framed,
+      // so the transcript keeps what the person typed and only the wire carries the
+      // explanation. Deterministic from the entry, so the cached prefix is unaffected.
+      const said = e.role === "user" && e.arrival ? arrivalNote(e.arrival, e.content) : e.content;
       if (refs && refs.length > 0) {
         const images: ImagePart[] = [];
         const missing: string[] = [];
@@ -613,13 +712,13 @@ function buildRequest(
             : []),
           ...(missing.length > 0 ? [`${missing.join(", ")} could not be read from disk`] : []),
         ];
-        const content = notes.length > 0 ? `${e.content}
+        const content = notes.length > 0 ? `${said}
 
-[${notes.join("; ")}]` : e.content;
+[${notes.join("; ")}]` : said;
         messages.push({ role: "user", content, ...(images.length > 0 ? { images } : {}) });
         continue;
       }
-      messages.push({ role: "user", content: e.content });
+      messages.push({ role: "user", content: said });
     } else if (e.role === "assistant") {
       messages.push({
         role: "assistant",
@@ -905,7 +1004,7 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
     ];
   };
   const lookup = (name: string) => findTool(name) ?? mcpTurn?.asTool(name);
-  const stepLimit = options.maxSteps ?? STEP_BUDGET;
+  const stepLimit = resolveStepLimit(options.maxSteps, process.env["MINDWEAVE_STEP_BUDGET"]);
   // Sinks the spawn_subagent tool reuses (it only ever gets the ToolContext, not the
   // Session): fork a scoped child, forward the child's usage to this turn's meter,
   // and share this turn's abort signal so Esc stops a sub-agent too.
@@ -950,8 +1049,8 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // Background shells that finished since last turn — surfaced to the model once.
   const bgEvents = await backgroundEventNotes(session);
 
-  // Per-task guards: cost/time ceilings (opt-in) alongside the step budget. Every
-  // call's usage is summed so the ceiling reflects the whole task.
+  // Per-task guards: cost and time ceilings, both opt-in, like the step ceiling above
+  // them. Every call's usage is summed so a ceiling reflects the whole task.
   const limits = taskLimits();
   const startedAt = Date.now();
   const usages: Usage[] = [];
@@ -1045,7 +1144,10 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // The turn's model↔tool loop. Kept as a closure so the try/finally above owns
   // every exit path; it reads the flags/usages declared in the enclosing scope.
   async function runTurn(): Promise<string> {
-  for (let step = 0; step < stepLimit; step++) {
+  // No ceiling means no ceiling: the loop's exits are then its own returns — the model
+  // finishing, a stop reason, the repeated-failure breaker, a cost or time ceiling if one
+  // is set, and the abort check on the line below. See `resolveStepLimit`.
+  for (let step = 0; stepLimit === undefined || step < stepLimit; step++) {
     if (options.signal?.aborted) return interrupted(session);
     // Stop before another (billable) call if a cost/time ceiling is hit — pause
     // losslessly, exactly like the step budget, so the user can raise it and resume.
@@ -1427,7 +1529,13 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
       // rather than fixing an observed bug, and the next tool added inherits it.
       let result;
       try {
-        result = await tool.execute(parseArgs(call.arguments), session.toolContext);
+        // A per-call channel, so a tool that runs for minutes can say what it is doing.
+        // Scoped to THIS call rather than hung on the shared context, which every tool in
+        // the turn holds the same instance of — with two commands in flight there would be
+        // no way to tell whose output was whose.
+        result = await tool.execute(parseArgs(call.arguments), session.toolContext, {
+          progress: (text) => options.onEvent?.({ type: "tool", phase: "progress", id: call.id, text }),
+        });
       } catch (error) {
         // An abort is the user, not a fault: let it travel so the loop's own handling
         // reports an interruption instead of a broken tool.
@@ -1446,6 +1554,7 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         images: result.images,
         displayKind: result.displayKind,
         displayName: result.displayName,
+        awaitsModel: result.awaitsModel,
       };
     };
 
@@ -1756,13 +1865,48 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         await options.persist?.();
       }
     }
+
+    // ── The user typed while this was running ────────────────────────────────
+    //
+    // LAST in the round, and that placement is the design. The tool results are all
+    // recorded, so the conversation is well-formed and a user message may follow it —
+    // one arriving between a call and its result is malformed and every provider
+    // rejects it. Being last also puts the person's words closest to the next call,
+    // which is where a change of course has to be read.
+    //
+    // Only reached on a round that ran tools. A round where the model answered instead
+    // returns above, and the turn is over: what is queued then is not a steer, it is the
+    // next request, and the caller sends it as one.
+    if (options.steer) {
+      let arrived: SteeredMessage[] = [];
+      try {
+        arrived = await options.steer();
+      } catch {
+        // Resolving an attachment can fail (a dropped file deleted since it was typed).
+        // The turn is not the place to die for it: the message stays queued and the
+        // caller sends it at the end, where it can report the fault to the user.
+        arrived = [];
+      }
+      for (const message of arrived) {
+        session.transcript.push({
+          role: "user",
+          content: message.content,
+          arrival: "steered",
+          ...(message.images && message.images.length > 0 ? { images: message.images } : {}),
+        });
+      }
+      if (arrived.length > 0) await options.persist?.();
+    }
   }
 
-  // Step ceiling reached without the model finishing. Don't spend another call
-  // forcing a (misleading) wrap-up the way a tools-off final turn would — that
-  // reads as "done" when it isn't. Pause cleanly instead: the transcript, task
-  // list, and working set are all intact, so telling Mindweave to continue resumes
-  // exactly here with nothing lost, and the user stays in control of the spend.
+  // A ceiling was set and has been reached without the model finishing. Reached only in
+  // that case: with no ceiling the loop condition never ends it.
+  //
+  // Don't spend another call forcing a (misleading) wrap-up the way a tools-off final
+  // turn would — that reads as "done" when it isn't. Pause cleanly instead: the
+  // transcript, task list, and working set are all intact, so telling Mindweave to
+  // continue resumes exactly here with nothing lost, and the user stays in control of
+  // the spend.
   return pauseTask(session, options, `reached the step budget of ${stepLimit} tool steps in one turn`);
   }
 }

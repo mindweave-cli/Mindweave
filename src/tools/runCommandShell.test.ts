@@ -86,8 +86,12 @@ test("soft-timeout MOVES a long command to the background and returns (no hang)"
   const mgr = new BackgroundShells();
   const c = { cwd: process.cwd(), reads: new Map(), todos: [], backgroundShells: mgr } as unknown as ToolContext;
   const started = Date.now();
-  // 30s sleep, 1s soft timeout → must background and RETURN in ~1s, not run 30s.
-  const r = await runCommand.execute({ command: "Start-Sleep -Seconds 30", timeout: 1000 }, c);
+  // A long command, 1s soft timeout → must background and RETURN in ~1s, not run 30s.
+  //
+  // NOT a bare Start-Sleep. A pure delay is deliberately refused for backgrounding (see
+  // `neverBackground`): the wait IS the work there, so keeping the process alive
+  // afterwards leaves something nobody is waiting on and nobody cancelled.
+  const r = await runCommand.execute({ command: "Write-Output start; Start-Sleep -Seconds 30", timeout: 1000 }, c);
   const elapsed = Date.now() - started;
   mgr.dispose();
   assert.match(r.output, /background as shell #\d+/i, `expected a backgrounded result, got: ${r.output.slice(0, 120)}`);

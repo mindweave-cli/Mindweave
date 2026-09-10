@@ -87,6 +87,8 @@ function BlockViewInner({ block, columns, tightTop }: { block: Block; columns: n
           columns={columns}
           live={block.live}
           tightTop={tightTop}
+          since={block.since}
+          waited={block.waited}
         />
       );
 

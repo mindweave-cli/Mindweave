@@ -16,6 +16,7 @@ import { readSymbolTool } from "./readSymbol.js";
 import { replaceSymbolBody } from "./replaceSymbol.js";
 import { web } from "./web.js";
 import { screenshot } from "./screenshot.js";
+import { viewImage } from "./viewImage.js";
 import { exitPlan } from "./exitPlan.js";
 import { todoWrite } from "./todo.js";
 import { useSkill } from "./useSkill.js";
@@ -52,7 +53,8 @@ export const TOOLS: Tool[] = [
   useSkill,
   // Clarification (read-only: asks the user a focused question, changes nothing)
   askUserTool,
-  // Sight (read-only: photographs one approved window, changes nothing)
+  // Sight (read-only: looks at a picture, changes nothing)
+  viewImage,
   screenshot,
   // Planning (read-only, and offered only while planning — see `planOnly`)
   exitPlan,

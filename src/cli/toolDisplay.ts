@@ -6,6 +6,7 @@
  * test)`. Pure, display-only (never sent to a model), and deterministic from the
  * tool name + parsed args.
  */
+import { toPathList } from "../tools/pathList.js";
 
 /** Raw tool name → the bold display name shown in the row. */
 const DISPLAY_NAME: Record<string, string> = {
@@ -22,6 +23,7 @@ const DISPLAY_NAME: Record<string, string> = {
   web_fetch: "Fetch",
   web_search: "WebSearch",
   screenshot: "WindowCapture",
+  view_image: "Viewed",
   use_skill: "Skill",
   create_skill: "Skill",
   todo_write: "Todo",
@@ -129,6 +131,7 @@ const TOOL_KIND: Record<string, ToolKind> = {
   web_search: "websearch",
   web: "websearch",
   screenshot: "screenshot",
+  view_image: "screenshot",
   kill_shell: "run",
   governor: "governor",
   // The MCP family: finding an external server's tools, reading its data, adding one.
@@ -245,8 +248,14 @@ export function toolDisplay(name: string, args: Record<string, unknown>): ToolDi
   //
   // A multi-path read has no line range to show — ranges only apply to a single file, and
   // the tool ignores them for a list — so the names are the whole story.
-  const many = Array.isArray(args.paths) ? args.paths.filter((v): v is string => typeof v === "string") : [];
-  const path = many.length > 0 ? (many.length === 1 ? (many[0] ?? "") : "") : str(args.path);
+  //
+  // Read through the SAME reader the tool uses, not a second one written to match it.
+  // The row is a statement about a call that has already been made, so any shape the
+  // tool accepts has to be a shape this can name — and it was not. A call that passed
+  // its four files under the older singular `path` was read in full and displayed as
+  // "Reading 1 file" with no filenames at all, the header contradicting its own result.
+  const many = toPathList(args);
+  const path = many.length === 1 ? (many[0] ?? "") : "";
   const detail =
     many.length > 1
       ? many.map(base).join(", ")

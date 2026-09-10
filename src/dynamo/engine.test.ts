@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { stopReasonNote } from "./engine.js";
+import { arrivalNote, resolveStepLimit, steeredMessage, stopReasonNote } from "./engine.js";
 import type { StopReason } from "../drivers/types.js";
 
 test("every early-stop reason gets its own, distinct explanation", () => {
@@ -277,4 +277,126 @@ test("a turn that is re-opened to verify does not end up saying goodbye twice", 
   assert.ok(gate.length < 2000, `the slice is too wide to mean anything: ${gate.length} chars`);
   assert.match(gate, /prematureReplyAt = session\.transcript\.length - 1/, "the premature reply is not recorded");
   assert.match(gate, /type: "replyReset"/, "the premature reply still reaches the screen");
+});
+
+// ---------------------------------------------------------------------------
+// The step ceiling, and who gets one.
+//
+// A ceiling is for a loop nobody is watching. The interactive turn has a person in
+// front of it holding Esc; a sub-agent has neither a screen nor a keyboard. The old
+// default capped both at fifty rounds, and on the interactive side what it stopped
+// was ordinary work — a task across a dozen files spends fifty rounds with nothing
+// wrong, and ended mid-flight on a pause the user then had to step over.
+
+test("no ceiling by default: the interactive turn runs until it is finished or stopped", () => {
+  assert.equal(resolveStepLimit(undefined, undefined), undefined);
+  assert.equal(resolveStepLimit(undefined, ""), undefined);
+});
+
+test("a sub-agent's explicit budget always wins, and is never widened", () => {
+  // The half that must not regress. A worker runs unattended, so its cap is the only
+  // thing between a misread task and an unbounded bill.
+  assert.equal(resolveStepLimit(20, undefined), 20);
+  assert.equal(resolveStepLimit(20, "500"), 20);
+});
+
+test("the env var puts a ceiling back for an unattended run", () => {
+  assert.equal(resolveStepLimit(undefined, "50"), 50);
+  assert.equal(resolveStepLimit(undefined, "1"), 1);
+});
+
+test("a meaningless ceiling is no ceiling, never a silent zero", () => {
+  // Zero or a negative would make the loop exit before its first call, which reads as
+  // the model answering nothing at all. Junk falls back to unbounded, not to a value.
+  for (const junk of ["0", "-5", "abc", "1.5", "NaN", " "]) {
+    assert.equal(resolveStepLimit(undefined, junk), undefined, `"${junk}" was read as a ceiling`);
+  }
+});
+
+test("the loop tolerates having no ceiling at all", () => {
+  // Mechanical, because the failure is silent in the worst way: `step < undefined` is
+  // false, so a loop that forgot this check would end BEFORE its first model call and
+  // every turn would return the pause message having done nothing.
+  const source = readFileSync(fileURLToPath(new URL("./engine.ts", import.meta.url)), "utf8");
+  const loop = source.match(/for \(let step = 0;[^)]*\)/);
+  assert.ok(loop, "the step loop is gone or was rewritten");
+  assert.match(
+    loop[0],
+    /stepLimit === undefined \|\|/,
+    "the loop compares against a possibly-undefined ceiling without checking for one",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Steering: a message typed while the turn is running reaches THAT turn.
+
+test("a steered message is put to the model with when it arrived, and what to do", () => {
+  const framed = steeredMessage("use the other file");
+  assert.match(framed, /use the other file/, "the message itself is gone");
+  assert.match(framed, /while you were working/i, "nothing says when it arrived");
+  // Both halves matter. Without the first a model already told to do something else
+  // ignores it; without the second it abandons work in flight and restarts.
+  assert.match(framed, /change course/i, "it is not told it may change course");
+  assert.match(framed, /before you stop/i, "it is not told it must answer before finishing");
+});
+
+test("the framing wraps the message rather than replacing it", () => {
+  // A steered message must survive whole: the model acts on what was typed, not on a
+  // summary of it. Anything that shortened it here would be silent.
+  const long = "rewrite the parser so it handles the ESC ] form, and add a test";
+  assert.ok(steeredMessage(long).includes(long));
+});
+
+test("the transcript stores what was TYPED; only the wire is framed", () => {
+  // Mechanical, and the reason is `/continue`. A framed message stored at rest replays
+  // in the chat with the explanation showing, as if the person had typed that too — and
+  // the session picker labels sessions by their first user message, so it would show up
+  // there as well.
+  const source = readFileSync(fileURLToPath(new URL("./engine.ts", import.meta.url)), "utf8");
+  assert.match(
+    source,
+    /content: message\.content,\s*\n\s*arrival: "steered"/,
+    "a steered entry is being stored as something other than the raw text",
+  );
+  assert.match(
+    source,
+    /e\.arrival \? arrivalNote\(e\.arrival, e\.content\) : e\.content/,
+    "the framing is not applied where the request is built, so the model is not told",
+  );
+});
+
+test("the two arrivals are told apart, and neither reads like the other", () => {
+  // A steer and an interrupt are different facts and must not share wording. "Finish the
+  // current step" is right for a steer and exactly wrong after Esc, where finishing the
+  // step is the thing the user just stopped.
+  const steered = arrivalNote("steered", "look at the parser");
+  const stopped = arrivalNote("interrupting", "look at the parser");
+  assert.notEqual(steered, stopped);
+  assert.match(steered, /while you were working/i);
+  assert.match(stopped, /stopped you/i);
+  assert.match(stopped, /cut off/i, "nothing says the work was ended deliberately");
+  assert.doesNotMatch(stopped, /finish the current step/i, "an interrupted turn is told to resume");
+  for (const framed of [steered, stopped]) assert.ok(framed.includes("look at the parser"));
+});
+
+test("a steered message lands AFTER the round's tool results, never among them", () => {
+  // The rule every provider enforces: a user message between a tool_call and its result
+  // is a malformed conversation and the request is rejected. `nothing is pushed to the
+  // transcript between tool_calls and their results` guards the other pushes; this
+  // guards the one that is driven from outside the engine.
+  const source = readFileSync(fileURLToPath(new URL("./engine.ts", import.meta.url)), "utf8");
+  const resultsPush = source.indexOf('role: "tool"');
+  const steerDrain = source.indexOf("await options.steer()");
+  assert.ok(resultsPush > 0 && steerDrain > 0, "one of the two sites is gone");
+  assert.ok(steerDrain > resultsPush, "the steer drain runs before the tool results are recorded");
+});
+
+test("a failure while resolving a steered message cannot kill the turn", () => {
+  // The caller resolves attachments, which touches the disk: a file dropped into the
+  // box and deleted before the message went out would otherwise throw out of the loop
+  // and take a turn's work with it.
+  const source = readFileSync(fileURLToPath(new URL("./engine.ts", import.meta.url)), "utf8");
+  const drain = source.slice(source.indexOf("if (options.steer)"), source.indexOf("if (options.steer)") + 700);
+  assert.match(drain, /try \{/, "the steer callback is called without a guard");
+  assert.match(drain, /catch/, "the steer callback is called without a guard");
 });

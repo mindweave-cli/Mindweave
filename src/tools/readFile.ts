@@ -20,6 +20,9 @@ import { chassisForPath } from "./chassisMux.js";
 import { renderOutlineEntries } from "./codeIntel.js";
 import { estimateTokens } from "../memory/compaction.js";
 import { failQuietly } from "./results.js";
+// Shared with the row that displays the call, so what is read and what is named can
+// never disagree about which files a call asked for. See pathList.ts.
+import { toPathList } from "./pathList.js";
 
 // Caps protect the model's context window, not the disk. They are deliberately
 // MODEL-AGNOSTIC fixed defaults, not derived from any one model's context window —
@@ -368,19 +371,6 @@ async function readOne(
   };
 }
 
-/**
- * The paths one call asked for.
- *
- * Accepts a bare string as well as a list, and still reads the old singular `path`,
- * because a resumed session replays tool calls the model made under the previous schema
- * — refusing those would turn every `/continue` into a wall of errors.
- */
-function toPathList(args: Record<string, unknown>): string[] {
-  const raw = args.paths ?? args.path;
-  if (typeof raw === "string") return raw.trim() ? [raw] : [];
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
-}
 
 
 /** A positive integer from an env var, or `fallback`. Lets caps be tuned without

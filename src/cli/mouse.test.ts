@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readWheel, stripMouse } from "./mouse.js";
+import { readMouse, readWheel, stripMouse } from "./mouse.js";
 
 test("reads a wheel-up and a wheel-down report", () => {
   assert.deepEqual(readWheel("[<64;10;5M"), ["up"]);
@@ -68,4 +68,47 @@ test("state does not leak between calls (the regex is reused)", () => {
   const chunk = "[<64;1;1M";
   assert.deepEqual(readWheel(chunk), ["up"]);
   assert.deepEqual(readWheel(chunk), ["up"], "a second identical chunk must parse the same");
+});
+
+// ── Pointer events ───────────────────────────────────────────────────────────
+// Added with selection.ts: a drag needs the movement between press and release, which
+// only motion reporting (1002) delivers.
+
+test("a press, a drag and a release are told apart", () => {
+  assert.deepEqual(readMouse("\x1b[<0;10;5M"), [{ kind: "press", x: 9, y: 4 }]);
+  assert.deepEqual(readMouse("\x1b[<32;12;5M"), [{ kind: "drag", x: 11, y: 4 }]);
+  assert.deepEqual(readMouse("\x1b[<0;12;5m"), [{ kind: "release", x: 11, y: 4 }]);
+});
+
+test("coordinates arrive 1-based and come out 0-based", () => {
+  // The top-left cell is column 1, row 1 on the wire and (0, 0) in the grid.
+  assert.deepEqual(readMouse("\x1b[<0;1;1M"), [{ kind: "press", x: 0, y: 0 }]);
+});
+
+test("a wheel notch is not a pointer event", () => {
+  // Both readers see the same bytes; each must ignore what the other owns.
+  assert.deepEqual(readMouse("\x1b[<64;5;5M"), []);
+  assert.deepEqual(readMouse("\x1b[<65;5;5M"), []);
+  assert.deepEqual(readWheel("\x1b[<0;5;5M"), []);
+});
+
+test("only the left button selects", () => {
+  assert.deepEqual(readMouse("\x1b[<1;5;5M"), [], "middle");
+  assert.deepEqual(readMouse("\x1b[<2;5;5M"), [], "right");
+});
+
+test("a whole drag in one chunk keeps its order", () => {
+  const events = readMouse("\x1b[<0;2;1M\x1b[<32;5;1M\x1b[<32;9;1M\x1b[<0;9;1m");
+  assert.deepEqual(events.map((e) => e.kind), ["press", "drag", "drag", "release"]);
+  assert.deepEqual(events.map((e) => e.x), [1, 4, 8, 8]);
+});
+
+test("reports with the ESC already eaten by Ink's parser still read", () => {
+  // The same bytes reach us twice, and Ink strips the ESC from a start-of-chunk
+  // sequence. Both spellings have to parse or half the events are invisible.
+  assert.deepEqual(readMouse("[<0;3;2M"), [{ kind: "press", x: 2, y: 1 }]);
+});
+
+test("pointer reports are stripped from typed text like wheel reports are", () => {
+  assert.equal(stripMouse("hi\x1b[<0;3;2Mthere\x1b[<0;3;2m"), "hithere");
 });

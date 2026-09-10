@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { render } from "ink";
 import { PromptInput } from "./components/PromptInput.js";
-import { popAll } from "./messageQueue.js";
+import { popAll, queueMessage } from "./messageQueue.js";
 
 /** The bytes a terminal actually sends. Built from a code point so the source has no invisible characters in it. */
 const ESCAPE = String.fromCharCode(27);
@@ -93,7 +93,9 @@ function mount(opts: { queue: string[]; history?: string[]; declineEscape?: bool
     h.calls.push(via);
     // Mirrors App's rule: mid-turn Esc belongs to the interrupt, not to the queue.
     if (via === "escape" && opts.declineEscape) return undefined;
-    const popped = popAll(h.queue, input, cursor);
+    // Built through the app's own factory, so the probe cannot pop a shape the app
+    // could never queue.
+    const popped = popAll(h.queue.map((t) => queueMessage(t)), input, cursor);
     if (!popped) return undefined;
     h.queue = [];
     h.pops.push(via);

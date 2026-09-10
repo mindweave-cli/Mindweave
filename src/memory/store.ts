@@ -23,6 +23,7 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "../tools/atomicWrite.js";
+import { collapsePastes } from "./pastedText.js";
 import type { Entry, Session, SessionMeta } from "./types.js";
 
 /** Turn a project path into a single safe directory name (e.g. `D:\proj` → `D--proj`). */
@@ -97,7 +98,9 @@ function firstUserText(transcript: Entry[]): string {
 function lastUserText(transcript: Entry[]): string {
   for (let i = transcript.length - 1; i >= 0; i--) {
     const e = transcript[i];
-    if (e.role === "user" && !e.synthetic) return e.content.trim();
+    // Collapsed, or a session that opened with a paste is labelled by the paste — or, once
+    // it is wrapped, by the wrapper. The label is meant to be the thing the person typed.
+    if (e.role === "user" && !e.synthetic) return collapsePastes(e.content).trim();
   }
   return "";
 }
@@ -116,6 +119,23 @@ export async function saveSession(session: Session): Promise<boolean> {
     const dir = sessionDir(session.cwd);
     await fs.mkdir(dir, { recursive: true });
 
+    // Stamp anything not yet stamped, in place, on its way to disk.
+    //
+    // The stamp is what lets a resumed session judge each file on its OWN read rather
+    // than on when the session happened to close: a file touched after the model read it
+    // but before the session ended is stale, and without a per-entry time there is
+    // nothing to notice that with. Done here because it is the ONE place every entry
+    // passes through — stamping at the eighteen call sites that append to a transcript
+    // would be eighteen chances to forget.
+    //
+    // First save wins, so the time recorded is when the entry was written rather than
+    // when it was last persisted, and re-saving a long transcript never rewrites history.
+    // Entries from sessions written before this simply have no stamp, and everything
+    // reading it treats that as unknown rather than as zero.
+    const now = Date.now();
+    for (const e of session.transcript) {
+      if (e.ts === undefined) e.ts = now;
+    }
     const lines = session.transcript.map((e) => JSON.stringify(e)).join("\n");
     // ATOMIC, like every other write in the project. `fs.writeFile` truncates the
     // destination and then streams the new bytes in, so between those two moments the

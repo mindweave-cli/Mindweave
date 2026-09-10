@@ -524,3 +524,38 @@ test("a resumed session opens with settled verbs, not work that looks in flight"
   assert.match(settled, /Update\(App\.tsx\)/);
   assert.doesNotMatch(settled, /Updating/);
 });
+
+test("progress is applied at once, never queued behind the beat", async () => {
+  // It is an update to a row already on screen, the same as a result resolving in place.
+  // Paced, a tail sent once a second would queue up behind a two-second beat and fall
+  // further behind the command for as long as it ran.
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+  const at = app.indexOf("const isPaced =");
+  assert.ok(at > 0, "isPaced is gone");
+  assert.match(app.slice(at, at + 500), /a\.type !== "toolProgress"/, "progress is being paced");
+});
+
+test("the engine gives each call its OWN progress channel", async () => {
+  // Hung on the shared tool context it would be one channel for every tool in the turn,
+  // and with two commands in flight there would be no way to tell whose output was whose.
+  const { readFile } = await import("node:fs/promises");
+  const engine = await readFile(new URL("../dynamo/engine.ts", import.meta.url), "utf8");
+  assert.match(
+    engine,
+    /tool\.execute\(parseArgs\(call\.arguments\), session\.toolContext, \{\s*\n\s*progress: \(text\) => options\.onEvent\?\.\(\{ type: "tool", phase: "progress", id: call\.id/,
+    "the progress channel is not scoped to the call",
+  );
+});
+
+test("a running command reports, and stops reporting when it settles", async () => {
+  // Both halves matter. Without the first a long build shows nothing at all; without the
+  // second the timer outlives the command and keeps firing at a row that has resolved.
+  const { readFile } = await import("node:fs/promises");
+  const run = await readFile(new URL("../tools/runCommand.ts", import.meta.url), "utf8");
+  assert.match(run, /call\.progress\(text\)/, "nothing reports while the command runs");
+  // Every path that settles the promise must also stop the timer.
+  const settles = (run.match(/settled = true;/g) ?? []).length;
+  const stops = (run.match(/stopProgress\(\);/g) ?? []).length;
+  assert.ok(stops >= settles - 1, `${settles} settle paths but only ${stops} stop reporting`);
+});

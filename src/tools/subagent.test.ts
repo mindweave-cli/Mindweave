@@ -184,3 +184,29 @@ test("read_only decides whether a worker may run in parallel", () => {
   assert.equal(spawnSubagent.isConcurrencySafe?.({ read_only: false }), false);
   assert.equal(spawnSubagent.isConcurrencySafe?.({}), false, "unset must be the safe default");
 });
+
+test("a worker is ALWAYS given an explicit step budget", async () => {
+  // The engine no longer caps a turn by default: an interactive turn has a person in
+  // front of it holding Esc, and a counter is a worse circuit breaker than that. A
+  // worker has neither a screen nor a keyboard, so its cap is the only thing between a
+  // misread task and an unbounded bill — and it now exists ONLY because this call site
+  // passes one. Dropping `maxSteps` here would silently make every worker unbounded.
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./subagent.ts", import.meta.url), "utf8");
+  const call = source.indexOf("respond(child, {");
+  assert.ok(call > 0, "the worker no longer runs through respond()");
+  const options = source.slice(call, call + 400);
+  assert.match(options, /maxSteps:/, "a worker is being started without a step budget");
+});
+
+test("a worker is never handed the user's messages", async () => {
+  // The queue belongs to the person at the prompt and to the turn they are watching. A
+  // worker runs on a task it was given; a message typed at the main turn arriving in its
+  // context would steer the wrong agent, and the main turn would never see it at all.
+  // The isolation is structural: `steer` is simply not passed here.
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./subagent.ts", import.meta.url), "utf8");
+  const call = source.indexOf("respond(child, {");
+  assert.ok(call > 0, "the worker no longer runs through respond()");
+  assert.ok(!/\bsteer:/.test(source.slice(call, call + 600)), "a worker is being given the user's message queue");
+});
