@@ -112,14 +112,20 @@ test("the exit path writes the restore to the FILE DESCRIPTOR, and survives exit
   // `process.exit` immediately after, which is what the signal handlers do, so this fails
   // if the write ever goes back to being queued.
   const { execFileSync } = await import("node:child_process");
+  // Import the SOURCE through tsx, not the built ./dist copy. CI runs the tests before
+  // the build step and `npm ci` compiles nothing, so a child that reached for
+  // dist/cli/altScreen.js found no file and exited non-zero — a green suite locally
+  // (where a stale dist happened to exist) and a red one in CI. tsx transpiles the .ts
+  // on the fly, the same way this parent test process is already running, so the child
+  // needs no build to exist.
   const script = [
-    "const { enterAltScreen, exitAltScreen } = await import('./dist/cli/altScreen.js');",
+    "const { enterAltScreen, exitAltScreen } = await import('./src/cli/altScreen.ts');",
     "Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });",
     "enterAltScreen();",
     "exitAltScreen();",
     "process.exit(0);",
   ].join("\n");
-  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+  const out = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
     encoding: "utf8",
     cwd: process.cwd(),
   });
