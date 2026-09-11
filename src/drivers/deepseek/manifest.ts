@@ -9,27 +9,42 @@
  * stays plain data and pure functions. The wire code lives in `client.ts`, which
  * only loads once DeepSeek is actually selected.
  *
- * v1 ships two models: `deepseek-v4-flash` (fast, cheap default) and
- * `deepseek-v4-pro` (stronger). Both are OpenAI-compatible, store 1M tokens, and
- * support Thinking / Non-Thinking modes. The older `deepseek-chat` /
- * `deepseek-reasoner` ids are deprecated and stop working after 2026-07-24.
+ * `deepseek-v4-flash` is V4.1 Flash: an OpenAI-compatible model that stores 1M
+ * tokens, reads images natively, and supports Thinking / Non-Thinking modes. The id
+ * is a route DeepSeek keeps serving; `deepseek-flash` is its canonical name for the
+ * same model, so a maintainer can switch to that the day the route is retired.
+ *
+ * `deepseek-v4-pro` is the stronger model, offered until DeepSeek folds it into V4.1
+ * Flash — see PRO_SUNSET_MS. The separate `deepseek-v4-flash-vision-exp` model is
+ * gone: its images are now native to Flash, and normalize migrates the old id across.
  */
 import type { DriverManifest, Effort, ModelChoice, ModelConfig, ModelId, ModelPrice, ThinkLevel } from "../types.js";
 
 export const FLASH = "deepseek-v4-flash";
 export const PRO = "deepseek-v4-pro";
-/** The multimodal model, added 2026-08-21. `-exp` is DeepSeek's own suffix: they
- *  ship it as experimental, and the id is theirs, not a label we chose. */
-export const VISION = "deepseek-v4-flash-vision-exp";
+/** The pre-4.1 vision model's id. It no longer names a model of its own — Flash reads
+ *  images now — so it survives only as an alias normalize maps onto Flash. */
+export const VISION_LEGACY = "deepseek-v4-flash-vision-exp";
+
+/**
+ * When V4 Pro stops being a model of its own.
+ *
+ * At this instant DeepSeek starts serving every `deepseek-v4-pro` request from V4.1
+ * Flash, at Flash's price. Offering Pro as a distinct choice past it would be offering
+ * something that no longer exists, so the picker drops it (the `until` field below,
+ * honoured by the registry) and normalize resolves a saved Pro config to Flash. A
+ * single published build is then correct on both sides of the date with no re-release.
+ */
+export const PRO_SUNSET_MS = Date.parse("2026-09-14T04:00:00Z");
 
 /** The model used when nothing is saved and no env override is set. */
 export const DEFAULT_MODEL = FLASH;
 
-/** The models offered by `/model`. First entry is the default. */
+/** The models offered by `/model`. First entry is the default. Pro carries an
+ *  `until`, so the registry stops offering it once V4.1 Flash absorbs it. */
 export const MODELS: ModelChoice[] = [
-  { id: FLASH, label: "DeepSeek V4 Flash", description: "fast & cheap — the default" },
-  { id: PRO, label: "DeepSeek V4 Pro", description: "stronger, for harder work" },
-  { id: VISION, label: "DeepSeek V4 Flash Vision", description: "reads images — experimental" },
+  { id: FLASH, label: "DeepSeek V4.1 Flash", description: "fast, cheap, reads images — the default" },
+  { id: PRO, label: "DeepSeek V4 Pro", description: "stronger, for harder work", until: PRO_SUNSET_MS },
 ];
 
 /**
@@ -62,34 +77,25 @@ const ACCEPTED_EFFORTS = new Set<Effort>(["low", "high", "max"]);
  * The ladder is identical for both, so it is built once. What differs between Flash
  * and Pro is the size of the model underneath, not the settings it accepts.
  */
-export function thinkLevels(model: ModelId): ThinkLevel[] {
-  const standard: ThinkLevel = { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" };
-  // The vision model is offered WITHOUT a reasoning ladder, and the omission is
-  // deliberate. DeepSeek's vision guide documents the request shape, the formats and
-  // the image budget, and says nothing at all about `reasoning_effort` on this id.
-  // This driver has already been bitten by assuming a rung exists: `xhigh` was
-  // advertised for a year, is not a value DeepSeek accepts, and so the setting had
-  // never once done anything. Advertising a level that may be rejected is worse than
-  // withholding one that turns out to work, because only the first breaks a request.
-  // Add the other two the moment the docs name them.
-  if (model === VISION) return [standard];
+export function thinkLevels(_model: ModelId): ThinkLevel[] {
   return [
-    standard,
+    { label: "Standard", description: "answer directly — fastest", thinking: false, effort: "high" },
     { label: "High", description: "think first, then answer", thinking: true, effort: "high" },
     { label: "Maximum", description: "maximum reasoning budget", thinking: true, effort: "max" },
   ];
 }
 
-// DeepSeek list prices (USD / 1M). Cache hits are ~1/10 of misses — the whole
+// DeepSeek list prices (USD / 1M). Cache hits are far cheaper than misses — the whole
 // reason re-sent context stays cheap. `-pro` is estimated higher; correct it if
 // needed. These are best-effort defaults a user can override without a rebuild.
+//
+// V4.1 Flash is billed on two clocks: peak hours (01:00–04:00 and 06:00–10:00 UTC,
+// Monday–Friday) cost twice the off-peak rate. The off-peak rate is recorded here,
+// because it is the one a session pays for most of the week; peak is exactly double
+// (0.006 / 0.30 / 1.20). A user who runs mostly in peak windows can override.
 const PRICES: Record<string, ModelPrice> = {
-  [FLASH]: { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 },
+  [FLASH]: { cacheHit: 0.003, cacheMiss: 0.15, output: 0.6 },
   [PRO]: { cacheHit: 0.028, cacheMiss: 0.28, output: 0.56 },
-  // DeepSeek's price list gives vision exactly Flash's rates, so it is written as the
-  // same numbers rather than derived from them: if Flash's estimate is corrected one
-  // day, that is a judgment about Flash and should not silently move a second model.
-  [VISION]: { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 },
 };
 const DEFAULT_PRICE: ModelPrice = PRICES[FLASH]!;
 
@@ -124,34 +130,28 @@ const PRO_WINDOW = 256_000;
 /**
  * Flash gets its own, lower value rather than inheriting Pro's curve.
  *
- * Flash is 284B with 13B active against Pro's 1.6T/49B, and there is NO published
- * multi-needle data for it at any length. The one datapoint (100% single-needle
- * NIAH at 435K) is the easy axis and says nothing about the axis we care about.
- * 192K is a deliberate judgment call under absent data: clearly above the old
- * shared 128K, clearly inside Pro's proven-flat region, and revisable the moment
- * someone publishes a Flash multi-needle curve.
+ * There is NO published multi-needle data for V4.1 Flash at any length, and its
+ * causal encoder–decoder architecture is not the one Pro's curve was measured on, so
+ * Pro's numbers cannot be borrowed. 192K is a deliberate judgment call under absent
+ * data: clearly above the old shared 128K, clearly inside Pro's proven-flat region,
+ * and revisable the moment someone publishes a Flash multi-needle curve.
  */
 const FLASH_WINDOW = 192_000;
 
 export function contextWindow(model: ModelId): number {
-  // Vision anchors to Flash. DeepSeek documents the same 1M store for all three and
-  // states its pure-text ability is on par with Flash, so the sharp-window judgment
-  // made for Flash is the one that applies; inventing a separate number for a model
-  // with no published multi-needle curve of its own would be a guess wearing a
-  // decimal point.
   return model === PRO ? PRO_WINDOW : FLASH_WINDOW;
 }
 
 /**
- * Only the vision model takes image input, and only since 2026-08-21.
+ * V4.1 Flash reads images natively; V4 Pro does not.
  *
- * This used to be absent entirely, with a comment recording that as a fact rather
- * than an oversight. It is now true of exactly one id, so the check is by id and not
- * by provider: pointing an image at Flash or Pro still degrades before anything is
- * sent, which is what core does with a false answer here.
+ * The check is by id, not by provider, because the two models differ: an image
+ * pointed at Pro degrades before anything is sent, which is what core does with a
+ * false answer here. Vision used to live in a separate model; it is folded into Flash
+ * now, and the old vision id reaches this as Flash after normalize migrates it.
  */
 export function acceptsImages(model: ModelId): boolean {
-  return model === VISION;
+  return model === FLASH;
 }
 
 /**
@@ -159,22 +159,25 @@ export function acceptsImages(model: ModelId): boolean {
  * keep the reasoning intent valid. DeepSeek accepts three of the five shared effort
  * rungs (`low`, `high`, `max`), so anything else clamps to `high`.
  *
- * No model-scoped step-down any more: both models take the same three rungs, so
- * switching between them preserves the user's reasoning choice instead of quietly
- * demoting it. See thinkLevels for why the old Pro-only Maximum was wrong.
+ * Both models take the same three rungs, so switching between them preserves the
+ * user's reasoning choice instead of quietly demoting it.
+ *
+ * `now` is injected so the sunset is testable; it defaults to the wall clock, which
+ * is what every caller in the app relies on.
  */
-export function normalize(config: ModelConfig): ModelConfig {
-  // Three ids now, so this can no longer be "PRO or else FLASH": that shape would
-  // have quietly rewritten a vision selection back to Flash, and the user would have
-  // watched their chosen model change itself with no message.
-  const model: ModelId = config.model === PRO ? PRO : config.model === VISION ? VISION : FLASH;
-  // Thinking is forced off on vision for the reason thinkLevels gives none: the flag
-  // is undocumented there, and this is the gate that stops a config saved on another
-  // model carrying one in.
-  const thinking = model === VISION ? false : config.thinking === true;
+export function normalize(config: ModelConfig, now: number = Date.now()): ModelConfig {
+  // Anything that is not an explicit Pro selection resolves to Flash. That folds in
+  // both the pre-4.1 vision id and the plain `deepseek-v4-flash` id, and it means a
+  // config saved by a build that named some other DeepSeek model opens on the default
+  // rather than on a model this build cannot serve.
+  let model: ModelId = config.model === PRO ? PRO : FLASH;
+  // Past the sunset, Pro is served by Flash anyway, so a stored Pro config resolves to
+  // Flash rather than pointing at a model the picker no longer offers.
+  if (model === PRO && now >= PRO_SUNSET_MS) model = FLASH;
+  const thinking = config.thinking === true;
   // Anything outside DeepSeek's accepted set becomes `high`. That covers a config
   // saved by an older build (which stored `xhigh`) and a rung belonging to another
-  // provider. `max` is accepted on BOTH models and is no longer stepped down.
+  // provider. `max` is accepted on both models and is not stepped down.
   const effort: Effort = ACCEPTED_EFFORTS.has(config.effort) ? config.effort : "high";
   return { model, thinking, effort };
 }

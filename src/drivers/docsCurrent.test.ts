@@ -15,9 +15,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { allProviders } from "./registry.js";
+import type { ModelChoice } from "./types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (p: string) => readFileSync(join(here, p), "utf8");
+
+/**
+ * The models a provider states as its lineup — the permanent ones. A model with an
+ * `until` is transitional (a vendor is about to route its id to a successor), so it is
+ * not part of the headline count and would otherwise make the count flip on its
+ * retirement date and rot the docs.
+ */
+const countStable = (models: ModelChoice[] | undefined): number =>
+  (models ?? []).filter((m) => m.until === undefined).length;
 
 test(".env.example names every provider's key variable", () => {
   const text = read("../../.env.example");
@@ -42,7 +52,7 @@ test("PROVIDERS.md states the real provider and model counts", () => {
   // silently became a lie. A count is checkable, so it is checked.
   const text = read("PROVIDERS.md");
   const providers = allProviders();
-  const models = providers.reduce((n, p) => n + (p.models ?? []).length, 0);
+  const models = providers.reduce((n, p) => n + countStable(p.models), 0);
   // Digits, not words, precisely so this can be checked. "Thirteen" reads better and
   // cannot be verified, which is how the old file came to promise providers that had
   // already shipped.
@@ -59,7 +69,7 @@ test("the README states the real provider and model counts", () => {
   // after both were built. Nobody re-reads the top of a README.
   const text = readFileSync(join(here, "..", "..", "README.md"), "utf8");
   const providers = allProviders();
-  const models = providers.reduce((n, p) => n + (p.models ?? []).length, 0);
+  const models = providers.reduce((n, p) => n + countStable(p.models), 0);
 
   const claim = text.match(/(\d+) providers, (\d+) models/);
   assert.ok(claim, "the README no longer states the counts in a checkable form");

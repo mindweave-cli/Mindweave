@@ -1,48 +1,81 @@
 /**
- * vision.test.ts — the DeepSeek vision model, and the wire that carries an image.
+ * vision.test.ts — V4.1 Flash, its native image input, and the V4 Pro sunset.
  *
- * Added when `deepseek-v4-flash-vision-exp` shipped (2026-08-21). The interesting
- * part is not the model entry, it is that the transport underneath could not send a
- * picture at all: `images` is our own field and was being spread onto the request
- * untouched, so a provider saw an unknown key and the bytes never left the machine.
- * Declaring the capability without fixing that would have made `acceptsImages` a
- * lie, which is the failure this project keeps finding in other forms.
+ * Vision began as a separate `deepseek-v4-flash-vision-exp` model (2026-08-21). V4.1
+ * Flash folded it into the base model, so the interesting facts moved: Flash itself
+ * now reads images, the old vision id survives only as an alias, and Pro is offered
+ * only until DeepSeek routes it into Flash. The wire test at the bottom is the one
+ * that has always mattered — `images` is our own field, and a transport that spread it
+ * onto the request untouched sent a request that looked well formed while the bytes
+ * never left the machine.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { acceptsImages, contextWindow, normalize, price, thinkLevels, MODELS, VISION, FLASH, PRO } from "./manifest.js";
+import {
+  acceptsImages,
+  contextWindow,
+  normalize,
+  price,
+  thinkLevels,
+  MODELS,
+  FLASH,
+  PRO,
+  VISION_LEGACY,
+  PRO_SUNSET_MS,
+} from "./manifest.js";
+import { modelsOf } from "../registry.js";
+import type { DriverManifest, ModelChoice } from "../types.js";
 import { toWireMessages } from "../openaiCompat/wire.js";
 
-test("the vision model is offered and keeps its identity", () => {
-  assert.ok(MODELS.some((m) => m.id === VISION), "it has to appear in /model");
-  // The old shape was "PRO or else FLASH", which would have rewritten a vision
-  // selection back to Flash and changed the user's model under them without a word.
-  assert.equal(normalize({ model: VISION, thinking: false, effort: "high" }).model, VISION);
-  assert.equal(normalize({ model: PRO, thinking: false, effort: "high" }).model, PRO);
-  assert.equal(normalize({ model: "something-else", thinking: false, effort: "high" } as never).model, FLASH);
-});
+const BEFORE_SUNSET = PRO_SUNSET_MS - 1;
+const AFTER_SUNSET = PRO_SUNSET_MS;
 
-test("only the vision model claims to read images", () => {
-  assert.equal(acceptsImages(VISION), true);
+test("Flash is the default and reads images; Pro does not", () => {
+  assert.equal(MODELS[0]!.id, FLASH, "the first entry is the default");
+  assert.equal(acceptsImages(FLASH), true);
   // Core degrades before sending when this is false, so a wrong answer here is the
   // difference between a clear message and a silently text-only attachment.
-  assert.equal(acceptsImages(FLASH), false);
   assert.equal(acceptsImages(PRO), false);
 });
 
-test("vision advertises no reasoning ladder, and cannot be given one", () => {
-  // DeepSeek documents the request shape and the image budget for this id and says
-  // nothing about reasoning_effort. This driver already shipped a rung DeepSeek does
-  // not accept once; advertising an unverified one is the same mistake twice.
-  assert.deepEqual(thinkLevels(VISION).map((l) => l.label), ["Standard"]);
-  assert.deepEqual(thinkLevels(FLASH).map((l) => l.label), ["Standard", "High", "Maximum"]);
-  // A config saved on another model must not carry thinking in through the back door.
-  assert.equal(normalize({ model: VISION, thinking: true, effort: "max" }).thinking, false);
+test("the old vision id is an alias for Flash, not a model of its own", () => {
+  assert.ok(!MODELS.some((m) => m.id === VISION_LEGACY), "it must not appear in /model");
+  assert.equal(normalize({ model: VISION_LEGACY, thinking: false, effort: "high" }, BEFORE_SUNSET).model, FLASH);
 });
 
-test("vision is priced and sized from what DeepSeek publishes", () => {
-  assert.deepEqual(price(VISION), price(FLASH), "the price list gives it Flash's rates exactly");
-  assert.equal(contextWindow(VISION), contextWindow(FLASH));
+test("both models expose the full reasoning ladder", () => {
+  assert.deepEqual(thinkLevels(FLASH).map((l) => l.label), ["Standard", "High", "Maximum"]);
+  assert.deepEqual(thinkLevels(PRO).map((l) => l.label), ["Standard", "High", "Maximum"]);
+});
+
+test("Flash is sized as its own model, not borrowed from Pro", () => {
+  assert.notEqual(contextWindow(FLASH), contextWindow(PRO));
+  assert.ok(price(FLASH).output > 0);
+});
+
+test("V4 Pro is offered until the sunset, then dropped from the picker", () => {
+  const pro = MODELS.find((m) => m.id === PRO)!;
+  assert.equal(pro.until, PRO_SUNSET_MS, "Pro carries the retirement date");
+
+  // The registry is what enforces the date, so exercise it with a synthetic manifest
+  // rather than the wall clock: a model whose `until` is in the past is filtered out,
+  // one in the future is kept.
+  const fake = {
+    id: "fake",
+    models: [
+      { id: "keep", label: "keep", description: "" },
+      { id: "gone", label: "gone", description: "", until: 1 },
+      { id: "future", label: "future", description: "", until: Date.now() + 1_000_000 },
+    ] as ModelChoice[],
+  } as DriverManifest;
+  assert.deepEqual(modelsOf(fake).map((m) => m.id), ["keep", "future"]);
+});
+
+test("a saved Pro config survives the sunset by resolving to Flash", () => {
+  assert.equal(normalize({ model: PRO, thinking: true, effort: "max" }, BEFORE_SUNSET).model, PRO);
+  assert.equal(normalize({ model: PRO, thinking: true, effort: "max" }, AFTER_SUNSET).model, FLASH);
+  // The reasoning intent is preserved across the switch — max is valid on Flash too.
+  assert.equal(normalize({ model: PRO, thinking: true, effort: "max" }, AFTER_SUNSET).effort, "max");
 });
 
 test("an image actually reaches the wire, in the shape DeepSeek documents", () => {

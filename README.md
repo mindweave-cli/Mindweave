@@ -71,7 +71,7 @@ else is configured inside a session.
 
 Short version, one line each. The depth is in the linked pages.
 
-- **14 providers, 54 models, one key** — DeepSeek, Anthropic, OpenAI, Gemini, xAI,
+- **14 providers, 52 models, one key** — DeepSeek, Anthropic, OpenAI, Gemini, xAI,
   Mistral, Groq, Cerebras, Qwen, Kimi, GLM, Meta, MiniMax, Tencent. Only the driver you
   use is loaded. Switch with `/provider` and `/model`; remembered per project.
   [PROVIDERS.md](src/drivers/PROVIDERS.md)

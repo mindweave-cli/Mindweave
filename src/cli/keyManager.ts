@@ -12,6 +12,7 @@
  */
 import { allProviders } from "../drivers/registry.js";
 import { activeSlot, keyHint, keysFor, nextFreeSlot } from "./keyStore.js";
+import { orderProviders } from "./pickerOrder.js";
 
 export interface ProviderRow {
   id: string;
@@ -31,14 +32,23 @@ export interface KeyRow {
   active: boolean;
 }
 
-/** Every provider, with how many keys it holds. */
+/**
+ * Every provider, with how many keys it holds, in display order.
+ *
+ * Ordered the way /provider is: the default first, then the ones you have a key for,
+ * then the rest, each group alphabetical — so the providers you can actually use are at
+ * the top of the list rather than scattered down it. The default is the first provider
+ * the registry lists (the one a fresh project opens on).
+ */
 export function providerRows(env: NodeJS.ProcessEnv = process.env): ProviderRow[] {
-  return allProviders().map((p) => ({
+  const rows = allProviders().map((p) => ({
     id: p.id,
     label: p.label,
     apiKeyEnv: p.apiKeyEnv,
     count: keysFor(p.apiKeyEnv, env).length,
   }));
+  const defaultId = allProviders()[0]?.id ?? "";
+  return orderProviders(rows, (r) => r.count > 0, defaultId);
 }
 
 /** One provider's keys, in slot order. */

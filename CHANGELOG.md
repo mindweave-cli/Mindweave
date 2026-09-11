@@ -3,6 +3,23 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.4.1 (2026-09-11): DeepSeek V4.1 Flash, and lists that put your keys on top
+
+DeepSeek's default is now V4.1 Flash, and it reads images on its own. The separate
+vision model is gone, folded into Flash, so a screenshot you attach works on the model a
+fresh project already opens with, and a saved selection of the old vision model moves to
+Flash by itself. Prices are updated to V4.1's.
+
+V4 Pro is still offered until DeepSeek routes it into V4.1 Flash on September 14. After
+that it drops out of the picker on its own and a saved Pro selection resolves to Flash,
+so a build installed before the date stays right after it with nothing to reinstall.
+
+The provider, key and model lists stopped making you hunt. With fourteen providers, the
+two or three you actually have a key for were scattered down a list you had to scroll
+through. Now the default comes first, then the providers you hold a key for, then the
+rest, each part alphabetical. A provider's models read the same way, its own default
+first and then alphabetical. `/provider`, `/key` and `/model` all follow it.
+
 ## v2.4.0 (2026-09-10): scroll without losing the prompt
 
 Both shells let you scroll back now with the prompt staying put. The inline shell pins

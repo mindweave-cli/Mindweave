@@ -46,6 +46,7 @@ import { projectDir } from "../memory/store.js";
 import { parseUndoArg, undoNotice } from "../tools/checkpoints.js";
 import { DEFAULT_MODEL_CONFIG, thinkLevels, thinkLabel, modelLabel, modelsOfProvider, providerOf, usableFallback, needsKeySetup, withModel, saveModelConfig, refreshModels, type ModelConfig } from "../dynamo/model.js";
 import { allProviders, manifestForModel, modelsOf } from "../drivers/registry.js";
+import { orderProviders, orderModels } from "./pickerOrder.js";
 import { accessRefusal } from "../drivers/providerError.js";
 import { resolveAttachments, stripAttachments } from "./attachments.js";
 import { collapsePastes, wrapPastedText } from "../memory/pastedText.js";
@@ -150,6 +151,21 @@ function missingKeyFor(model: string): KeyNeed | null {
   const provider = manifestForModel(model);
   if (hasApiKey(provider.apiKeyEnv)) return null;
   return { envVar: provider.apiKeyEnv, label: provider.label, keysUrl: provider.keysUrl };
+}
+
+/**
+ * The providers `/provider` lists, in display order: the default first, then the ones
+ * you have a key for, then the rest, each group alphabetical. Called by the render, the
+ * selection handler and the initial-cursor lookup, so all three index the same order —
+ * see pickerOrder.
+ */
+function orderedProviderList() {
+  return orderProviders(allProviders(), (p) => hasApiKey(p.apiKeyEnv), providerOf(DEFAULT_MODEL_CONFIG.model).id);
+}
+
+/** One provider's models in display order: its default first, the rest alphabetical. */
+function orderedModelList(model: string) {
+  return orderModels(modelsOfProvider(model));
 }
 
 /**
@@ -2065,10 +2081,11 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
   // the choice for this project, and confirm.
   async function applyModel(index: number) {
     const s = session.current;
-    // Index into the SAME list the picker rendered — the current provider's models,
-    // not every model everywhere. Indexing the global list here would silently select
-    // a different model than the one on screen, and would type-check perfectly.
-    const choice = s ? modelsOfProvider(s.modelConfig.model)[index] : undefined;
+    // Index into the SAME list the picker rendered — the current provider's models in
+    // display order, not every model everywhere. Indexing a differently-ordered list
+    // here would silently select a different model than the one on screen, and would
+    // type-check perfectly.
+    const choice = s ? orderedModelList(s.modelConfig.model)[index] : undefined;
     if (!s || !choice) return;
     s.modelConfig = withModel(s.modelConfig, choice.id);
     await saveModelConfig(s.cwd, s.modelConfig);
@@ -2083,7 +2100,8 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
    */
   async function applyProvider(index: number) {
     const s = session.current;
-    const provider = allProviders()[index];
+    // The display-ordered list, matching what the picker rendered and its cursor.
+    const provider = orderedProviderList()[index];
     if (!s || !provider) return;
     if (providerOf(s.modelConfig.model).id === provider.id) {
       note(`already on ${provider.label} · ${modelLabel(s.modelConfig.model)}`);
@@ -2566,7 +2584,7 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
     if (name === "/model") {
       await refreshModels();
       if (arg) {
-        const picked = resolveChoice(arg, modelsOfProvider(s.modelConfig.model), "model");
+        const picked = resolveChoice(arg, orderedModelList(s.modelConfig.model), "model");
         if (picked.kind === "error") return say(picked.message);
         await applyModel(picked.index);
         return;
@@ -3088,7 +3106,7 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
       // provider you are already on otherwise says no more than any other row, leaving the
       // one thing you came to check — what you are on right now — off the screen.
       const activeLabel = modelLabel(activeModel);
-      const providers = allProviders();
+      const providers = orderedProviderList();
       const items = providers.map((p) => {
         const n = modelsOf(p).length;
         const models = `${n} model${n === 1 ? "" : "s"}`;
@@ -3112,8 +3130,9 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
     }
     if (overlay.kind === "model") {
       const id = cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model;
-      // Only the current provider's models. Switching provider is /provider's job.
-      const models = modelsOfProvider(id);
+      // Only the current provider's models, in display order (default first, rest A→Z).
+      // Switching provider is /provider's job.
+      const models = orderedModelList(id);
       // The two facts that decide the choice and are nowhere else on the screen: how much
       // it can hold, and whether it can see an image you attach. They lead the description
       // because the row truncates from the RIGHT — put behind the prose they would be the

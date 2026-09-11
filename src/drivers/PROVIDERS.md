@@ -10,12 +10,12 @@ lineup below costs nothing until you pick from it.
 
 ## Available now
 
-14 providers, 54 models. `/provider` moves between them and `/model`
+14 providers, 52 models. `/provider` moves between them and `/model`
 lists what the one you are on offers, so there is nothing here you need to memorise.
 
 | Provider | Models | Key |
 | --- | --- | --- |
-| **DeepSeek** | 3 | `DEEPSEEK_API_KEY` |
+| **DeepSeek** | 1 | `DEEPSEEK_API_KEY` |
 | **Anthropic** | 6 | `ANTHROPIC_API_KEY` |
 | **OpenAI** | 4 | `OPENAI_API_KEY` |
 | **Gemini** | 7 | `GEMINI_API_KEY` |
@@ -30,12 +30,12 @@ lists what the one you are on offers, so there is nothing here you need to memor
 | **Meta** | 4 | `MODEL_API_KEY` |
 | **Tencent** | 2 | `TOKENHUB_API_KEY` |
 
-DeepSeek is the default, and DeepSeek V4 Flash is what a fresh project opens with.
+DeepSeek is the default, and DeepSeek V4.1 Flash is what a fresh project opens with.
 
 Three things worth knowing before you choose. **Meta's Muse Spark** is offered in two
 tiers, and the cheaper one is cheaper because Meta may train on your prompts and
-completions — Mindweave never picks that one for you. **DeepSeek V4 Flash Vision** is the
-one DeepSeek model that can read an image; the others are text-only, and Mindweave tells
+completions — Mindweave never picks that one for you. **DeepSeek V4.1 Flash** reads
+images natively, so the default model can see a screenshot you hand it; Mindweave tells
 the model plainly when a picture it was handed cannot be seen rather than pretending
 otherwise. **Tencent's Hy** is reached through TokenHub's international endpoint; the
 mainland console serves the same weights under different model ids, so an account there

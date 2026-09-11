@@ -94,7 +94,13 @@ const discovered = new Map<string, ModelChoice[]>();
  * whole mechanism depends on, and `registry.test.ts` pins it.
  */
 export function modelsOf(manifest: DriverManifest): ModelChoice[] {
-  return discovered.get(manifest.id) ?? manifest.models;
+  const list = discovered.get(manifest.id) ?? manifest.models;
+  // Drop any model whose retirement date has passed (see ModelChoice.until). A model
+  // the vendor has folded into a successor must stop appearing in the picker, even in
+  // a build published before the date, so this is checked at read time rather than
+  // baked into the list.
+  const now = Date.now();
+  return list.filter((m) => m.until === undefined || m.until > now);
 }
 
 /**

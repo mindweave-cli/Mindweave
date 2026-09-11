@@ -32,12 +32,12 @@ test("summarizeTask uses the LAST prompt as ctx and SUMS the billed tokens", () 
   assert.equal(s.cachePct, Math.round((119_000 / 135_000) * 100)); // 88%
 });
 
-test("summarizeTask costs cache hits ~10x cheaper than misses (DeepSeek default)", () => {
+test("summarizeTask costs cache hits far cheaper than misses (DeepSeek default)", () => {
   const s = summarizeTask([u(1_000_000, 0, 1_000_000, 0)], "deepseek-v4-flash")!;
-  // 1M cache-hit tokens at $0.014/M.
-  assert.ok(Math.abs(s.costUsd - 0.014) < 1e-9, `got ${s.costUsd}`);
+  // 1M cache-hit tokens at $0.003/M.
+  assert.ok(Math.abs(s.costUsd - 0.003) < 1e-9, `got ${s.costUsd}`);
   const miss = summarizeTask([u(1_000_000, 0, 0, 1_000_000)], "deepseek-v4-flash")!;
-  assert.ok(Math.abs(miss.costUsd - 0.14) < 1e-9, `got ${miss.costUsd}`);
+  assert.ok(Math.abs(miss.costUsd - 0.15) < 1e-9, `got ${miss.costUsd}`);
 });
 
 test("a single call with no reported split counts its whole prompt as fresh", () => {
@@ -47,7 +47,7 @@ test("a single call with no reported split counts its whole prompt as fresh", ()
   assert.equal(s.cacheMissTokens, 1_000_000);
   assert.equal(s.cachePct, 0);
   assert.ok(s.estimated, "no split was reported, so the figure must declare itself estimated");
-  assert.ok(Math.abs(s.costUsd - 0.14) < 1e-9);
+  assert.ok(Math.abs(s.costUsd - 0.15) < 1e-9);
 });
 
 test("a provider that reports NO cache split does not get billed per tool round", () => {
@@ -83,12 +83,12 @@ test("priceFor honors a MINDWEAVE_PRICE override, else falls back to the table/d
   const prev = process.env.MINDWEAVE_PRICE;
   try {
     delete process.env.MINDWEAVE_PRICE;
-    assert.deepEqual(priceFor("deepseek-v4-flash"), { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 });
-    assert.deepEqual(priceFor("unknown-model"), { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 });
+    assert.deepEqual(priceFor("deepseek-v4-flash"), { cacheHit: 0.003, cacheMiss: 0.15, output: 0.6 });
+    assert.deepEqual(priceFor("unknown-model"), { cacheHit: 0.003, cacheMiss: 0.15, output: 0.6 });
     process.env.MINDWEAVE_PRICE = "1,2,3";
     assert.deepEqual(priceFor("deepseek-v4-flash"), { cacheHit: 1, cacheMiss: 2, output: 3 });
     process.env.MINDWEAVE_PRICE = "garbage";
-    assert.deepEqual(priceFor("deepseek-v4-flash"), { cacheHit: 0.014, cacheMiss: 0.14, output: 0.28 });
+    assert.deepEqual(priceFor("deepseek-v4-flash"), { cacheHit: 0.003, cacheMiss: 0.15, output: 0.6 });
   } finally {
     if (prev === undefined) delete process.env.MINDWEAVE_PRICE;
     else process.env.MINDWEAVE_PRICE = prev;
@@ -96,7 +96,7 @@ test("priceFor honors a MINDWEAVE_PRICE override, else falls back to the table/d
 });
 
 test("taskLimitReason fires on cost or time, and is disabled at 0", () => {
-  const usage = summarizeTask([u(1_000_000, 0, 0, 1_000_000)], "deepseek-v4-flash")!; // $0.14
+  const usage = summarizeTask([u(1_000_000, 0, 0, 1_000_000)], "deepseek-v4-flash")!; // $0.15
   // Cost ceiling
   assert.match(taskLimitReason(usage, 0, { maxUsd: 0.1, maxSeconds: 0 })!, /cost ceiling/);
   assert.equal(taskLimitReason(usage, 0, { maxUsd: 0.5, maxSeconds: 0 }), null);

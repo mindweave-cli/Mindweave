@@ -252,6 +252,16 @@ export interface ModelChoice {
   id: ModelId;
   label: string;
   description: string;
+  /**
+   * When set, a millisecond timestamp past which this model is no longer offered.
+   *
+   * For a model a provider is retiring on a known date — typically because the vendor
+   * is about to route its id to a successor. The registry stops listing it once the
+   * clock passes this, so one published build behaves correctly on both sides of the
+   * date. It is a transitional model rather than part of the stated lineup, so the
+   * headline model counts in the docs do not count it.
+   */
+  until?: number;
 }
 
 /** One entry in the `/think` picker, for a given model. */
