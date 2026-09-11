@@ -28,6 +28,13 @@
  * caller-supplied DC), so a blank result falls back to copying that rectangle off
  * the screen. That fallback captures whatever is physically on top, which is why
  * the tool asks for approval BEFORE any of this runs.
+ *
+ * Enumeration is the standard "would this window appear in Alt-Tab" test rather than
+ * "does it have a title": DWM-cloaked windows (invisible UWP and host windows that still
+ * report visible) and tool windows are skipped, and a window with an EMPTY title is kept
+ * and labelled by its process. An empty title is the normal state of an app with a custom
+ * title bar (Tauri, Electron with decorations off), and dropping those made a window the
+ * user was plainly looking at impossible to capture at all.
  */
 import { spawn } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -69,11 +76,42 @@ public static class MwCapture {
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int index);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetIntAttribute(IntPtr h, int attr, out int v, int size);
 
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 
     public static void Dpi() { SetProcessDPIAware(); }
+
+    // A DWM-cloaked window passes IsWindowVisible but is not actually on screen — the
+    // invisible UWP and host windows that would otherwise flood the list. Any failure to
+    // read the attribute is treated as not-cloaked, so a window is never dropped on error.
+    static bool Cloaked(IntPtr h) {
+        int v;
+        return DwmGetIntAttribute(h, 14 /* DWMWA_CLOAKED */, out v, sizeof(int)) == 0 && v != 0;
+    }
+
+    // The Shell's own "is this an Alt-Tab window" test: a tool window is a palette or
+    // tray surface and is never what "the app" means, unless it also asks for the taskbar.
+    static bool AltTabWorthy(IntPtr h) {
+        int ex = GetWindowLong(h, -20 /* GWL_EXSTYLE */);
+        bool tool = (ex & 0x00000080) != 0; // WS_EX_TOOLWINDOW
+        bool app = (ex & 0x00040000) != 0;  // WS_EX_APPWINDOW
+        return !tool || app;
+    }
+
+    // The window's process name, for a window that has no title of its own. Wrapped
+    // because the process can exit between the enum and the lookup.
+    static string ProcName(IntPtr h) {
+        try {
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (pid == 0) return "";
+            using (var p = System.Diagnostics.Process.GetProcessById((int)pid)) return p.ProcessName;
+        } catch { return ""; }
+    }
 
     // DWMWA_EXTENDED_FRAME_BOUNDS. GetWindowRect includes an invisible border on
     // Windows 10+, so it is the fallback rather than the first choice.
@@ -88,16 +126,27 @@ public static class MwCapture {
         IntPtr fg = GetForegroundWindow();
         EnumWindows(delegate(IntPtr h, IntPtr l) {
             if (!IsWindowVisible(h) || IsIconic(h)) return true;
-            int len = GetWindowTextLength(h);
-            if (len == 0) return true;
-            var sb = new StringBuilder(len + 1);
-            GetWindowText(h, sb, sb.Capacity);
-            string title = sb.ToString().Trim();
-            if (title.Length == 0) return true;
+            if (Cloaked(h) || !AltTabWorthy(h)) return true;
             RECT r;
             if (!Bounds(h, out r)) return true;
             // Tool windows and tray hosts are real but never what anyone means.
             if (r.Right - r.Left < 120 || r.Bottom - r.Top < 120) return true;
+            int len = GetWindowTextLength(h);
+            string title = "";
+            if (len > 0) {
+                var sb = new StringBuilder(len + 1);
+                GetWindowText(h, sb, sb.Capacity);
+                title = sb.ToString().Trim();
+            }
+            // An empty title is NOT a reason to drop the window. A custom title bar
+            // (Tauri or Electron with decorations off) leaves the OS title blank, as does
+            // an app whose web content has not set document.title yet — and dropping it
+            // makes a window the user is plainly looking at impossible to capture, by name
+            // OR as the foreground. Label it by its process so it stays nameable.
+            if (title.Length == 0) {
+                string pn = ProcName(h);
+                title = pn.Length > 0 ? pn : "(untitled window)";
+            }
             // The leading marker is how the caller knows which window the user is
             // actually looking at, so it can name it when asking permission.
             found.Add((h == fg ? "*" : "-") + h.ToInt64().ToString() + "\t" + title);
@@ -229,7 +278,11 @@ export function parseWindowList(stdout: string): WindowInfo[] {
   return windows;
 }
 
-/** Every visible, non-minimised, reasonably sized top-level window. */
+/**
+ * Every visible, non-minimised, reasonably sized top-level window a user could Alt-Tab
+ * to — DWM-cloaked ghosts and tool/palette windows excluded, and a window with no OS
+ * title (a custom title bar) kept and labelled by its process rather than dropped.
+ */
 export async function listWindows(signal?: AbortSignal): Promise<WindowInfo[]> {
   return parseWindowList(await runScript(["-Mode", "list"], signal));
 }

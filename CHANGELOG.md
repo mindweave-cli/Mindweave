@@ -3,6 +3,21 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.4.2 (2026-09-11): screenshots see windows that have no title bar
+
+The screenshot tool could not capture an app with a custom title bar. A window with its
+OS decorations turned off, which is normal for desktop apps built on web tech, reports a
+blank title, and the tool was dropping every untitled window before it could be listed or
+captured, by name or as the focused one. Untitled windows are kept now and labelled by
+their app, and the list uses the same test the taskbar does for which windows count, so
+hidden and background ones stay out of it.
+
+It also no longer waits several seconds for a named window that is not there. That wait
+stalled on every mistyped name and did not even help the case it was built for, since a
+window whose title has not loaded yet cannot be waited into existence. If the app is still
+coming up the tool says so and you call again, and when a title does not match it points at
+the path that works: leave `window` out to capture whichever window is focused.
+
 ## v2.4.1 (2026-09-11): DeepSeek V4.1 Flash, and lists that put your keys on top
 
 DeepSeek's default is now V4.1 Flash, and it reads images on its own. The separate

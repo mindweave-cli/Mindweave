@@ -238,15 +238,21 @@ test("a named window that appears late is still found", async () => {
   assert.equal(found.kind === "match" && found.window.title, "mockup.html - Chrome");
 });
 
-test("giving up says NOT to capture a different window instead", async () => {
+test("giving up says NOT to capture a different window, and offers the focused-window path", async (t) => {
+  if (!IS_WINDOWS) {
+    t.skip("window listing is only reached on Windows");
+    return;
+  }
   // The failure that let a wrong-window capture be reported as a real check. The error
-  // has to close that door explicitly, because the model's instinct is to substitute.
-  const result = await screenshot.execute({ window: "nothing-like-this" }, {
+  // has to close that door explicitly, because the model's instinct is to substitute —
+  // and it must point at the escape hatch that actually works for a custom-title-bar app:
+  // omit `window` to capture the focused one.
+  const result = await screenshot.execute({ window: "nothing-like-this-xyzzy" }, {
     cwd: process.cwd(),
     requestApproval: async () => "Yes, capture it",
     autoAccept: true,
   } as never);
   assert.equal(result.isError, true);
-  assert.match(result.output, /do NOT capture a different window/i);
-  assert.match(result.output, /after waiting/i);
+  assert.match(result.output, /do NOT capture a different named window/i);
+  assert.match(result.output, /omit `window`|focused/i);
 });

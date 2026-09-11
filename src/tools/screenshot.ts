@@ -45,19 +45,6 @@ import { describeImage, isRejection } from "../memory/images.js";
 import { formatBytes } from "./webFetch.js";
 import { captureWindow, listWindows, type WindowInfo } from "./screenshotWin.js";
 
-/**
- * How long to wait for a NAMED window to appear before giving up.
- *
- * Sized for the gap between launching a GUI app and its window being drawn, which on a
- * cold browser start is a second or two. Long enough to cover that, short enough that a
- * genuinely absent window is reported quickly rather than hanging the turn.
- */
-const WINDOW_WAIT_MS = 5000;
-
-/** How often to re-list while waiting. Each list is a PowerShell round trip, so this is
- *  a compromise between noticing quickly and not spawning a process ten times a second. */
-const WINDOW_POLL_MS = 400;
-
 /** How many titles to name when a match fails, so the model can retry precisely. */
 const MAX_LISTED = 12;
 
@@ -173,7 +160,9 @@ export const screenshot: Tool = {
     "actually came up and renders correctly — a running process is not proof of that — " +
     "or to see a layout, a chart, or an error dialog for yourself. " +
     "Pass `window` with part of the window's title; leave it out to capture the window " +
-    "the user is currently focused on. " +
+    "the user is currently focused on. For an app you just launched, or one with a custom " +
+    "title bar that shows a blank OS title (common for desktop apps), omit `window` to grab " +
+    "the focused window rather than guessing its title. " +
     "It photographs whatever that window is showing, so call it when looking will " +
     "genuinely tell you something, not as a routine check. " +
     "Windows only, one window at a time — the whole screen is never captured, and " +
@@ -217,23 +206,14 @@ export const screenshot: Tool = {
     let windows: WindowInfo[];
     let pick: WindowPick;
     try {
-      // An app that was just launched has not drawn its window yet. Starting a browser
-      // and asking for it in the same breath is the ordinary case, not an edge case:
-      // the process returns immediately and the window appears a second or two later.
-      // Listing once and failing made that look like "the window does not exist", and
-      // the answer to it — capturing some OTHER window instead — is worse than waiting,
-      // because a picture of the wrong window can still be described as if it were the
-      // right one. So a named window is waited for.
-      //
-      // Only when a query was given. With no query the target is whatever has focus,
-      // which is true immediately and cannot be waited into existence.
-      const deadline = Date.now() + (query ? WINDOW_WAIT_MS : 0);
-      for (;;) {
-        windows = await listWindows(ctx.abortSignal);
-        pick = pickWindow(query, windows);
-        if (pick.kind !== "none" || Date.now() >= deadline) break;
-        await new Promise((resolve) => setTimeout(resolve, WINDOW_POLL_MS));
-      }
+      // Listed ONCE, not waited on. A blocking wait for a named window punishes every
+      // wrong name and every custom-title-bar app with the same multi-second stall, and
+      // it does not actually solve the case it was built for: a just-launched app whose
+      // title has not populated yet is not waited into existence either. The window is
+      // there or it is not; if it is still coming up, the model is told to try again,
+      // which is cheaper and does not freeze the turn.
+      windows = await listWindows(ctx.abortSignal);
+      pick = pickWindow(query, windows);
     } catch (error) {
       return fail(`Could not list open windows: ${message(error)}`);
     }
@@ -241,11 +221,13 @@ export const screenshot: Tool = {
     if (pick.kind === "none") {
       return fail(
         query
-          ? `No open window's title contains "${query}", after waiting ${Math.round(WINDOW_WAIT_MS / 1000)}s ` +
-              `for one to appear. ${listTitles(pick.candidates)}\n` +
-              `Do NOT capture a different window instead: a picture of something else cannot tell you ` +
-              `anything about "${query}", and reporting it as if it could is worse than not looking. ` +
-              `Either the app did not start, or its title differs from what you expected.`
+          ? `No open window's title contains "${query}". ${listTitles(pick.candidates)}\n` +
+              `Three things to try, in order: if you just launched the app, its window may need a ` +
+              `moment — call again. If it has a custom title bar (many desktop apps, and Tauri or ` +
+              `Electron with window decorations off, show a blank OS title), omit \`window\` to ` +
+              `capture whichever window is focused. Or name one of the windows listed above. ` +
+              `Do NOT capture a different named window as a stand-in: a picture of something else ` +
+              `cannot tell you anything about "${query}".`
           : `There is no window to capture. ${listTitles(pick.candidates)}`,
       );
     }
