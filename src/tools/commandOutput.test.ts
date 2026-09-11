@@ -177,29 +177,37 @@ test("the output file is cleaned up once the command has been read", async () =>
   // These live in the temp directory and a session can run hundreds of commands. The
   // startup sweep is the backstop for a crash, not the plan.
   //
-  // Observed by set difference, not by a raw count, and settled by polling. Two reasons,
-  // both of which turned this into a CI-only failure once. The removal is fire-and-forget
-  // (removeOutputFile does an un-awaited fs.rm), so the file can still be on disk the
-  // instant execute() returns; and the temp directory is shared with every other test
-  // running under --test-concurrency, whose own mindweave-out- files inflate a plain
-  // count. So: which files appeared during THIS run, and did they all go away. This run's
-  // file is deleted by runCommand; a sibling's transient file is deleted by its own
-  // runCommand; only a genuine leak stays.
+  // The removal is fire-and-forget (removeOutputFile does an un-awaited fs.rm), so the
+  // file can still be on disk the instant execute() returns — hence the poll. The harder
+  // problem was the temp directory being SHARED: this suite runs under
+  // --test-concurrency, and a sibling test's own mindweave-out- files, created while this
+  // one looks, are indistinguishable from a leak and read as one. So this test gets its
+  // OWN temp directory. os.tmpdir() reads these env vars, and a test file runs in its own
+  // process, so overriding them here isolates this test and affects nothing else.
   const { runCommand } = await import("./runCommand.js");
   const { promises: nodeFs } = await import("node:fs");
   const { tmpdir } = await import("node:os");
-  const listOut = async () =>
-    new Set((await nodeFs.readdir(tmpdir())).filter((f) => f.startsWith("mindweave-out-")));
-  const before = await listOut();
-  const ctx = { cwd: process.cwd(), reads: new Map(), todos: [] } as unknown as import("./types.js").ToolContext;
-  await runCommand.execute({ command: process.platform === "win32" ? "Write-Output hi" : "echo hi" }, ctx);
-  let leaked: string[] = [];
-  for (let i = 0; i < 100; i++) {
-    leaked = [...(await listOut())].filter((f) => !before.has(f));
-    if (leaked.length === 0) break;
-    await new Promise((r) => setTimeout(r, 30));
+  const { join } = await import("node:path");
+  const isolated = await nodeFs.mkdtemp(join(tmpdir(), "mw-cleanup-"));
+  const prev = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
+  process.env.TMPDIR = process.env.TEMP = process.env.TMP = isolated;
+  try {
+    const listOut = async () => (await nodeFs.readdir(isolated)).filter((f) => f.startsWith("mindweave-out-"));
+    const ctx = { cwd: process.cwd(), reads: new Map(), todos: [] } as unknown as import("./types.js").ToolContext;
+    await runCommand.execute({ command: process.platform === "win32" ? "Write-Output hi" : "echo hi" }, ctx);
+    let leaked: string[] = [];
+    for (let i = 0; i < 100; i++) {
+      leaked = await listOut();
+      if (leaked.length === 0) break;
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    assert.equal(leaked.length, 0, `output file was not cleaned up: ${leaked.join(", ")}`);
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
-  assert.equal(leaked.length, 0, `output file was not cleaned up: ${leaked.join(", ")}`);
 });
 
 test("stdout and stderr land in ONE file, interleaved as written", async () => {
