@@ -3,7 +3,17 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
-## v2.4.2 (2026-09-11): screenshots see windows that have no title bar
+## v2.4.2 (2026-09-11): a background command that hangs no longer waits out the timeout
+
+A command sent to the background used to run unwatched: you were told when it finished
+and nothing before that, so one that wedged sat invisible until it hit its timeout,
+minutes later. Mindweave now watches a backgrounded command while it runs. If it goes
+quiet and its last line reads as a question waiting for the keyboard, you are told it is
+likely blocked on input and to re-run it non-interactively. And a command that was meant
+to finish but has printed nothing for a long time is flagged as possibly stuck, with its
+recent output to judge it by, so you can read it or stop it instead of waiting on a
+deadlock. A server going quiet is left alone, because that is its normal resting state
+rather than a stall.
 
 The screenshot tool could not capture an app with a custom title bar. A window with its
 OS decorations turned off, which is normal for desktop apps built on web tech, reports a

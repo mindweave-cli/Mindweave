@@ -73,6 +73,45 @@ const STARTUP_GRACE_MS = 10_000;
  */
 const EXIT_GRACE_MS = 2_000;
 
+/** How often the stall watchdog scans running shells. */
+const STALL_CHECK_MS = 5_000;
+/**
+ * A backgrounded command that has printed nothing for this long AND whose last line
+ * looks like an interactive prompt is treated as blocked on input. Sooner than the
+ * silent threshold, because a prompt is immediately actionable — the command will
+ * never move on its own.
+ */
+const STALL_PROMPT_MS = 30_000;
+/**
+ * A command EXPECTED to finish (`on_finish`) that has printed nothing for this long is
+ * flagged as possibly stuck, even without a prompt. Generous, because a real build has
+ * silent stretches (linking, a slow test) and nagging a working command is worse than
+ * waiting; but far short of a multi-minute deadlock sitting invisible until the timeout.
+ * Servers are exempt — going quiet is their healthy resting state, not a stall.
+ */
+const STALL_SILENT_MS = 120_000;
+
+/**
+ * Last-line shapes that mean a command is blocked waiting for the keyboard. Kept
+ * narrow on purpose: a false positive tells the model to kill a healthy command, so
+ * only lines that genuinely read as a prompt count.
+ */
+const PROMPT_PATTERNS: RegExp[] = [
+  /\(y\/n\)\s*$/i,
+  /\[y\/n\]\s*$/i,
+  /\(yes\/no\)\s*$/i,
+  /\b(?:do you|would you|are you sure|overwrite|proceed|continue)\b[^?\n]*\?\s*$/i,
+  /press\s+(?:any key|enter|return)\b/i,
+  /\bpassword\b\s*:?\s*$/i,
+  /\bpassphrase\b[^:\n]*:\s*$/i,
+];
+
+/** Whether the tail of a shell's output ends on something that reads as an input prompt. */
+export function looksLikePrompt(tail: string): boolean {
+  const lastLine = tail.replace(/\s+$/, "").split("\n").pop() ?? "";
+  return PROMPT_PATTERNS.some((p) => p.test(lastLine));
+}
+
 export type ShellStatus = "running" | "exited" | "killed";
 
 /**
@@ -97,8 +136,12 @@ export type NotifyPolicy = "on_finish" | "on_failure" | "never";
  *  fills the disk, which is nobody's decision and must not read as one. */
 export type StopActor = "agent" | "user" | "system";
 
-/** The two things that can be worth telling the model about a background shell. */
-export type ShellEventKind = "ready" | "ended";
+/** The things that can be worth telling the model about a background shell. */
+export type ShellEventKind = "ready" | "ended" | "stalled";
+
+/** Why a running shell was flagged as stalled — a prompt it is blocked on, or just
+ *  silence from a command that was expected to keep working. */
+export type StallReason = "prompt" | "silent";
 
 /**
  * Guess a notify policy from the command, for callers that did not declare one.
@@ -258,6 +301,9 @@ export interface ShellInfo {
    * reads as incomplete rather than as the whole story.
    */
   truncated?: boolean;
+  /** Set once the watchdog has flagged this running shell as stalled — waiting on a
+   *  prompt, or silent for too long on a command that should have kept working. */
+  stallReason?: StallReason;
 }
 
 export interface AdoptOptions {
@@ -298,6 +344,11 @@ interface Entry extends ShellInfo {
    *  (a port to detect, a tail for the picker) rather than what is new since a read. */
   seen: string;
   truncated: boolean;
+  /** When output last grew — the watchdog's clock. Reset on every append. */
+  lastGrowthAt: number;
+  // `stallReason` is inherited from ShellInfo (optional); set by the watchdog.
+  stallReported: boolean; // stall told to the model yet?
+  stallUiNotified: boolean; // stall shown in the chat yet?
   reported: boolean; // end told to the model yet?
   uiNotified: boolean; // end shown in the chat yet?
   wakeOnEnd: boolean; // is that ending worth interrupting the session for?
@@ -317,20 +368,28 @@ export class BackgroundShells {
   private seq = 0;
   private shells = new Map<number, Entry>();
   private onChange: (() => void) | null = null;
+  private stallTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
-   * The two grace periods, injectable ONLY so tests can exercise the mechanism
-   * without waiting out real seconds. The defaults are the shipped behaviour and no
-   * production caller passes anything: a suite that waits out a 10s startup grace
+   * The grace periods and stall thresholds, injectable ONLY so tests can exercise the
+   * mechanism without waiting out real seconds. The defaults are the shipped behaviour
+   * and no production caller passes anything: a suite that waits out a 10s startup grace
    * per case was 73% of the whole run's wall time, and that cost lands again on
    * every contributor and every CI job.
    */
   constructor(
     private readonly startupGraceMs = STARTUP_GRACE_MS,
     private readonly exitGraceMs = EXIT_GRACE_MS,
+    private readonly stallPromptMs = STALL_PROMPT_MS,
+    private readonly stallSilentMs = STALL_SILENT_MS,
   ) {
     active.add(this);
     registerCleanup();
+    // The watchdog. A backgrounded command is told to end its turn, so a process that
+    // wedges — blocked on a prompt, or silently deadlocked — has nothing watching it
+    // otherwise, and surfaces only when it finally times out. This scans for that.
+    this.stallTimer = setInterval(() => this.checkStalls(), STALL_CHECK_MS);
+    this.stallTimer.unref?.();
   }
 
   /** Subscribe to state changes (start / finish / kill) — the UI re-renders. */
@@ -355,6 +414,9 @@ export class BackgroundShells {
       seen: "",
       handed: 0,
       truncated: false,
+      lastGrowthAt: Date.now(),
+      stallReported: false,
+      stallUiNotified: false,
       notify: opts.notify ?? guessNotifyPolicy(opts.command),
       ready: false,
       reported: false,
@@ -442,7 +504,37 @@ export class BackgroundShells {
     entry.pollTimer = timer;
   }
 
+  /**
+   * The watchdog pass: flag any running shell that has gone quiet in a way worth a word.
+   *
+   * Two shapes, and the scoping is what keeps it from being noise:
+   *  - a PROMPT: the last line reads as a question waiting on the keyboard. Flagged for
+   *    any shell that reports at all, because it will never move on its own.
+   *  - SILENCE: no output for a long time from a command that was expected to FINISH.
+   *    A server going quiet is its resting state, not a stall, so servers are exempt.
+   * One-shot per shell: once flagged it is not re-flagged, so even a genuinely slow
+   * command is mentioned at most once rather than on every scan.
+   *
+   * `now` is injected for tests; production passes nothing.
+   */
+  checkStalls(now: number = Date.now()): void {
+    let changed = false;
+    for (const entry of this.shells.values()) {
+      if (entry.status !== "running" || entry.stallReason || entry.notify === "never") continue;
+      const idle = now - entry.lastGrowthAt;
+      const tail = entry.seen.slice(Math.max(0, entry.seen.length - TAIL_CHARS));
+      let reason: StallReason | null = null;
+      if (idle >= this.stallPromptMs && looksLikePrompt(tail)) reason = "prompt";
+      else if (idle >= this.stallSilentMs && entry.notify === "on_finish") reason = "silent";
+      if (!reason) continue;
+      entry.stallReason = reason;
+      changed = true;
+    }
+    if (changed) this.emit();
+  }
+
   private append(entry: Entry, text: string): void {
+    if (text) entry.lastGrowthAt = Date.now();
     entry.seen += text;
     if (entry.seen.length > MAX_BUFFER_CHARS) {
       // Keep the tail — the recent output is what matters for tests and errors.
@@ -566,7 +658,10 @@ export class BackgroundShells {
    */
   pendingCount(): number {
     return [...this.shells.values()].filter(
-      (e) => (e.status !== "running" && !e.reported && e.wakeOnEnd) || (e.ready && !e.readyReported),
+      (e) =>
+        (e.status !== "running" && !e.reported && e.wakeOnEnd) ||
+        (e.ready && !e.readyReported) ||
+        (e.stallReason !== undefined && !e.stallReported),
     ).length;
   }
 
@@ -577,6 +672,10 @@ export class BackgroundShells {
       if (entry.ready && !entry.readyUiNotified) {
         entry.readyUiNotified = true;
         out.push({ info: view(entry), kind: "ready" });
+      }
+      if (entry.stallReason !== undefined && !entry.stallUiNotified) {
+        entry.stallUiNotified = true;
+        out.push({ info: view(entry), kind: "stalled" });
       }
       if (entry.status !== "running" && !entry.uiNotified) {
         entry.uiNotified = true;
@@ -607,6 +706,10 @@ export class BackgroundShells {
       if (entry.ready && !entry.readyReported) {
         entry.readyReported = true;
         out.push({ info: view(entry), kind: "ready", tail: tailOf(entry), wake: true });
+      }
+      if (entry.stallReason !== undefined && !entry.stallReported) {
+        entry.stallReported = true;
+        out.push({ info: view(entry), kind: "stalled", tail: tailOf(entry), wake: true });
       }
       if (entry.status !== "running" && !entry.reported) {
         entry.reported = true;
@@ -641,6 +744,10 @@ export class BackgroundShells {
       if (entry.tempFile) void fs.rm(entry.tempFile, { force: true }).catch(() => {});
     }
     this.shells.clear();
+    if (this.stallTimer) {
+      clearInterval(this.stallTimer);
+      this.stallTimer = null;
+    }
     active.delete(this);
   }
 
@@ -663,6 +770,7 @@ function view(e: Entry): ShellInfo {
     ...(e.signal ? { signal: e.signal } : {}),
     ...(e.stoppedBy ? { stoppedBy: e.stoppedBy } : {}),
     ...(e.truncated ? { truncated: true } : {}),
+    ...(e.stallReason ? { stallReason: e.stallReason } : {}),
     ...(detectPort(e.seen) !== undefined ? { port: detectPort(e.seen) } : {}),
   };
 }

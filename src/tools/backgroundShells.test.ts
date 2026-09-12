@@ -15,6 +15,7 @@ import {
   shouldWakeOnEnd,
   guessNotifyPolicy,
   detectPort,
+  looksLikePrompt,
 } from "./backgroundShells.js";
 import type { ShellInfo } from "./backgroundShells.js";
 import { runCommand } from "./runCommand.js";
@@ -803,4 +804,94 @@ test("output with no port announcement yields nothing, not a guess", () => {
 
 test("a number that cannot be a port is rejected", () => {
   assert.equal(detectPort("http://localhost:999999"), undefined);
+});
+
+// ── the stall watchdog ───────────────────────────────────────────────────────
+//
+// A backgrounded command is told to end its turn, so nothing watches it while it
+// runs. These check that a shell which goes quiet in an actionable way is surfaced
+// exactly once, and that the healthy quiet of a server is left alone.
+
+test("looksLikePrompt spots the lines that mean 'waiting for the keyboard'", () => {
+  assert.equal(looksLikePrompt("Delete everything? (y/n) "), true);
+  assert.equal(looksLikePrompt("Overwrite? [y/N]"), true);
+  assert.equal(looksLikePrompt("Are you sure you want to continue?"), true);
+  assert.equal(looksLikePrompt("Press ENTER to continue"), true);
+  assert.equal(looksLikePrompt("Password:"), true);
+  // Not prompts: ordinary build/test chatter must never trip it.
+  assert.equal(looksLikePrompt("Compiling foo v0.1.0"), false);
+  assert.equal(looksLikePrompt("test result: ok. 12 passed; 0 failed"), false);
+  assert.equal(looksLikePrompt("Is this the real life? Is this just fantasy"), false);
+});
+
+/** Spawn a child that prints `line` (no newline) then stays alive doing nothing. */
+function hangAfter(line: string) {
+  const script = `process.stdout.write(${JSON.stringify(line)}); setInterval(function(){}, 1000000)`;
+  return spawn(NODE, ["-e", script], { detached: DETACH });
+}
+
+test("a shell blocked on a prompt is flagged once, with the prompt reason", async () => {
+  // prompt threshold 200ms, silent threshold effectively off (60s) so only the prompt path can fire.
+  const mgr = new BackgroundShells(50, 50, 200, 60_000);
+  const child = hangAfter("Delete everything? (y/n) ");
+  const info = mgr.adopt(child, { command: "risky-thing", cwd: process.cwd(), notify: "on_finish" });
+  await sleep(150); // let the prompt bytes arrive on the pipe
+  const t0 = Date.now();
+  assert.equal(mgr.pendingCount(), 0, "not flagged before the threshold");
+  mgr.checkStalls(t0 + 1000); // idle well past 200ms
+  assert.equal(mgr.pendingCount(), 1, "flagged once past the threshold");
+  const drained = await mgr.drainEvents();
+  const stalls = drained.filter((e) => e.kind === "stalled");
+  assert.equal(stalls.length, 1);
+  assert.equal(stalls[0]!.info.stallReason, "prompt");
+  assert.match(stalls[0]!.tail, /y\/n/);
+  // One-shot: it never fires again.
+  mgr.checkStalls(t0 + 5000);
+  assert.equal((await mgr.drainEvents()).filter((e) => e.kind === "stalled").length, 0);
+  assert.equal(mgr.takeUiEvents().filter((e) => e.kind === "stalled").length, 1);
+  assert.equal(mgr.takeUiEvents().filter((e) => e.kind === "stalled").length, 0);
+  mgr.kill(info.id);
+  mgr.dispose();
+});
+
+test("a finish-expecting command gone silent is flagged, even with no prompt", async () => {
+  // Silent threshold 200ms; prompt path off. The Cutio case: output froze mid-run.
+  const mgr = new BackgroundShells(50, 50, 60_000, 200);
+  const child = hangAfter("[decode] frame 12 ...");
+  const info = mgr.adopt(child, { command: "cargo run --release", cwd: process.cwd(), notify: "on_finish" });
+  await sleep(150);
+  const t0 = Date.now();
+  mgr.checkStalls(t0 + 20); // still within 200ms of last output
+  assert.equal(mgr.pendingCount(), 0, "a brief quiet is not a stall");
+  mgr.checkStalls(t0 + 1000);
+  const stalls = (await mgr.drainEvents()).filter((e) => e.kind === "stalled");
+  assert.equal(stalls.length, 1);
+  assert.equal(stalls[0]!.info.stallReason, "silent");
+  mgr.kill(info.id);
+  mgr.dispose();
+});
+
+test("a server going quiet is NOT a stall — that is its resting state", async () => {
+  // A server (on_failure) with the silent threshold at 200ms must never be flagged for
+  // silence; only a prompt would ever flag it.
+  const mgr = new BackgroundShells(50, 50, 60_000, 200);
+  const child = hangAfter("Listening on http://localhost:3000");
+  const info = mgr.adopt(child, { command: "node server.js", cwd: process.cwd(), notify: "on_failure" });
+  await sleep(150);
+  mgr.checkStalls(Date.now() + 5000);
+  assert.equal(mgr.list()[0]!.stallReason, undefined, "a quiet server was wrongly flagged as stuck");
+  assert.equal((await mgr.drainEvents()).filter((e) => e.kind === "stalled").length, 0);
+  mgr.kill(info.id);
+  mgr.dispose();
+});
+
+test("a `never` shell is never flagged, however long it sits", async () => {
+  const mgr = new BackgroundShells(50, 50, 200, 200);
+  const child = hangAfter("Delete everything? (y/n) "); // even a prompt
+  const info = mgr.adopt(child, { command: "fire-and-forget", cwd: process.cwd(), notify: "never" });
+  await sleep(150);
+  mgr.checkStalls(Date.now() + 5000);
+  assert.equal(mgr.list()[0]!.stallReason, undefined, "a 'never' shell must stay silent");
+  mgr.kill(info.id);
+  mgr.dispose();
 });

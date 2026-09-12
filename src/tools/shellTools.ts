@@ -189,7 +189,15 @@ function statusLine(info: ShellInfo, ctx?: ToolContext): string {
   if (info.status === "running") {
     const secs = Math.round((Date.now() - info.startedAt) / 1000);
     const state = info.notify === "on_failure" ? (info.ready ? "up" : "starting") : "running";
-    return `#${info.id} ${state} (${secs}s)${where}: ${info.command}${rolled}`;
+    // A running shell the watchdog has flagged as stuck says so here too, so a manual
+    // read agrees with the notification the model was pushed.
+    const stall =
+      info.stallReason === "prompt"
+        ? " [looks blocked on an interactive prompt]"
+        : info.stallReason === "silent"
+          ? " [no output for a long time — may be stuck]"
+          : "";
+    return `#${info.id} ${state} (${secs}s)${where}: ${info.command}${rolled}${stall}`;
   }
   const verb =
     info.stoppedBy === "user"

@@ -732,6 +732,14 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
       // either — they asked for it. A command that DIED ON ITS OWN is news, because
       // nothing else on screen would tell them their dev server had fallen over.
       if (kind === "ready") continue;
+      // The watchdog flagged a running shell as stuck — a prompt it is blocked on, or a
+      // long silence on a command that should be working. Worth a line: otherwise it sits
+      // invisible until it times out.
+      if (kind === "stalled") {
+        const why = sh.stallReason === "prompt" ? "waiting for input?" : "no output for a while — stuck?";
+        addTool(`shell #${sh.id} (${clipCmd(sh.command)}) ${why}`, { error: true });
+        continue;
+      }
       if (sh.status === "killed" && sh.stoppedBy === "user") continue;
       const verb = sh.status === "killed" ? "killed" : `finished — exit ${sh.exitCode}`;
       addTool(`shell #${sh.id} (${clipCmd(sh.command)}) ${verb}`, { error: sh.status !== "killed" && sh.exitCode !== 0 });

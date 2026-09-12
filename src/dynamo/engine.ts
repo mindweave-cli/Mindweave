@@ -784,6 +784,24 @@ async function backgroundEventNotes(session: Session): Promise<string[]> {
         `do not restart it, and do not change any files because of this.`
       );
     }
+    // The watchdog thinks this running shell is stuck. It has produced nothing for a
+    // while — either blocked on a prompt it will never answer, or silently wedged on a
+    // command that should have kept working. The point is to stop it sitting invisible
+    // until the timeout, and to hand the model the two moves that resolve it.
+    if (kind === "stalled") {
+      const why =
+        info.stallReason === "prompt"
+          ? `It looks like it is waiting for interactive input (its last line reads as a prompt). ` +
+            `Kill it with kill_shell #${info.id} and re-run non-interactively — pipe the answer in ` +
+            `(e.g. \`echo y | …\`) or add a non-interactive flag like \`-y\`/\`--yes\`.`
+          : `It has produced no output for a long time and may be wedged. Read it with shells #${info.id} ` +
+            `to judge, then either keep waiting if it is genuinely mid-work, or kill it with ` +
+            `kill_shell #${info.id} and look into why it hangs.`;
+      return (
+        `[Background shell #${info.id} (\`${info.command}\`) appears to be stuck.]\n` +
+        `Recent output:\n${tail || "(no output)"}\n\n${why}`
+      );
+    }
     const status =
       info.status === "killed"
         ? info.stoppedBy === "user"
