@@ -13,7 +13,7 @@
  * the question to the human and the answer back.
  */
 import type { Tool, ToolResult } from "./types.js";
-import { APPROVAL_DISMISSED } from "./approval.js";
+import { APPROVAL_DISMISSED, readFreeText } from "./approval.js";
 import { failQuietly } from "./results.js";
 
 const askUserDef: Tool = {
@@ -30,7 +30,14 @@ const askUserDef: Tool = {
     "Ask the user a focused question when the task is genuinely ambiguous and you " +
     "cannot proceed well without their input: which of two real approaches they want, " +
     "a missing requirement, an unclear denial. Give 2-4 concrete options — only the " +
-    "first 4 are shown — and their choice comes back to you.\n" +
+    "first 4 are shown — and their choice comes back to you. The user can also TYPE " +
+    "their own answer instead of picking one (offered automatically), so write real, " +
+    "distinct options rather than trying to pre-cover every case.\n" +
+    "When the options carry a trade-off, end each with a short parenthetical that names " +
+    "it — \"(recommended)\", \"(simplest)\", \"(fastest)\", \"(most complete, most work)\" — " +
+    "so the user can decide without reverse-engineering the difference. Make each option " +
+    "self-contained: it is read on its own line, so it should say what it means without " +
+    "leaning on the others.\n" +
     "Use it sparingly. Anything you can settle with a sensible default, or find out by " +
     "reading the project, is not a question; asking about it spends the user's " +
     "attention on work they delegated. Prefer acting when the answer is obvious, and " +
@@ -77,7 +84,14 @@ const askUserDef: Tool = {
       };
     }
 
-    const choice = await ctx.requestApproval(question, options.slice(0, 4));
+    // Always offer a typed answer as one more row: the options are the model's best guesses
+    // at what the user wants, and forcing a choice among only those is the exact failure this
+    // tool exists to avoid — the user picks the nearest wrong one because there is no way to
+    // say the real thing. The row is theirs to write a full answer or a note in.
+    const choice = await ctx.requestApproval(question, options.slice(0, 4), undefined, undefined, {
+      label: "Write my own answer",
+      placeholder: "type your answer",
+    });
     // Dismissing the question is not an answer, and must never be reported as one.
     // It used to resolve as the second option, so "Postgres or SQLite?" dismissed came
     // back as "The user chose: SQLite" — a decision attributed to someone who declined
@@ -102,6 +116,15 @@ const askUserDef: Tool = {
           "assume a default, and do not continue the work. They are about to say what " +
           "they want instead.",
         summary: `asked: ${clip(question)} → cancelled`,
+      };
+    }
+    // A typed answer is not one of the options — it is the user saying the options missed,
+    // so it must be carried back as their own words, not squeezed into "chose".
+    const typed = readFreeText(choice);
+    if (typed !== null) {
+      return {
+        output: `The user did not pick an option and wrote their own answer instead: ${typed}`,
+        summary: `asked: ${clip(question)} → wrote an answer`,
       };
     }
     return {

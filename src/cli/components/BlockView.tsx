@@ -89,6 +89,7 @@ function BlockViewInner({ block, columns, tightTop }: { block: Block; columns: n
           tightTop={tightTop}
           since={block.since}
           waited={block.waited}
+          startedAt={block.startedAt}
         />
       );
 

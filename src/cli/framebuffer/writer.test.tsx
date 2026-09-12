@@ -23,7 +23,7 @@ import { useEffect, useState } from "react";
 import { Box, Text, render } from "ink";
 import { Screen } from "./screen.js";
 import { parseFrame } from "./parse.js";
-import { framebufferStdout, setFramebufferEnabled, type OutputStream } from "./writer.js";
+import { framebufferStdout, setFramebufferEnabled, requestFullRepaint, type OutputStream } from "./writer.js";
 
 const W = 50;
 const H = 12;
@@ -222,6 +222,30 @@ test("an unchanged re-render puts ZERO bytes on the terminal", async () => {
   // rather than papered over, because the claim being made is about FRAME output.
   const added = real.writes.slice(afterFirst).join("").replace(/\n/g, "");
   assert.equal(added, "", `an identical frame wrote ${added.length} bytes: ${JSON.stringify(added)}`);
+});
+
+test("requestFullRepaint redraws an identical frame in full — the scroll de-sync heal", async () => {
+  // The banner-on-scroll fix. A scroll can move a row out from under the model, leaving a
+  // stale cell the diff would skip forever because "nothing changed" (the pinned banner is
+  // the one row a scroll does not otherwise redraw). requestFullRepaint forces the next
+  // frame to write every cell, so that stale cell is corrected. Proven as the inverse of
+  // the ZERO-bytes property: the SAME frame that would normally cost nothing now repaints.
+  const real = new FakeStdout();
+  const fb = framebufferStdout(real);
+  const node = (
+    <Box flexDirection="column">
+      <Text>banner</Text>
+      <Text color="cyan">line</Text>
+    </Box>
+  );
+  render(node, { stdout: fb as unknown as NodeJS.WriteStream, stdin: fakeStdin(), patchConsole: false, interactive: true, debug: true }).unmount();
+  const afterFirst = real.writes.length;
+
+  requestFullRepaint();
+  render(node, { stdout: fb as unknown as NodeJS.WriteStream, stdin: fakeStdin(), patchConsole: false, interactive: true, debug: true }).unmount();
+
+  const added = real.writes.slice(afterFirst).join("").replace(/\n/g, "");
+  assert.ok(/banner/.test(added), `after requestFullRepaint an identical frame must redraw the banner, wrote: ${JSON.stringify(added.slice(0, 80))}`);
 });
 
 test("one changed character costs a fraction of what Ink would have written", async () => {

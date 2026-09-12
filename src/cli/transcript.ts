@@ -88,6 +88,13 @@ export type Block =
       since?: number;
       /** Seconds the wait took, once it is over. Absent while it is still running. */
       waited?: number;
+      /**
+       * When this row's tool STARTED running, so a long command can count up while it
+       * works and the user can see it is progressing rather than hung. Set at toolStart;
+       * only read while the row is still running, so a resumed (already-finished) row
+       * never shows a live count.
+       */
+      startedAt?: number;
       /** Does this row belong to the turn still in progress? Drives the VERB only
        *  ("Reading" vs "Read"), and is cleared for every row at once by `endTurn`. */
       live?: boolean;
@@ -410,6 +417,7 @@ export function reduce(s: TranscriptState, a: Action): TranscriptState {
           meta: a.meta,
           action: a.action,
           status: "running",
+          startedAt: Date.now(),
         }),
       });
     }

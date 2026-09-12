@@ -7,6 +7,7 @@
  * tool name + parsed args.
  */
 import { toPathList } from "../tools/pathList.js";
+import { formatDuration } from "../tools/detail.js";
 
 /** Raw tool name → the bold display name shown in the row. */
 const DISPLAY_NAME: Record<string, string> = {
@@ -232,7 +233,9 @@ export function toolDisplay(name: string, args: Record<string, unknown>): ToolDi
       name: display,
       arg: str(args.command) || undefined,
       kind,
-      ...(t ? { meta: `[Timeout: ${Math.round(t / 1000)}s]` } : {}),
+      // Human duration, not raw seconds: `[timeout 10m]` and `[timeout 1m 20s]` read at a
+      // glance where `[Timeout: 600s]` made the reader do the division.
+      ...(t ? { meta: `[timeout ${formatDuration(t)}]` } : {}),
     };
   }
   if (name === "web_fetch") return { name: display, arg: clip(str(args.url), 48) || undefined, kind };

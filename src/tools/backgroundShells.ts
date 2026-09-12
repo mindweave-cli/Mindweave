@@ -73,15 +73,22 @@ const STARTUP_GRACE_MS = 10_000;
  */
 const EXIT_GRACE_MS = 2_000;
 
+/** A millisecond value with an env override, for tuning and for testing the watchdog
+ *  without waiting out the real thresholds. Unset or invalid falls back to the default. */
+function envMs(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
 /** How often the stall watchdog scans running shells. */
-const STALL_CHECK_MS = 5_000;
+const STALL_CHECK_MS = envMs("MINDWEAVE_STALL_CHECK_MS", 5_000);
 /**
  * A backgrounded command that has printed nothing for this long AND whose last line
  * looks like an interactive prompt is treated as blocked on input. Sooner than the
  * silent threshold, because a prompt is immediately actionable — the command will
  * never move on its own.
  */
-const STALL_PROMPT_MS = 30_000;
+const STALL_PROMPT_MS = envMs("MINDWEAVE_STALL_PROMPT_MS", 30_000);
 /**
  * A command EXPECTED to finish (`on_finish`) that has printed nothing for this long is
  * flagged as possibly stuck, even without a prompt. Generous, because a real build has
@@ -89,7 +96,7 @@ const STALL_PROMPT_MS = 30_000;
  * waiting; but far short of a multi-minute deadlock sitting invisible until the timeout.
  * Servers are exempt — going quiet is their healthy resting state, not a stall.
  */
-const STALL_SILENT_MS = 120_000;
+const STALL_SILENT_MS = envMs("MINDWEAVE_STALL_SILENT_MS", 120_000);
 
 /**
  * Last-line shapes that mean a command is blocked waiting for the keyboard. Kept

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
 import type { Session } from "../memory/types.js";
 import { askUserTool } from "./askUser.js";
-import { APPROVAL_DISMISSED } from "./approval.js";
+import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "./approval.js";
 import { spawnSubagent } from "./subagent.js";
 import { forkSession } from "../memory/session.js";
 
@@ -28,6 +28,23 @@ test("ask_user returns the user's choice via the approval channel", async () => 
   assert.equal(res.isError, undefined);
   assert.match(res.output, /The user chose: SQLite/);
   assert.deepEqual(asked, [{ q: "Which database?", o: ["Postgres", "SQLite"] }]);
+});
+
+test("ask_user offers a typed answer, and reports it as the user's own words, not a choice", async () => {
+  let offeredFreeText = false;
+  const res = await askUserTool.execute(
+    { question: "Which approach?", options: ["A", "B"] },
+    ctx({
+      requestApproval: async (_q, _o, _detail, _title, freeText) => {
+        offeredFreeText = freeText !== undefined;
+        return APPROVAL_TEXT + "neither — do a hybrid of A's overlay with B's texture path";
+      },
+    }),
+  );
+  assert.equal(offeredFreeText, true, "a typed-answer row must be offered");
+  assert.doesNotMatch(res.output, /The user chose/i, "a typed answer is not one of the options");
+  assert.match(res.output, /wrote their own answer/i);
+  assert.match(res.output, /hybrid of A's overlay/);
 });
 
 test("ask_user without an approval channel tells the model to proceed on a default", async () => {

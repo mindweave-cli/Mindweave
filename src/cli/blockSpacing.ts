@@ -14,6 +14,30 @@ export function hasBody(block: Block | undefined): boolean {
   return !!block && block.kind === "tool" && !!block.detail;
 }
 
+/** Kinds whose result is a body (output, a page, an image), not a one-line note. */
+const OUTPUT_KINDS = new Set(["run", "websearch", "screenshot"]);
+
+/**
+ * Whether a block will occupy more than one line once it settles — either it already
+ * carries a body, or it is a still-running command / web lookup / capture that has none
+ * YET but is going to get one.
+ *
+ * The running case is the point. Spacing computed from the current frame hugged two
+ * bodyless running rows together, then the blank line sprang in the moment their output
+ * landed — the row visibly jumping apart after the fact. Reserving the line up front, from
+ * the KIND rather than from whether the body has arrived, keeps the layout still.
+ */
+export function willHaveBody(block: Block | undefined): boolean {
+  if (hasBody(block)) return true;
+  return (
+    !!block &&
+    block.kind === "tool" &&
+    block.status === "running" &&
+    !!block.action &&
+    OUTPUT_KINDS.has(block.action)
+  );
+}
+
 /**
  * Whether a block hugs the one above it.
  *
@@ -34,5 +58,5 @@ export function isTight(all: readonly Block[], i: number): boolean {
   const block = all[i];
   const prev = i > 0 ? all[i - 1] : undefined;
   if (!block || block.kind !== "tool" || !prev || prev.kind !== "tool") return false;
-  return !hasBody(block) && !hasBody(prev);
+  return !willHaveBody(block) && !willHaveBody(prev);
 }

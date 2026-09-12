@@ -69,9 +69,12 @@ export interface ToolLineProps {
   since?: number;
   /** Seconds the wait took, once it is over. Written into the end of the detail. */
   waited?: number;
+  /** When this row's command STARTED, so a still-running one counts up and reads as
+   *  working rather than hung. Only shown while the row is running. */
+  startedAt?: number;
 }
 
-export function ToolLine({ name, arg, status, action, summary, detail, detailKind, meta, columns, live, tightTop, since, waited }: ToolLineProps) {
+export function ToolLine({ name, arg, status, action, summary, detail, detailKind, meta, columns, live, tightTop, since, waited, startedAt }: ToolLineProps) {
   const errored = status === "error";
   // "Updating(home.html)" while the turn runs, "Update(home.html)" once it ends —
   // the same row, one word apart. The row is not shown at all until its result is
@@ -154,6 +157,15 @@ export function ToolLine({ name, arg, status, action, summary, detail, detailKin
         {meta ? (
           <Box flexShrink={0}>
             <Text dimColor wrap="truncate-end">{" "}{meta}</Text>
+          </Box>
+        ) : null}
+        {/* A still-running COMMAND counts up, so a long build or test reads as working
+            rather than hung. Only commands: a read or a write resolves in milliseconds, and
+            mounting a one-second timer on each of those flashes it on and off as tools
+            stream in — motion with nothing to say. */}
+        {status === "running" && action === "run" && startedAt !== undefined ? (
+          <Box flexShrink={0}>
+            <Elapsed since={startedAt} />
           </Box>
         ) : null}
         {/* The wait, counting, while the model works on what this row handed it. */}
@@ -343,5 +355,14 @@ function Elapsed({ since }: { since: number }) {
     return () => clearInterval(id);
   }, []);
   const seconds = Math.max(0, Math.round((now - since) / 1000));
-  return <Text dimColor>{"  "}{seconds}s</Text>;
+  return <Text dimColor>{"  "}{humanElapsed(seconds)}</Text>;
+}
+
+/** Whole seconds under a minute, `1m 20s` past it — a running count read at a glance,
+ *  with no tenths flickering next to text. */
+function humanElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }

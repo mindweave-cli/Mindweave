@@ -109,6 +109,23 @@ const IDLE_REPAINT_MS = 400;
  * that flips screen modes, which has no access to it.
  */
 let enabled = true;
+/**
+ * Set to force the NEXT frame to repaint every cell, not just the diff.
+ *
+ * For a moment where the model may have desynced from the terminal in a way the diff
+ * cannot see — chiefly a scroll, where the terminal can move a row out from under the
+ * model (a stray newline reaching the bottom, an auto-scroll on the last cell) and leave
+ * a stale cell the diff then skips forever because "nothing changed". A scroll already
+ * repaints almost every visible row, so redrawing the few stable ones (the pinned banner)
+ * on top costs almost nothing and is what stops a transcript row surviving on the header.
+ */
+let repaintRequested = false;
+
+/** Ask the framebuffer to redraw the whole next frame — see `repaintRequested`. */
+export function requestFullRepaint(): void {
+  repaintRequested = true;
+}
+
 /** Called when the framebuffer is switched back on, so it forgets the screen. */
 let onReenable: (() => void) | null = null;
 /** Called when the framebuffer stands down, so nothing it armed can still fire. */
@@ -543,9 +560,11 @@ export function framebufferStdout<T extends OutputStream>(real: T, onFrame?: (st
       }
 
       // A resize invalidates everything, and so does simply having gone a while without
-      // writing in full. Both are answered the same way: by knowing nothing about the
-      // screen, so that this frame draws all of it.
-      if (syncSize() || Date.now() - lastFull >= repaintEvery) invalidate();
+      // writing in full, and so does an explicit request (a scroll — see requestFullRepaint).
+      // All are answered the same way: by knowing nothing about the screen, so that this
+      // frame draws all of it.
+      if (syncSize() || repaintRequested || Date.now() - lastFull >= repaintEvery) invalidate();
+      repaintRequested = false;
 
       // Build the new frame. Cleared first because a frame is a complete statement
       // about the rows it covers: a line that got shorter must leave blanks behind,

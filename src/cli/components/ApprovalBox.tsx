@@ -36,6 +36,9 @@ import { clipRows } from "../wrap.js";
 const MAX_QUESTION_ROWS = 4;
 /** Answers shown. More than this and the caller is asking the wrong question. */
 const MAX_CHOICES = 6;
+/** Rows reserved to show the HIGHLIGHTED option in full when the options are long enough
+ *  to truncate on their own row (an ask_user with real, sentence-length choices). */
+const SEL_DETAIL_ROWS = 3;
 
 export interface ApprovalBoxProps {
   /** The question — ONE short line. Long context belongs in the transcript. */
@@ -115,10 +118,19 @@ export function ApprovalBox({
 
   // Inside the border: two frame columns and one padding column each side.
   const inner = Math.max(12, width - 4);
+  // The width an option's own row shows before it truncates (matches the row render below).
+  const rowTextWidth = Math.max(4, inner - 7);
+  // Long, sentence-length options — the ones a single row cannot show — get a full-text
+  // area under the list, so the highlighted one can actually be read. Reserved only when an
+  // option would truncate, so a plain Yes/No approval is left exactly as it was.
+  const anyLong = shown.some((o) => o.length > rowTextWidth);
+  const detailReserve = anyLong ? SEL_DETAIL_ROWS : 0;
+  const selText = !onText ? shown[sel] ?? "" : "";
+  const detailRows = detailReserve > 0 && selText.length > rowTextWidth ? clipRows(selText, inner, SEL_DETAIL_ROWS) : [];
   // The box holds maxRows+2 content rows; the answers (and freeText row), one blank above
-  // and below, and the hint take `rows + 3`, so the question gets whatever is left — always
-  // at least one line, never more than its own cap. The answers are never hidden.
-  const qMax = Math.max(1, Math.min(MAX_QUESTION_ROWS, maxRows - 1 - rows));
+  // and below, the hint, and any detail area take their share, so the question gets whatever
+  // is left — always at least one line, never more than its own cap. The answers are never hidden.
+  const qMax = Math.max(1, Math.min(MAX_QUESTION_ROWS, maxRows - 1 - rows - detailReserve));
   const questionRows = clipRows(question, inner, qMax);
 
   // Content only — the border is the ONE shared menu box in PromptInput (the same box the
@@ -169,6 +181,21 @@ export function ApprovalBox({
             </Text>
           </Box>
         </Box>
+      ) : null}
+
+      {/* The highlighted option in full, wrapped, when its row had to truncate it. Padded to
+          a fixed height so the box never grows as you move between a short and a long option. */}
+      {detailReserve > 0 ? (
+        <>
+          {detailRows.map((line, i) => (
+            <Box key={`d${i}`} width={inner} flexShrink={0}>
+              <Text dimColor wrap="truncate-end">{line}</Text>
+            </Box>
+          ))}
+          {Array.from({ length: SEL_DETAIL_ROWS - detailRows.length }).map((_, i) => (
+            <Box key={`dp${i}`} flexShrink={0}><Text> </Text></Box>
+          ))}
+        </>
       ) : null}
 
       <Box flexShrink={0}><Text> </Text></Box>

@@ -3,6 +3,42 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
+## v2.4.4 (2026-09-12): a long command shows it is working, and the header stops catching stray rows
+
+A running command now counts up beside it, so a build or a test that takes minutes reads
+as working rather than hung, and the same live count rides the background bar for anything
+running there. Its timeout reads as a duration too, `10m` or `1m 20s`, instead of a raw
+`600s` you had to divide in your head.
+
+A brief flicker came in with that count. It was flashing on every read and write that
+finished in a blink, so a burst of tool calls stuttered. The count is now only on actual
+commands, where a live clock means something, and the screen is steady again.
+
+Rows that produce output, a command or a web lookup, keep their blank line from the moment
+they start, instead of hugging the next row while they run and springing apart the instant
+their output lands.
+
+When Mindweave asks you a question, you can read it. A long option no longer trails off the
+edge of its row: the one you are on shows in full below the list, wrapping down. Every
+question also carries a "write my own answer" row, so when none of the options is quite it
+you say the real thing instead of picking the nearest wrong one, and it comes back to the
+model as your own words rather than a choice. The options are also asked to carry a short
+"(recommended)" or "(simplest)" where they trade off, so you can decide without
+reverse-engineering the difference.
+
+After a long piece of work, the wrap-up is as long as the work earns. Finishing a task was
+capped at a few lines, which is right for a one-line fix and wrong for a session that made
+real findings across an hour. Those now get the outcome first, then the findings and
+decisions that matter, then what is verified and what is still open. A small task still
+closes in a line; the length follows the work, not the clock.
+
+The pinned header, and the rule under it, stop catching a stray transcript row. Scrolling,
+or a new row appearing at the bottom, can move a line out from under the renderer's model
+of the screen, and because the renderer only repaints what it believes changed, that stray
+line could sit on the header or its separator until something else redrew it. Both of those
+moments already repaint almost everything on screen, so the header and its rule are redrawn
+with them now, and the glitch is gone.
+
 ## v2.4.3 (2026-09-11): a background command that hangs no longer waits out the timeout
 
 A command sent to the background used to run unwatched: you were told when it finished

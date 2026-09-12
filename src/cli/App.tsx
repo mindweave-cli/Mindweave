@@ -80,6 +80,7 @@ import { currentInstall, requestRestart, runUpdate } from "./updateRunner.js";
 import { enableMouse, readMouse, readWheel, stripMouse } from "./mouse.js";
 import { applySelection, ctrlCShouldCopy, isEmpty, selectionText, type Selection } from "./selection.js";
 import { latestScreen, repaintOverlay, setFrameOverlay } from "./framebuffer/overlay.js";
+import { requestFullRepaint } from "./framebuffer/writer.js";
 import { copyToClipboard } from "./clipboard.js";
 import { chatLayout, reflowScroll } from "./chatAnchor.js";
 import { growFill, INLINE_LIVE_RESERVE, NO_FILL } from "./startupFill.js";
@@ -755,7 +756,8 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
   }
 
   function attachApproval(s: Session) {
-    s.toolContext.requestApproval = (q, o, detail, title) => askApproval.current(q, o, detail, title);
+    s.toolContext.requestApproval = (q, o, detail, title, freeText) =>
+      askApproval.current(q, o, detail, title, freeText);
     // Same stop Esc performs. A tool reaches for this when the USER has said, by
     // dismissing a question, that the work should not carry on without them.
     s.toolContext.interrupt = () => abortRef.current?.abort();
@@ -1084,6 +1086,11 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
   // scrolled back down before the view moved at all. A flick or two past the top bought
   // a second of a wheel that did nothing, which reads as the app having frozen.
   const scrollBy = useCallback((lines: number) => {
+    // Repaint the whole next frame. A scroll can move a row out from under the
+    // framebuffer's model (see requestFullRepaint), which is what left a transcript row
+    // stranded on the pinned banner; a scroll already redraws almost every visible row, so
+    // redrawing the stable ones on top is nearly free and stops that.
+    requestFullRepaint();
     setScrollUp((s) => Math.max(0, Math.min(maxScrollRef.current, s + lines)));
   }, []);
 
@@ -1136,8 +1143,8 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
       // back (see scrollPill.ts) names ctrl+End, so this is the half that makes the
       // chip true. CTRL is what keeps them off the input: plain End and Home belong to
       // the caret, whether or not the input claims them yet.
-      else if (key.end && key.ctrl) setScrollUp(0);
-      else if (key.home && key.ctrl) setScrollUp(maxScrollRef.current);
+      else if (key.end && key.ctrl) { requestFullRepaint(); setScrollUp(0); }
+      else if (key.home && key.ctrl) { requestFullRepaint(); setScrollUp(maxScrollRef.current); }
     },
     { isActive: ready && overlay === null },
   );
@@ -1416,6 +1423,7 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
           const hit = pillHit.current;
           if (hit && hitsPill(hit, event.x, event.y)) {
             clearSelection();
+            requestFullRepaint();
             setScrollUp(0);
             continue;
           }
@@ -1632,6 +1640,11 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
     const wait = revealWait({ flush: flush.current });
     pumpTimer.current = setTimeout(() => {
       pumpTimer.current = null;
+      // A revealed block shifts the transcript, which can move a row out from under the
+      // framebuffer's model and strand it on the pinned banner (see requestFullRepaint).
+      // Set BEFORE the dispatch, so the very frame that shows the new block redraws the
+      // banner too rather than leaving a stray row on it until the next paint.
+      requestFullRepaint();
       reveal();
       lastRevealAt.current = Date.now();
       pump();
@@ -1644,7 +1657,12 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
     while (revealQ.current.length > 0 && !isPaced(revealQ.current[0]!)) {
       const a = revealQ.current.shift()!;
       if (a.type === "token") applySilent(a);
-      else dispatch(a);
+      else {
+        // An in-place resolve grows a row into its result, shifting everything below it —
+        // the same de-sync risk a reveal carries, so heal the banner on the same frame.
+        requestFullRepaint();
+        dispatch(a);
+      }
       // A group stays open once shown; anything that isn't part of it (a
       // standalone tool, narration, a sub-agent) closes it, mirroring exactly
       // what the transcript reducer's own closeToolGroup does on the same actions.
@@ -4309,14 +4327,35 @@ export function mcpDetail(server: McpStatus, blocked = 0): string {
  *  The port comes from the process's own startup line (see detectPort), so it is
  *  shown only when the server actually said where it is listening. */
 function BackgroundBar({ shells }: { shells: ShellInfo[] }) {
+  // Tick once a second while anything runs, so the elapsed clock beside each command
+  // actually moves — that motion is the whole point: it says the command is still
+  // working, not wedged. The interval is torn down the moment nothing is running.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (shells.length === 0) return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [shells.length]);
   if (shells.length === 0) return null;
-  const cmds = shells.map((s) => `$ ${clipCmd(s.command)}${s.port ? ` (${s.port})` : ""}`).join(" • ");
+  const now = Date.now();
+  const cmds = shells
+    .map((s) => `$ ${clipCmd(s.command)}${s.port ? ` (${s.port})` : ""} ${bgClock(now - s.startedAt)}`)
+    .join(" • ");
   return (
     <Box>
       <Text color="yellow">{"[BG] "}</Text>
       <Text dimColor wrap="truncate-end">{`${shells.length} running: ${cmds}`}</Text>
     </Box>
   );
+}
+
+/** Elapsed for the background bar: whole seconds under a minute, `1m 20s` past it. */
+function bgClock(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
 // One short, useful line rendered inside the input box (see PromptInput's
