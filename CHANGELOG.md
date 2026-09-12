@@ -3,7 +3,7 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
-## v2.4.2 (2026-09-11): a background command that hangs no longer waits out the timeout
+## v2.4.3 (2026-09-11): a background command that hangs no longer waits out the timeout
 
 A command sent to the background used to run unwatched: you were told when it finished
 and nothing before that, so one that wedged sat invisible until it hit its timeout,
@@ -14,6 +14,8 @@ to finish but has printed nothing for a long time is flagged as possibly stuck, 
 recent output to judge it by, so you can read it or stop it instead of waiting on a
 deadlock. A server going quiet is left alone, because that is its normal resting state
 rather than a stall.
+
+## v2.4.2 (2026-09-11): screenshots see windows that have no title bar
 
 The screenshot tool could not capture an app with a custom title bar. A window with its
 OS decorations turned off, which is normal for desktop apps built on web tech, reports a
