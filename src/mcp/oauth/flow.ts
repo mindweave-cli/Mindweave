@@ -389,10 +389,20 @@ function envMs(name: string, fallback: number): number {
 const REFRESH_ATTEMPTS = 3;
 const REFRESH_BACKOFF_MS = envMs("MINDWEAVE_OAUTH_BACKOFF_MS", 1_000);
 
+/**
+ * NOT unref'd, and that is the whole point of this comment.
+ *
+ * Every other timer in this feature is unref'd so a forgotten sign-in cannot hold the
+ * process open. This one is the opposite case: it sits inside an AWAITED retry, so the
+ * sleep IS the pending work. Unref'ing it lets Node decide the loop has nothing left to
+ * do, exit it, and leave the await unsettled forever — a refresh that silently never
+ * resumes rather than one that fails. CI caught it as "Promise resolution is still
+ * pending but the event loop has already resolved"; it reproduces in four lines of plain
+ * Node with no test runner involved.
+ */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
+    setTimeout(resolve, ms);
   });
 }
 
