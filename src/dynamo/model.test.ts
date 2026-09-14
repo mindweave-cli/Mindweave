@@ -134,7 +134,12 @@ test("save → load roundtrips the config; missing file falls back to default", 
     const fresh = await loadModelConfig(dir);
     assert.deepEqual(fresh, DEFAULT_MODEL_CONFIG);
 
-    const cfg = { model: "deepseek-v4-pro", thinking: true, effort: "max" } as const;
+    // A model with no sunset date, deliberately — this is testing the round trip itself,
+    // not a specific model's lifetime. `deepseek-v4-pro` was here until its own `until`
+    // passed in real time and load's normalisation correctly moved it to v4.1 Flash,
+    // which made a persistence test fail for a reason that had nothing to do with
+    // persistence.
+    const cfg = { model: "deepseek-v4-flash", thinking: true, effort: "max" } as const;
     await saveModelConfig(dir, cfg);
     assert.deepEqual(await loadModelConfig(dir), cfg);
   } finally {

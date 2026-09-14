@@ -376,10 +376,18 @@ export async function refreshTokens(options: RefreshOptions, fetchImpl: FetchLik
   throw last;
 }
 
+/** A millisecond value with an env override, for testing the backoff without spending it
+ *  for real. Same pattern the background-shell stall watchdog uses. Unset or invalid falls
+ *  back to the default. */
+function envMs(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
 /** Three tries at 1s and 2s apart. Enough to ride out a restart or a rate limit, short
  *  enough that a genuinely dead server does not hold a request for a minute. */
 const REFRESH_ATTEMPTS = 3;
-const REFRESH_BACKOFF_MS = 1_000;
+const REFRESH_BACKOFF_MS = envMs("MINDWEAVE_OAUTH_BACKOFF_MS", 1_000);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {

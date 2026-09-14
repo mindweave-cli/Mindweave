@@ -32,3 +32,13 @@ import { join } from "node:path";
 if (!process.env.MINDWEAVE_STATE_DIR) {
   process.env.MINDWEAVE_STATE_DIR = mkdtempSync(join(tmpdir(), "mindweave-test-state-"));
 }
+
+// The MCP OAuth refresh retry backs off for real (1s, then 2s) so a briefly rate-limited
+// server does not lose its credential — see flow.ts. A test PROVING that behaviour still
+// has to wait it out at least once, and on a loaded CI runner several of those stacking up
+// is exactly the shape of thing a global per-test timeout eventually catches, cancelling
+// whatever else was still queued alongside it. The retries and the assertions are the
+// same either way; only the clock is faster here.
+if (!process.env.MINDWEAVE_OAUTH_BACKOFF_MS) {
+  process.env.MINDWEAVE_OAUTH_BACKOFF_MS = "1";
+}
