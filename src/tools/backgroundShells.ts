@@ -356,6 +356,16 @@ interface Entry extends ShellInfo {
   // `stallReason` is inherited from ShellInfo (optional); set by the watchdog.
   stallReported: boolean; // stall told to the model yet?
   stallUiNotified: boolean; // stall shown in the chat yet?
+  /**
+   * How much of `seen` has already ridden out on a note to the model.
+   *
+   * A shell can produce more than one event in its life — it came up, then later it
+   * stalled, then it ended — and each note carries a tail of output. Without a mark,
+   * every one of those tails is cut from the END of everything seen so far, so the
+   * second note repeats what the first already showed. This is the offset that makes a
+   * note a DELTA: what is new since the model was last told, never the same bytes twice.
+   */
+  notifiedUpto: number;
   reported: boolean; // end told to the model yet?
   uiNotified: boolean; // end shown in the chat yet?
   wakeOnEnd: boolean; // is that ending worth interrupting the session for?
@@ -424,6 +434,7 @@ export class BackgroundShells {
       lastGrowthAt: Date.now(),
       stallReported: false,
       stallUiNotified: false,
+      notifiedUpto: 0,
       notify: opts.notify ?? guessNotifyPolicy(opts.command),
       ready: false,
       reported: false,
@@ -708,20 +719,57 @@ export class BackgroundShells {
     { info: ShellInfo; kind: ShellEventKind; tail: string; wake: boolean }[]
   > {
     const out: { info: ShellInfo; kind: ShellEventKind; tail: string; wake: boolean }[] = [];
-    const tailOf = (entry: Entry) => entry.seen.slice(Math.max(0, entry.seen.length - TAIL_CHARS));
+    // The DELTA since this shell was last mentioned, not the last N characters of
+    // everything. Cutting from the end re-sends output the model has already read the
+    // moment a shell produces two events (came up, then ended), which is the same class
+    // of waste as delivering one event twice. `notifiedUpto` is advanced by `mark` below,
+    // so each note continues where the previous one stopped.
+    const deltaOf = (entry: Entry) => {
+      const fresh = entry.seen.slice(entry.notifiedUpto);
+      return fresh.slice(Math.max(0, fresh.length - TAIL_CHARS));
+    };
     for (const entry of this.shells.values()) {
+      // Cut ONCE per shell per drain, and handed to the first note that fires. Two events
+      // can land in the same pass (a server that came up and then immediately died), and
+      // giving each of them the same delta would print the same output twice in one
+      // breath — the very thing the offset exists to stop.
+      const delta = deltaOf(entry);
+      let deltaUsed = false;
+      const takeDelta = (): string => {
+        if (deltaUsed) return "";
+        deltaUsed = true;
+        return delta;
+      };
+      let emitted = false;
+
       if (entry.ready && !entry.readyReported) {
         entry.readyReported = true;
-        out.push({ info: view(entry), kind: "ready", tail: tailOf(entry), wake: true });
+        out.push({ info: view(entry), kind: "ready", tail: takeDelta(), wake: true });
+        emitted = true;
       }
       if (entry.stallReason !== undefined && !entry.stallReported) {
         entry.stallReported = true;
-        out.push({ info: view(entry), kind: "stalled", tail: tailOf(entry), wake: true });
+        // A stall is ABOUT the silence, so it shows the last thing the shell SAID rather
+        // than the delta since the previous note — which for a stalled shell is usually
+        // nothing, and "(no output)" would hide the very line (a password prompt) that
+        // explains why it is stuck.
+        out.push({
+          info: view(entry),
+          kind: "stalled",
+          tail: entry.seen.slice(Math.max(0, entry.seen.length - TAIL_CHARS)),
+          wake: true,
+        });
+        emitted = true;
       }
       if (entry.status !== "running" && !entry.reported) {
         entry.reported = true;
-        out.push({ info: view(entry), kind: "ended", tail: tailOf(entry), wake: entry.wakeOnEnd });
+        out.push({ info: view(entry), kind: "ended", tail: takeDelta(), wake: entry.wakeOnEnd });
+        emitted = true;
       }
+
+      // Advanced only when something was actually said about this shell, and once for the
+      // whole pass however many kinds fired.
+      if (emitted) entry.notifiedUpto = entry.seen.length;
     }
     return out;
   }

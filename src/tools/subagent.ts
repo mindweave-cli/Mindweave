@@ -26,6 +26,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { STATUS_INSTRUCTION, renderVerdict, verifySubagentReport } from "./subagentReport.js";
+import { VERDICT_INSTRUCTION, VERIFIER_PROMPT, parseVerdict, renderVerdict as renderVerdictLine } from "./verifyReport.js";
 import type { Tool, ToolResult } from "./types.js";
 import type { EngineEvent } from "../dynamo/engine.js";
 import { fail, failQuietly } from "./results.js";
@@ -140,6 +141,15 @@ export const spawnSubagent: Tool = {
         maximum: MAX_SUBAGENT_STEPS,
         description: `Tool-round budget for the child (default ${SUBAGENT_BUDGET}). Scale it up for deeper tasks, down for quick lookups.`,
       },
+      verify: {
+        type: "boolean",
+        description:
+          "Spawn an adversarial VERIFIER of work that has already been done, instead of a worker. It is read-only " +
+          "(implied — do not also pass read_only), it is told to try to BREAK the change rather than confirm it, and " +
+          "it must show the command and output behind every check it claims. It answers `VERDICT: pass|fail|partial`, " +
+          "and a pass with no command output is automatically downgraded to partial. Give it the ORIGINAL request, " +
+          "the files that changed, and what the approach was — it cannot see this conversation.",
+      },
     },
   },
 
@@ -159,17 +169,23 @@ export const spawnSubagent: Tool = {
     // The status line is asked for on EVERY child, not only formatted ones: it is the
     // child's half of the verification contract (see subagentReport.ts), and a child
     // with no output_format is if anything the one whose outcome is least obvious.
+    // A VERIFIER answers a different contract: a verdict about the CODE rather than a
+    // status about its own run, and it carries its role in the system prompt rather than
+    // in the task — see verifyReport.ts for why that distinction is load-bearing.
+    const verifying = args.verify === true;
     const framedTask = [
       task,
       outputFormat ? `Report your result in EXACTLY this format:\n${outputFormat}` : "",
-      STATUS_INSTRUCTION,
+      verifying ? VERDICT_INSTRUCTION : STATUS_INSTRUCTION,
     ]
       .filter(Boolean)
       .join("\n\n");
     const budget = clampSteps(args.max_steps) ?? SUBAGENT_BUDGET;
-    const readOnly = args.read_only === true;
+    // Verification is read-only whether or not the caller remembered to say so. A verifier
+    // that can edit is a verifier that can make the thing it is judging pass.
+    const readOnly = verifying || args.read_only === true;
 
-    const child = ctx.forkChild(framedTask, { readOnly });
+    const child = ctx.forkChild(framedTask, { readOnly, ...(verifying ? { agentPrompt: VERIFIER_PROMPT } : {}) });
     // Dynamic import: the static registry ← engine edge would otherwise cycle. By the
     // time execute() runs, both modules are fully loaded, so this is safe.
     const { respond } = await import("../dynamo/engine.js");
@@ -210,6 +226,30 @@ export const spawnSubagent: Tool = {
     // been checked. Nothing is withheld — the parent decides whether a partial answer
     // is still useful — but it is told what not to assume, above the report rather
     // than after it.
+    if (verifying) {
+      // The verifier's report is judged on its EVIDENCE, not on its confidence: a pass
+      // carrying no command output is downgraded before the parent ever reads the word.
+      const report = parseVerdict(reply);
+      const line = renderVerdictLine(report);
+      ctx.emitEvent?.({
+        type: "subagent",
+        phase: "end",
+        id: agentId,
+        summary: `${stepLabel} · ${line}`,
+        error: report.verdict === "fail",
+      });
+      const header = [
+        report.concerns.length > 0 ? `Treat with care: ${report.concerns.join("; ")}.` : "",
+        `VERDICT: ${report.verdict} (${report.evidence} check${report.evidence === 1 ? "" : "s"} with evidence)`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return {
+        output: `${header}\n\n${report.body}`,
+        summary: `verify · ${stepLabel} · ${line}`,
+      };
+    }
+
     const verdict = verifySubagentReport(reply, { steps, budget, outputFormat });
     const flag = verdict.trustworthy ? "" : ` · ${verdict.status === "unstated" ? "unverified" : verdict.status}`;
     ctx.emitEvent?.({ type: "subagent", phase: "end", id: agentId, summary: `${stepLabel}${flag}`, error: verdict.status === "failed" });

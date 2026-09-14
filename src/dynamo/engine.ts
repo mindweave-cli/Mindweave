@@ -671,7 +671,6 @@ async function loadImagePayloads(session: Session): Promise<Map<string, string>>
 
 function buildRequest(
   session: Session,
-  bgEvents: string[],
   tools: ReturnType<typeof toolSchemas>,
   imagePayloads: Map<string, string> = new Map(),
   /** Notes for the folders in play, resolved by the caller (it has to read disk). */
@@ -729,21 +728,25 @@ function buildRequest(
       messages.push({ role: "tool", tool_call_id: e.toolCallId, content: e.content });
     }
   }
-  for (const note of bgEvents) messages.push({ role: "user", content: note });
 
   // Compute the governance blocks once: the prefix uses forbidden/skills, the
   // volatile tail uses the rules (moved there for salience — see volatileContext).
   const gov = governancePrompt(session);
+  // A child spawned with a ROLE (the verifier is the one that has one) carries it at the
+  // END of the system prompt. The end, because everything before it is the prefix every
+  // session shares and caches against; appending leaves that untouched.
+  const agentPrompt = session.toolContext.agentPrompt;
+  const base = staticSystemPrompt(
+    session.projectContext,
+    session.projectMemory,
+    session.memoryDir,
+    session.memoryIndex,
+    gov,
+    workspaceText(session),
+    session.priorSessions,
+  );
   return {
-    system: staticSystemPrompt(
-      session.projectContext,
-      session.projectMemory,
-      session.memoryDir,
-      session.memoryIndex,
-      gov,
-      workspaceText(session),
-      session.priorSessions,
-    ),
+    system: agentPrompt ? `${base}\n\n${agentPrompt}` : base,
     messages,
     context: volatileContext(
       gov.rules,
@@ -1064,8 +1067,6 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
   // it fires rarely; degrade-safe.
   await sweepSessionMemory(session, options);
 
-  // Background shells that finished since last turn — surfaced to the model once.
-  const bgEvents = await backgroundEventNotes(session);
 
   // Per-task guards: cost and time ceilings, both opt-in, like the step ceiling above
   // them. Every call's usage is summed so a ceiling reflects the whole task.
@@ -1220,9 +1221,30 @@ async function respondTurn(session: Session, options: RespondOptions = {}): Prom
         dirNotes.push(note);
       }
     }
+    // BACKGROUND EVENTS ARE DRAINED HERE, once per step, and become real transcript
+    // entries rather than a list re-attached to every request.
+    //
+    // The bug this replaces: the drain happened ONCE before this loop and the resulting
+    // array was passed to `buildRequest` on every step, so a single "shell #1 exited
+    // 101" was appended as a fresh user message dozens of times in one turn. The model
+    // answered it every time — correctly, since each time it looked like news — and a
+    // real session spent 19 of 37 steps re-explaining one finished command.
+    //
+    // Draining per step also fixes a second thing quietly: a shell that finishes DURING a
+    // turn is now reported at the next step instead of waiting for the turn to end.
+    //
+    // Pushing into the transcript (rather than attaching to one request) is what makes
+    // delivery exactly-once at the consumer as well as the producer: once it is an entry,
+    // it is part of the conversation like any other, carried forward without being
+    // re-sent. `drainEvents` is already one-shot, so every later step gets an empty list
+    // unless something genuinely new happened. Same shape as the ripple note below.
+    for (const note of await backgroundEventNotes(session)) {
+      session.transcript.push({ role: "user", content: note, synthetic: true });
+      await options.persist?.();
+    }
+
     const request = buildRequest(
       session,
-      bgEvents,
       stepTools(),
       await loadImagePayloads(session),
       dirNotes,

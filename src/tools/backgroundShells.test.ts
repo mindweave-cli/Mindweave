@@ -907,3 +907,47 @@ test("a `never` shell is never flagged, however long it sits", async () => {
   assert.equal(mgr.list()[0]!.stallReason, undefined, "a 'never' shell must stay silent");
   mgr.dispose();
 });
+
+test("a second note carries only what is NEW — never the output already sent", async () => {
+  // The offset that makes a note a delta. A shell can produce several events in its life
+  // (it came up, then it ended), and each one carries a tail. Cut from the end of
+  // everything each time, the second note repeats what the first already showed.
+  // Short startup grace so "it came up" fires quickly rather than after the default.
+  const mgr = new BackgroundShells(50, 2_000);
+  const child = spawn(NODE, ["-e", "console.log('FIRST'); setTimeout(()=>{console.log('SECOND');},400)"], {
+    detached: DETACH,
+  });
+  mgr.adopt(child, { command: "node -e two-phase", cwd: process.cwd(), notify: "on_failure" });
+
+  // First note: it came up, and carries what it had said by then.
+  await waitUntil(() => mgr.list()[0]!.ready === true, 10_000);
+  const first = await mgr.drainEvents();
+  assert.equal(first.length, 1, "the ready event");
+  assert.match(first[0]!.tail, /FIRST/);
+
+  // Second note: it ended. The tail must NOT contain FIRST again.
+  await waitUntil(() => mgr.list()[0]!.status !== "running", 4000);
+  const second = await mgr.drainEvents();
+  assert.equal(second.length, 1, "the ended event");
+  assert.match(second[0]!.tail, /SECOND/, "the new output is reported");
+  assert.doesNotMatch(second[0]!.tail, /FIRST/, "output already sent must not be sent again");
+
+  mgr.dispose(true);
+});
+
+test("two events in ONE drain do not print the same output twice", async () => {
+  // A server that comes up and immediately dies produces both events in a single pass.
+  // Handing the same delta to each would print it twice in one breath.
+  // A very short startup grace, so "it came up" fires before the process exits and both
+  // events land in the same drain.
+  const mgr = new BackgroundShells(20, 2_000);
+  const child = spawn(NODE, ["-e", "console.log('ONLYONCE'); setTimeout(()=>{}, 120)"], { detached: DETACH });
+  mgr.adopt(child, { command: "node -e blip", cwd: process.cwd(), notify: "on_failure" });
+
+  await waitUntil(() => mgr.list()[0]!.status !== "running", 4000);
+  const events = await mgr.drainEvents();
+  const withOutput = events.filter((e) => /ONLYONCE/.test(e.tail));
+  assert.equal(withOutput.length, 1, `output appeared in ${withOutput.length} notes of the same drain`);
+
+  mgr.dispose(true);
+});

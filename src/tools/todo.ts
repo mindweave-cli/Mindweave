@@ -26,6 +26,28 @@ import { failQuietly } from "./results.js";
 
 const STATUSES: TodoStatus[] = ["pending", "in_progress", "completed"];
 
+/** Below this, closing everything out is a small job finishing, not a run of work worth
+ *  an independent check. Three is where "I did a few things" starts. */
+const NUDGE_AT = 3;
+
+/** Words that mean a task WAS the checking. Matched loosely because the model writes
+ *  these itself and will phrase them freely. */
+const VERIFICATION_WORDS = /\bverif|\btest|\bcheck|\bprov(e|ing|ed)\b|\bvalidat|\bconfirm/i;
+
+/**
+ * Should this update carry the verification reminder (pure)?
+ *
+ * True only when EVERYTHING is finished and none of it was itself a check. A list that
+ * still has work in it is mid-run and the reminder would be noise; a list containing a
+ * "run the tests" task already did the thing being suggested, and nagging about it would
+ * teach the model to ignore the note — which is the real cost of a false positive here.
+ */
+export function needsVerificationNudge(items: TodoItem[]): boolean {
+  if (items.length < NUDGE_AT) return false;
+  if (!items.every((t) => t.status === "completed")) return false;
+  return !items.some((t) => VERIFICATION_WORDS.test(t.content));
+}
+
 export const todoWrite: Tool = {
   name: "todo_write",
   /** Deferred: a task list is a planning instrument reached for once on a substantial
@@ -87,6 +109,22 @@ export const todoWrite: Tool = {
     const notes: string[] = [];
     if (inProgress > 1) {
       notes.push(`Note: ${inProgress} tasks are in_progress — keep it to one at a time.`);
+    }
+    // THE VERIFICATION NUDGE, and it lives HERE rather than in the prompt on purpose.
+    //
+    // A standing rule about verifying before reporting done is exactly the kind of rule
+    // that survives a short task and is gone by the end of a long one — the prompt is far
+    // away and the work is right here. This fires at the moment the model is closing out
+    // a run of tasks, in the result it is already reading, which is the one place it
+    // cannot have drifted from. Nothing is blocked: it is a reminder in a tool result,
+    // not a gate, because the model may have good reason to skip it.
+    if (needsVerificationNudge(parsed)) {
+      notes.push(
+        `Note: ${parsed.length} tasks are done and none of them was a verification step. ` +
+          "If this turn made non-trivial changes, spawn a verifier (spawn_subagent with " +
+          "verify:true) before reporting the work complete — give it the original request, " +
+          "the files that changed, and the approach. Listing your own caveats is not a verdict.",
+      );
     }
 
     const body = allDone

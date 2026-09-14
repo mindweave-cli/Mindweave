@@ -407,11 +407,24 @@ export interface ToolContext {
    */
   readOnlyTools?: boolean;
   /**
+   * Extra instructions appended to this session's system prompt, giving a child a ROLE
+   * rather than a task.
+   *
+   * The difference matters for the verifier, which is why this exists. Instructions
+   * carried in the task read as one more thing that was asked; instructions in the system
+   * prompt read as what this agent IS — and a verifier's whole job is resisting the pull
+   * to agree with the work it is checking, which is exactly the kind of instruction that
+   * gets rationalised away when it arrives as a request.
+   *
+   * Appended at the END so the cached prefix every session shares is untouched.
+   */
+  agentPrompt?: string;
+  /**
    * Spawn a scoped child session for a sub-agent (injected by the engine, which owns
    * the parent Session the tool never sees). Returns a ready child to run through the
    * engine; absent in bare contexts (sub-agents then unavailable).
    */
-  forkChild?: (task: string, opts?: { readOnly?: boolean }) => import("../memory/types.js").Session;
+  forkChild?: (task: string, opts?: { readOnly?: boolean; agentPrompt?: string }) => import("../memory/types.js").Session;
   /**
    * Forward a model call's token usage to the live meter (injected by the engine from
    * its options). Lets a sub-agent's usage count toward the same total instead of

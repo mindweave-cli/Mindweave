@@ -3,7 +3,28 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
-## v2.4.5 (2026-09-14): sign in to remote MCP servers, and /mcp redesigned as two panes
+## v2.4.6 (2026-09-14): a finished background command is announced once, and work can be checked by something that did not do it
+
+A command left running in the background used to be reported to the model again on every
+single step of a turn. It was drained once and then re-attached to the end of every
+request, so a `cargo check` that exited an hour ago kept arriving as fresh news. In a real
+session that cost 19 of 37 steps: the agent kept stopping to re-explain one finished
+command while doing unrelated work in between. It is now delivered once, becomes part of
+the conversation like anything else, and a command that finishes mid-turn is reported at
+the next step instead of waiting for the turn to end. Each report also carries only what
+the command has said since it was last mentioned, rather than repeating output you have
+already seen.
+
+Finishing non-trivial work can now be checked by a separate agent that did not build it.
+It is read-only, it is told to try to break the change rather than confirm it, and it has
+to show the command and the output behind every check it claims — a pass with nothing to
+back it is recorded as unverified rather than taken at its word. It reports pass, fail or
+partial, and after a pass the agent re-runs a couple of its commands to confirm they say
+what was reported. Closing out a run of tasks without any checking in it is now a prompt
+to do this, at the moment the work ends rather than as a rule read at the start.
+
+Also fixed: a retry that backed off before trying a token refresh again could, in the
+right conditions, wait forever instead of resuming.
 
 Mindweave can now connect to hosted MCP servers, not just local ones. A server that answers
 401 leads with "Sign in" instead of a dead end: approve it in your browser, come back
