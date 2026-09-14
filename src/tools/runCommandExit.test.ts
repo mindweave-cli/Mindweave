@@ -10,6 +10,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
 import { runCommand } from "./runCommand.js";
+import { readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+
+/** How many composed-output files are lying in the temp directory right now. */
+async function countOutputFiles(): Promise<number> {
+  const names = await readdir(tmpdir()).catch(() => [] as string[]);
+  return names.filter((n) => n.startsWith("mindweave-out-")).length;
+}
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -66,4 +74,35 @@ test("a long output keeps its END, where a failure actually reports itself", asy
   assert.match(result.output, /THE_REAL_ERROR_IS_HERE/, "the tail must survive truncation");
   assert.match(result.output, /noise line 1 /, "the head must survive too");
   assert.match(result.output, /omitted from the middle/);
+});
+
+test("the dropped middle is KEPT on disk and the model is told where", async () => {
+  // Before this, the output file was composed into head+tail and then deleted on the
+  // spot, so the middle of a long build or test log was gone for good and the only way
+  // back to it was running the command again — impossible for anything not repeatable.
+  const command = IS_WINDOWS
+    ? '1..1200 | ForEach-Object { "noise line $_ ................................" }; Write-Output "NEEDLE_IN_THE_MIDDLE_TAIL"'
+    : 'for i in $(seq 1 1200); do echo "noise line $i ................................"; done; echo "NEEDLE_IN_THE_MIDDLE_TAIL"';
+  const result = await runCommand.execute({ command, timeout: 60_000 }, ctx());
+
+  assert.match(result.output, /The FULL output is at /, "a truncated run must name where the rest is");
+
+  // The named path has to be real, and has to hold what the model was NOT shown.
+  const named = /The FULL output is at (\S+)/.exec(result.output)?.[1];
+  assert.ok(named, `no path in: ${result.output.slice(-300)}`);
+  const whole = await readFile(named!, "utf8");
+  assert.ok(whole.length > result.output.length, "the file should hold more than was shown");
+  assert.match(whole, /noise line 600 /, "a line from the dropped middle is recoverable");
+  assert.doesNotMatch(result.output, /noise line 600 /, "…and was genuinely not shown inline");
+
+  await rm(named!, { force: true });
+});
+
+test("a command whose output fitted leaves no file behind", async () => {
+  // Retention is for what was DROPPED. Keeping a file per command run would litter the
+  // temp directory for no gain — there is nothing to go back for.
+  const before = await countOutputFiles();
+  const result = await runCommand.execute({ command: 'echo "small"', timeout: 30_000 }, ctx());
+  assert.doesNotMatch(result.output, /The FULL output is at/);
+  assert.equal(await countOutputFiles(), before, "an untruncated run must clean up after itself");
 });

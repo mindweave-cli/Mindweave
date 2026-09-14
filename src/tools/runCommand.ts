@@ -538,10 +538,16 @@ async function runShell(
       killTree(child.pid);
       void fs.rm(cwdFile, { force: true }).catch(() => {});
       if (tempFile) void fs.rm(tempFile, { force: true }).catch(() => {});
-      const body = (await collected()).text.trim();
-      removeOutputFile(outFile.path);
+      // Same rule on the interrupted path, and it matters more here: an interrupted
+      // command is the least repeatable kind, so throwing away the part of its output we
+      // could not show is the worst time to do it.
+      const out = await collected();
+      const body = out.text.trim();
+      const kept = out.dropped > 0;
+      if (!kept) removeOutputFile(outFile.path);
+      const where = kept ? `\n\nThe FULL output is at ${outFile.path} — read or search that file for the middle.` : "";
       resolve({
-        output: body ? `${body}\n\n[interrupted]` : "Command interrupted before it finished.",
+        output: body ? `${body}\n\n[interrupted]${where}` : "Command interrupted before it finished.",
         isError: true,
         summary: `interrupted \`${clip(command)}\``,
       });
@@ -559,9 +565,29 @@ async function runShell(
       await applyCwd(cwdFile, ctx);
       if (tempFile) await fs.rm(tempFile, { force: true }).catch(() => {});
       const out = await collected();
-      removeOutputFile(outFile.path);
+      // KEPT only when the middle was actually dropped. Everything else is deleted on the
+      // spot as before: a command whose output fitted has nothing to go back for, and
+      // retaining those would leave a file per command run. A kept file needs no cleanup
+      // path of its own — `tempSweep` already collects `mindweave-` by age at startup,
+      // which is also what covers a crash that skips this line entirely.
+      const kept = out.dropped > 0;
+      if (!kept) removeOutputFile(outFile.path);
       resolve(
-        format(command, ctx, out.text, out.dropped > 0, timedOut, exitCode, signal, timeoutMs, shell, cwdBefore, Date.now() - startedAt, child.pid),
+        format(
+          command,
+          ctx,
+          out.text,
+          out.dropped > 0,
+          timedOut,
+          exitCode,
+          signal,
+          timeoutMs,
+          shell,
+          cwdBefore,
+          Date.now() - startedAt,
+          child.pid,
+          kept ? outFile.path : undefined,
+        ),
       );
     };
 
@@ -759,6 +785,9 @@ function format(
   elapsedMs: number,
   /** The killed process, named only when something WAS killed (see withOutcome). */
   pid?: number,
+  /** Where the whole output still is, when it was too long to show and the file was
+   *  therefore kept. Absent when nothing was dropped — there is nothing to go back for. */
+  keptPath?: string,
 ): ToolResult {
   const body = output.trim();
   const parts: string[] = [];
@@ -781,7 +810,20 @@ function format(
     parts.push(body);
     // The gap is already marked inline, at the point it happened; this only names
     // the shape of what arrived so the model doesn't read the two halves as one run.
-    if (truncated) parts.push("(long output: the start and the end are shown, the middle was dropped)");
+    //
+    // NAMING THE FILE is what turns a truncation into a bounded read. The whole output
+    // was already written to disk to be composed from — it used to be deleted the moment
+    // the head and tail had been cut, so the middle of a long build or test log was gone
+    // for good and the only recourse was running the command again. Kept and named, the
+    // middle is an ordinary `grep`/`read_file` away, which is cheaper than a re-run and
+    // possible at all for a command that is not repeatable.
+    if (truncated) {
+      parts.push(
+        keptPath
+          ? `(long output: the start and the end are shown. The FULL output is at ${keptPath} — read or search that file for the middle rather than running this again.)`
+          : "(long output: the start and the end are shown, the middle was dropped)",
+      );
+    }
   } else if (!timedOut) {
     parts.push("(no output)");
   }
