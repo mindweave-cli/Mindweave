@@ -264,3 +264,103 @@ test("a request with nothing to mirror sends no param headers", async () => {
   assert.ok(!Object.keys(headers).some((k) => k.toLowerCase().startsWith("mcp-param-")));
   await t.close();
 });
+
+// ── credentials resolved per request ────────────────────────────────────────
+
+test("an auth header is resolved FRESH on every request, not captured once", async () => {
+  // An access token expires mid-session and is replaced by a refresh, so a value read when
+  // the transport was built is correct for an hour and 401s forever after. This is the
+  // whole reason `authHeaders` is a function rather than another entry in `headers`.
+  // Answers with the id it was ASKED, since this is the one test here making two requests
+  // on one transport and the ids differ.
+  const seen: { url: string; init: RequestInit }[] = [];
+  const impl = (async (url: string, init: RequestInit) => {
+    seen.push({ url, init });
+    const id = (JSON.parse(String(init.body)) as { id: number }).id;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "",
+      headers: new Map([["content-type", "application/json"]]) as unknown as Headers,
+      text: async () => rpc(id, {}),
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  let token = "first";
+  const t = new HttpTransport({ url: "https://x.dev/mcp", authHeaders: async () => ({ authorization: `Bearer ${token}` }), fetchImpl: impl });
+
+  await t.request("tools/list");
+  token = "refreshed";
+  await t.request("tools/list");
+
+  assert.equal((seen[0]!.init.headers as Record<string, string>).authorization, "Bearer first");
+  assert.equal((seen[1]!.init.headers as Record<string, string>).authorization, "Bearer refreshed");
+  await t.close();
+});
+
+test("a credential is merged OVER configured headers, and leaves the rest of them alone", async () => {
+  const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+  const t = new HttpTransport({
+    url: "https://x.dev/mcp",
+    headers: { authorization: "Bearer stale-from-config", "x-tenant": "acme" },
+    authHeaders: async () => ({ authorization: "Bearer live" }),
+    fetchImpl: impl,
+  });
+  await t.request("tools/list");
+  const headers = seen[0]!.init.headers as Record<string, string>;
+  assert.equal(headers.authorization, "Bearer live", "the live credential wins over a configured one");
+  assert.equal(headers["x-tenant"], "acme", "the user's other headers are untouched");
+  await t.close();
+});
+
+test("a credential that cannot be produced sends the request anyway, unauthenticated", async () => {
+  // Failing the request here would hide the 401 that is the only way to learn WHAT to
+  // sign in to — the whole flow starts from that rejection's WWW-Authenticate header.
+  const { impl, seen } = stubFetch({ body: rpc(1, {}) });
+  const t = new HttpTransport({
+    url: "https://x.dev/mcp",
+    headers: { "x-tenant": "acme" },
+    authHeaders: async () => {
+      throw new Error("refresh failed");
+    },
+    fetchImpl: impl,
+  });
+  await t.request("tools/list");
+  const headers = seen[0]!.init.headers as Record<string, string>;
+  assert.equal(headers.authorization, undefined);
+  assert.equal(headers["x-tenant"], "acme");
+  await t.close();
+});
+
+test("a 401's WWW-Authenticate is captured, because it does not exist anywhere else", async () => {
+  // The header rides on the rejected response only. By the time a person chooses "Sign
+  // in", minutes later, that response is long gone — so it is read at the one moment it
+  // exists and remembered by the connection.
+  const challenge = 'Bearer resource_metadata="https://x.dev/.well-known/oauth-protected-resource/mcp", scope="read"';
+  const seenChallenges: string[] = [];
+  const impl = (async () =>
+    ({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      headers: new Map([
+        ["content-type", "application/json"],
+        ["www-authenticate", challenge],
+      ]) as unknown as Headers,
+      text: async () => "",
+    }) as unknown as Response) as unknown as typeof fetch;
+
+  const t = new HttpTransport({ url: "https://x.dev/mcp", onAuthChallenge: (h) => seenChallenges.push(h), fetchImpl: impl });
+  await assert.rejects(() => t.request("tools/list"), /401/);
+  assert.deepEqual(seenChallenges, [challenge]);
+  await t.close();
+});
+
+test("a non-auth failure reports no challenge at all", async () => {
+  const seenChallenges: string[] = [];
+  const { impl } = stubFetch({ body: "", status: 500 });
+  const t = new HttpTransport({ url: "https://x.dev/mcp", onAuthChallenge: (h) => seenChallenges.push(h), fetchImpl: impl });
+  await assert.rejects(() => t.request("tools/list"));
+  assert.deepEqual(seenChallenges, [], "a 500 is not the server asking for credentials");
+  await t.close();
+});

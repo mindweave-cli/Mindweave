@@ -3,7 +3,29 @@
 Notable changes to Mindweave. Dates are release dates.
 
 
-## v2.4.4 (2026-09-12): a long command shows it is working, and the header stops catching stray rows
+## v2.4.5 (2026-09-14): sign in to remote MCP servers, and /mcp redesigned as two panes
+
+Mindweave can now connect to hosted MCP servers, not just local ones. A server that answers
+401 leads with "Sign in" instead of a dead end: approve it in your browser, come back
+connected. The whole thing runs inside the `/mcp` box itself. Nothing is printed to the
+transcript, and the authorize link only ever appears if the browser did not open, offered
+as something to copy rather than read. Tokens are stored separately from your own config,
+refreshed automatically, and only cleared when they are actually dead. A dropped connection
+or a slow server never signs you out of something that still works.
+
+`/mcp` is rebuilt around two panes sharing one box: your list of servers on the left, and
+whatever you are doing to one of them on the right, whether that is adding a server, editing
+one, or signing in. The list never moves when the right side opens. Picking a transport is
+no longer its own step before you are asked to type the command; the two are one field now,
+with the one you are not using left as a greyed-out example. The tab bar stays in the same
+place on every screen, and every key is an arrow: left steps back and takes you all the way
+out from anywhere, right and down move forward, Escape is reserved for closing the box.
+
+A couple of longstanding rough edges went with it. Pasting a line that starts with a slash
+command used to get mistaken for a dropped file path and silently rewritten, so `/mcp add
+...` from a saved snippet was never actually run. And exiting while a picker or a turn was
+open could leave the terminal's cursor stranded mid-frame, so the next few things you typed
+printed over the conversation instead of below it.
 
 A running command now counts up beside it, so a build or a test that takes minutes reads
 as working rather than hung, and the same live count rides the background bar for anything

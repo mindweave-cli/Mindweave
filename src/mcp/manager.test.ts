@@ -258,6 +258,36 @@ test("reconnect revives a server that was down", async () => {
   }
 });
 
+test("configFor returns the live config, for editing or for flipping disabled", async () => {
+  const mgr = new McpManager();
+  try {
+    await mgr.start([stdio("fake", serverScript())]);
+    const config = mgr.configFor("fake");
+    assert.equal(config?.type, "stdio");
+    assert.equal(config?.name, "fake");
+    assert.equal(mgr.configFor("no-such-server"), undefined, "unknown name reports undefined, not a throw");
+  } finally {
+    await mgr.dispose();
+  }
+});
+
+test("removeServer stops the connection and drops it from statuses, not just from a file", async () => {
+  // The gap this closes: removeServerFromConfig only ever edited mcp.json, so a removed
+  // server's own comment said "it stays connected until this session ends" — Remove did
+  // not actually stop anything running. This is the live half.
+  const mgr = new McpManager();
+  try {
+    await mgr.start([stdio("fake", serverScript())]);
+    assertConnected(mgr, "fake");
+    assert.equal(await mgr.removeServer("no-such-server"), false, "nothing to remove reports false");
+    assert.equal(await mgr.removeServer("fake"), true);
+    assert.equal(mgr.statuses().length, 0, "gone from the list, not just disconnected");
+    assert.equal(mgr.toolCount(), 0, "its tools stop being offered immediately");
+  } finally {
+    await mgr.dispose();
+  }
+});
+
 test("connect attempts are capped rather than retried forever", async () => {
   const connection = new McpConnection({ type: "stdio", name: "x", command: "definitely-not-a-real-binary-xyz", args: [] });
   for (let i = 0; i < MAX_CONNECT_ATTEMPTS + 3; i++) await connection.connect();

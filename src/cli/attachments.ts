@@ -73,7 +73,19 @@ export function findDroppedPaths(text: string): DroppedPath[] {
   }
   for (const m of text.matchAll(BARE_ABS_RE)) {
     const start = m.index! + m[1]!.length;
-    out.push({ start, end: start + m[2]!.length, path: trimEnds(m[2]!) });
+    const raw = trimEnds(m[2]!);
+    // A SLASH COMMAND IS NOT A DROPPED FILE. `/mcp`, `/key`, `/model` all satisfy "starts
+    // with a slash", which is the POSIX half of this pattern, so pasting a command turned
+    // its first word into a file handle — and once that happened the line no longer began
+    // with `/`, so it was sent to the model as a sentence instead of being run. The user
+    // got a helpful reply about a command they had meant to execute.
+    //
+    // The distinguishing rule is the SECOND slash: a real dropped path is a path
+    // (`/Users/me/notes.txt`), while a command is one word. Narrow on purpose — dropping
+    // a single-segment directory as the very first thing on an otherwise empty line loses
+    // its handle, and that is a rarer thing to do than pasting a command.
+    if (start === 0 && raw.startsWith("/") && !raw.includes("/", 1)) continue;
+    out.push({ start, end: start + m[2]!.length, path: raw });
   }
   return out.sort((x, y) => x.start - y.start);
 }

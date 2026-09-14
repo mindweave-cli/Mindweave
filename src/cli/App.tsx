@@ -38,6 +38,7 @@ import { APPROVAL_DISMISSED, APPROVAL_TEXT } from "../tools/approval.js";
 import { KeySetup } from "./components/KeySetup.js";
 import { setupView } from "./keySetup.js";
 import { KeyManager } from "./components/KeyManager.js";
+import { McpMinitabs } from "./components/McpMinitabs.js";
 import { providerRows, keyRowsFor, nextSlotFor } from "./keyManager.js";
 import { keysFor } from "./keyStore.js";
 import { TrustGate } from "./components/TrustGate.js";
@@ -101,8 +102,7 @@ import { summarizeTask, formatTokens, type TaskUsage } from "../dynamo/pricing.j
 import { meterReset, meterDelta, meterTick, meterValue, type MeterState } from "../dynamo/liveMeter.js";
 import type { Usage } from "../drivers/types.js";
 import type { ShellInfo } from "../tools/backgroundShells.js";
-import type { ConnectionStatus as McpStatus } from "../mcp/connection.js";
-import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, splitArgs } from "../mcp/configWrite.js";
+import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, resolveConfigPath, splitArgs, type AddSpec } from "../mcp/configWrite.js";
 import { mapPromptArguments, promptCommand, promptUsage } from "../mcp/prompts.js";
 import type { Entry, Session, SessionMeta } from "../memory/types.js";
 import { DEFAULT_MODE, modeById, modeFromFlags, nextMode, type ModeId } from "./modes.js";
@@ -184,7 +184,6 @@ type Overlay =
   | { kind: "think" }
   | { kind: "screen" }
   | { kind: "shells"; items: ShellInfo[] }
-  | { kind: "mcp"; items: McpStatus[] }
   | {
       kind: "approval";
       question: string;
@@ -428,6 +427,13 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
   // Distinct from the first-run setup screen, which only ever needs to get one key in.
   const [keysOpen, setKeysOpen] = useState(false);
   const [keysTick, setKeysTick] = useState(0);
+  // Opened by /mcp — the minitabs manager: a server list, and picking one drops into
+  // everything you can do to it. Its own footer overlay, same shape as /key's.
+  const [mcpOpen, setMcpOpen] = useState(false);
+  /** Which MCP servers we hold a stored credential for. Read when the box opens rather
+   *  than kept live: it changes only when someone signs in or out, both of which close
+   *  the box, and each entry is a file read that has no business on a render path. */
+  const [mcpSignedIn, setMcpSignedIn] = useState<ReadonlySet<string>>(() => new Set());
   // A /provider switch held back because that provider had no key. Finished the moment
   // one is saved for it, so choosing a provider and adding its key is one flow rather
   // than two commands with a dead end in between.
@@ -1326,11 +1332,21 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
       return;
     }
     const caret = caretCell();
+    const { height, y } = measureElement(liveRef.current) as { height: number; y?: number };
     if (!caret) {
-      setRowsBelowCaret(0);
+      // NO CARET IS NOT "NOTHING TO DO". It is declared null whenever the input is not the
+      // thing being typed into — a picker is open, a turn is in flight — and publishing
+      // zero there says "the cursor is already on the last row", which is a claim, not an
+      // absence. Exiting from that state left the cursor mid-frame and the shell printed
+      // its prompt across the conversation, one row per Enter.
+      //
+      // The whole region's height is the safe answer instead: CUD is clamped by the
+      // terminal at the bottom row, so overshooting costs a blank line and undershooting
+      // costs the corruption above. Only the full-screen shell publishes a true zero, and
+      // it means it — leaving the alternate buffer restores the cursor with it.
+      setRowsBelowCaret(Math.max(0, height - 1));
       return;
     }
-    const { height, y } = measureElement(liveRef.current) as { height: number; y?: number };
     // `caretCell` reports the caret's row within the live region; `liveRef` measures that
     // region. The last row it drew is `height - 1`, so the gap is what remains below.
     setRowsBelowCaret(height - 1 - (caret.y - (y ?? 0)));
@@ -1479,64 +1495,96 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
   }
 
   /**
-   * `/mcp add <name> <command|url> [args…]` and `/mcp remove <name>`.
-   *
-   * Shares its parser and writer with the `add_mcp_server` tool, so a config the command
-   * accepts is exactly one the tool would, and vice versa. Connects immediately on add:
-   * writing the file and telling the user to restart would defeat the point.
+   * Write a server's config and connect it live — shared by the typed `/mcp add`, the
+   * `/mcp` box's Add and Edit, and (indirectly, through the same writer) the
+   * `add_mcp_server` tool. One path so a config any of them accepts is one the others
+   * would too. Connects immediately: writing the file and telling the user to restart
+   * would defeat the entire point of a guided add.
    */
-  async function mcpConfigCommand(arg: string) {
+  async function mcpWriteAndConnect(spec: AddSpec) {
     const cur = session.current;
     if (!cur) return;
-    const argv = splitArgs(arg);
-    const verb = argv.shift();
-
-    if (verb === "remove" || verb === "rm") {
-      const target = argv[0];
-      if (!target) return say("Usage: /mcp remove <name>");
-      const root = cur.cwd;
-      const gone =
-        (await removeServerFromConfig(configPathFor("project", root), target)) ||
-        (await removeServerFromConfig(configPathFor("global", root), target));
-      say(
-        gone
-          ? `Removed '${target}' from the config. It stays connected until this session ends.`
-          : `No server called '${target}' is configured.`,
-      );
-      return;
-    }
-
-    const parsed = parseAddSpec(argv);
-    if (!parsed.ok) return say(parsed.error);
-
-    const path = configPathFor(parsed.spec.scope, cur.cwd);
+    const path = configPathFor(spec.scope, cur.cwd);
     try {
-      const written = await addServerToConfig(path, parsed.spec);
-      note(`${written.replaced ? "replaced" : "added"} '${parsed.spec.name}' in ${path} — connecting…`);
-      const status = await cur.toolContext.mcp?.addServer(parsed.spec.config);
+      const written = await addServerToConfig(path, spec);
+      note(`${written.replaced ? "replaced" : "added"} '${spec.name}' in ${path} — connecting…`);
+      const status = await cur.toolContext.mcp?.addServer(spec.config);
       if (status?.state === "connected") {
-        say(`${parsed.spec.name}: connected — ${status.toolCount} tool${status.toolCount === 1 ? "" : "s"} (protocol ${status.version}).`);
+        say(`${spec.name}: connected — ${status.toolCount} tool${status.toolCount === 1 ? "" : "s"} (protocol ${status.version}).`);
       } else if (status) {
         // Say what went wrong HERE rather than leaving it to be discovered in /mcp: a
         // typo'd command is the most likely outcome of typing this by hand.
-        say(`${parsed.spec.name}: ${status.state}${status.error ? ` — ${status.error}` : ""}. It's saved; fix the config and /mcp to retry.`);
+        say(`${spec.name}: ${status.state}${status.error ? ` — ${status.error}` : ""}. It's saved; fix the config and /mcp to retry.`);
       }
     } catch (e) {
       say(`Couldn't write ${path}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // What Enter does on a /mcp row: review blocked tools if there are any, otherwise
-  // reconnect. Blocked tools take priority because that is the state the user cannot
-  // otherwise resolve — reconnecting will not clear a quarantine.
-  async function mcpAction(name: string) {
-    const mgr = session.current?.toolContext.mcp;
-    if (mgr && mgr.blockedCountFor(name) > 0) {
-      const allowed = await mgr.reviewQuarantine((q, options) => askApproval.current(q, options));
-      note(allowed ? `${name}: blocked tools allowed for this project.` : `${name}: tools stay blocked.`);
-      return;
+  /**
+   * Stop a server and take it out of the config — the file half AND the live half.
+   *
+   * The file half alone used to be the whole of `/mcp remove`, with its own reply saying
+   * "it stays connected until this session ends" — true, but not what "remove" sounds
+   * like it means. `mcp.removeServer` is the live half: it closes the connection and
+   * drops its tools from what the model is offered, right now, not at the next launch.
+   */
+  async function mcpRemove(name: string) {
+    const cur = session.current;
+    const mcp = cur?.toolContext.mcp;
+    if (!cur || !mcp) return;
+    const gone =
+      (await removeServerFromConfig(configPathFor("project", cur.cwd), name)) ||
+      (await removeServerFromConfig(configPathFor("global", cur.cwd), name));
+    const stopped = await mcp.removeServer(name);
+    if (!gone && !stopped) return say(`No server called '${name}' is configured.`);
+    say(`Removed '${name}'${stopped ? " and stopped it" : " from the config (it was not running)"}.`);
+  }
+
+  /**
+   * `/mcp add <name> <command|url> [args…]` and `/mcp remove <name>`.
+   *
+   * Shares its parser and writer with the `add_mcp_server` tool, so a config the command
+   * accepts is exactly one the tool would, and vice versa.
+   */
+  async function mcpConfigCommand(arg: string) {
+    const argv = splitArgs(arg);
+    const verb = argv.shift();
+
+    if (verb === "remove" || verb === "rm") {
+      const target = argv[0];
+      if (!target) return say("Usage: /mcp remove <name>");
+      return mcpRemove(target);
     }
-    await reconnectMcp(name);
+
+    const parsed = parseAddSpec(argv);
+    if (!parsed.ok) return say(parsed.error);
+    await mcpWriteAndConnect(parsed.spec);
+  }
+
+  /**
+   * Flip a server's `disabled` flag and apply it live — the box's Enable/Disable.
+   *
+   * Reads the server's LIVE config rather than the file, because that is what is
+   * actually true right now; writes back to whichever file already defines it
+   * (`resolveConfigPath`), so this cannot create a second, shadowing entry for a
+   * server that already exists in the other config.
+   */
+  async function mcpSetDisabled(name: string, disabled: boolean) {
+    const cur = session.current;
+    const mcp = cur?.toolContext.mcp;
+    const config = mcp?.configFor(name);
+    if (!cur || !mcp || !config) return;
+    const path = await resolveConfigPath(cur.cwd, name);
+    const scope = path === configPathFor("global", cur.cwd) ? "global" : "project";
+    const next = { ...config, disabled };
+    try {
+      await addServerToConfig(path, { name, scope, config: next });
+      await mcp.addServer(next);
+      note(`${name}: ${disabled ? "disabled" : "enabled"}.`);
+    } catch (e) {
+      note(`Couldn't update ${path}: ${e instanceof Error ? e.message : String(e)}`, { error: true });
+    }
   }
 
   // Reconnect one MCP server by name, reporting the outcome in the chat rather than
@@ -1552,6 +1600,56 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
     } else {
       note(`${name} is ${status.state}${status.error ? ` — ${status.error}` : ""}`);
     }
+  }
+
+  /**
+   * Sign in to a remote MCP server. Closes the box first, for the same reason Review does:
+   * this takes a browser, a consent screen and a minute of the user's attention, and a
+   * footer overlay frozen on "signing in…" for that long is a frozen app.
+   *
+   * The URL is printed BEFORE the browser is launched. Launching silently fails on
+   * machines with no default browser or no desktop session at all, and the URL on screen
+   * is the difference between "nothing happened" and something the user can paste.
+   */
+  /**
+   * Sign in to a remote MCP server, reporting INTO the `/mcp` box rather than out here.
+   *
+   * Nothing is written to the transcript, and that is the point: the whole interaction
+   * belongs to one screen about one server, and the alternative was a running commentary
+   * ending in a 400-character URL pasted across the conversation. The box stays open and
+   * shows its own progress; this just does the work and hands back the line to show.
+   *
+   * Throws rather than reporting failure as a string, so the box can style it as an error
+   * and keep the server's own sentence, which is almost always the whole explanation.
+   */
+  async function mcpSignIn(name: string, handlers: { onUrl: (url: string) => void; signal: AbortSignal }): Promise<string> {
+    const mgr = session.current?.toolContext.mcp;
+    if (!mgr) throw new Error("no MCP manager in this session");
+    const status = await mgr.authenticate(name, handlers);
+    if (!status) throw new Error(`${name} is no longer configured`);
+    if (status.state === "connected") {
+      return `${name} connected — ${status.toolCount} tool${status.toolCount === 1 ? "" : "s"}`;
+    }
+    throw new Error(status.error ? `${name} is ${status.state} — ${status.error}` : `${name} is ${status.state}`);
+  }
+
+  /** Drop a stored MCP credential. The connection is left running: it keeps working until
+   *  its current token is refused, and that 401 is what honestly returns it to needs-auth. */
+  async function mcpSignOut(name: string) {
+    const mgr = session.current?.toolContext.mcp;
+    if (!mgr) return;
+    await mgr.signOut(name);
+    note(`signed out of ${name}.`);
+  }
+
+  /** Review blocked tools from the /mcp box: closes it first, since the approval channel
+   *  and the box's own screen cannot share the one footer surface at the same time. */
+  async function mcpReviewBlocked(name: string) {
+    setMcpOpen(false);
+    const mgr = session.current?.toolContext.mcp;
+    if (!mgr) return;
+    const allowed = await mgr.reviewQuarantine((q, options) => askApproval.current(q, options));
+    note(allowed ? `${name}: blocked tools allowed for this project.` : `${name}: tools stay blocked.`);
   }
 
   // Stop every root's background lane and any running shells from the current
@@ -2219,9 +2317,6 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
       if (sh && sh.status === "running" && session.current?.toolContext.backgroundShells?.kill(sh.id, "user")) {
         note(`stopped shell #${sh.id} (${clipCmd(sh.command)})`);
       }
-    } else if (o.kind === "mcp") {
-      const server = o.items[index];
-      if (server && server.state !== "disabled") void mcpAction(server.name);
     } else if (o.kind === "approval") {
       approvals.current.answer(o.options[index] ?? o.options[0]!);
       showNextApproval.current();
@@ -2562,17 +2657,15 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
       return;
     }
 
-    // /mcp — server health; selecting one reconnects it.
+    // /mcp — the minitabs manager: your servers, and "+ Add a server" always at the top,
+    // so an empty config is a place to add one rather than a dead end.
     if (name === "/mcp") {
-      const mcp = s.toolContext.mcp;
-      if (!mcp?.hasServers()) {
-        say(
-          "No MCP servers configured. Add them in .mindweave/mcp.json (this project) or " +
-            "~/.mindweave/mcp.json (everywhere), then /mcp to check they came up.",
-        );
-        return;
-      }
-      setOverlay({ kind: "mcp", items: mcp.statuses() });
+      // Which servers are signed in is read once, here, before the box is shown. Doing it
+      // as the box opens rather than on every render keeps a handful of file reads off
+      // the render path, and this is the only moment the answer can change unseen.
+      const mgr = session.current?.toolContext.mcp;
+      setMcpSignedIn(mgr ? await mgr.credentialed().catch(() => new Set<string>()) : new Set<string>());
+      setMcpOpen(true);
       return;
     }
 
@@ -3066,6 +3159,28 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
         />
       );
     }
+    if (mcpOpen) {
+      const mcp = session.current?.toolContext.mcp;
+      return (
+        <McpMinitabs
+          servers={mcp?.statuses() ?? []}
+          blockedCountFor={(name) => mcp?.blockedCountFor(name) ?? 0}
+          configFor={(name) => mcp?.configFor(name)}
+          onSubmit={(spec) => void mcpWriteAndConnect(spec)}
+          onSetDisabled={(name, disabled) => void mcpSetDisabled(name, disabled)}
+          onRemove={(name) => void mcpRemove(name)}
+          onReconnect={(name) => void reconnectMcp(name)}
+          onReviewBlocked={(name) => void mcpReviewBlocked(name)}
+          signedIn={mcpSignedIn}
+          onSignIn={mcpSignIn}
+          onCopyLink={(url) => copyToClipboard(url)}
+          onSignOut={(name) => void mcpSignOut(name)}
+          width={width}
+          maxRows={maxRows}
+          onClose={() => setMcpOpen(false)}
+        />
+      );
+    }
     if (!overlay) return null;
     const cur = session.current;
     if (overlay.kind === "analytics") {
@@ -3116,14 +3231,6 @@ export function App({ resumeSessionId, initialScreen }: AppProps) {
       return (
         <Picker title="Background shells" items={items} width={width} maxRows={maxRows} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />
       );
-    }
-    if (overlay.kind === "mcp") {
-      const mgr = cur?.toolContext.mcp;
-      const items = overlay.items.map((srv) => ({
-        label: mcpLabel(srv),
-        description: mcpDetail(srv, mgr?.blockedCountFor(srv.name) ?? 0),
-      }));
-      return <Picker title="MCP servers" items={items} width={width} maxRows={maxRows} onSelect={onOverlaySelect} onCancel={onOverlayCancel} />;
     }
     if (overlay.kind === "provider") {
       const activeModel = cur?.modelConfig.model ?? DEFAULT_MODEL_CONFIG.model;
@@ -4276,46 +4383,6 @@ function shellElapsed(sh: ShellInfo): string {
   return fmtElapsed(Math.floor((Date.now() - sh.startedAt) / 1000));
 }
 
-/** One MCP server's headline row: name plus a state marker readable at a glance. */
-export function mcpLabel(server: McpStatus): string {
-  const marker =
-    server.state === "connected" ? "●" : server.state === "pending" ? "◐" : server.state === "disabled" ? "○" : "✗";
-  return `${marker} ${server.name}`;
-}
-
-/** The dim detail column: what this server is doing, and what Enter would do to it. */
-export function mcpDetail(server: McpStatus, blocked = 0): string {
-  // A blocked tool is the one state the user must act on, so it outranks everything
-  // else in the row — including a healthy connection.
-  if (blocked > 0) {
-    return `${blocked} tool${blocked === 1 ? "" : "s"} BLOCKED (description changed) — Enter to review`;
-  }
-  switch (server.state) {
-    case "connected": {
-      // Prompts are counted separately because they are the user's to invoke, not the
-      // model's: a server offering only prompts would otherwise read as "0 tools" and
-      // look broken.
-      const counts = [
-        `${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}`,
-        ...(server.promptCount ? [`${server.promptCount} prompt${server.promptCount === 1 ? "" : "s"}`] : []),
-        ...(server.offersResources ? ["resources"] : []),
-      ];
-      const tools = counts.join(", ");
-      // The negotiated revision is worth surfacing: "legacy" is why a server may be
-      // missing capabilities, and it is otherwise invisible.
-      const proto = server.version ? ` · ${server.version}${server.legacy ? " (legacy)" : ""}` : "";
-      return `${tools}${proto} — Enter to reconnect`;
-    }
-    case "pending":
-      return "connecting…";
-    case "needs-auth":
-      return "needs authentication — Enter to retry";
-    case "disabled":
-      return "disabled in mcp.json";
-    default:
-      return `${server.error ?? "failed"} — Enter to retry`;
-  }
-}
 
 /**
  * The under-the-chat indicator for background shells: one running shell shows its

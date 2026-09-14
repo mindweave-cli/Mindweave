@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseEntry, parseMcpConfig } from "./config.js";
+import { parseEntry, parseMcpConfig, clientSecretFor } from "./config.js";
 
 test("a stdio server is inferred from `command`, with no type needed", () => {
   const [server] = parseMcpConfig(
@@ -78,4 +78,44 @@ test("non-string args, env and header values are dropped, not coerced", () => {
 
 test("an unnamed entry is dropped", () => {
   assert.equal(parseEntry("", { command: "npx" }), null);
+});
+
+test("the oauth override block is read, and bad values cost the override rather than the server", () => {
+  // Every field has a working default, so a typo should fall back to the automatic flow
+  // instead of refusing to load a server someone is trying to use.
+  const good = parseMcpConfig(
+    JSON.stringify({
+      mcpServers: {
+        remote: { type: "http", url: "https://x.dev/mcp", oauth: { clientId: "abc", callbackPort: 41234, authServerMetadataUrl: "https://auth.x.dev/.well-known/oauth-authorization-server" } },
+      },
+    }),
+  )[0]!;
+  assert.deepEqual(good.type === "http" ? good.oauth : null, {
+    clientId: "abc",
+    callbackPort: 41234,
+    authServerMetadataUrl: "https://auth.x.dev/.well-known/oauth-authorization-server",
+  });
+
+  const bad = parseMcpConfig(
+    JSON.stringify({
+      mcpServers: {
+        // A port as a string, an out-of-range port, and — the one that matters — a
+        // metadata URL over plain http, which decides where credentials are SENT.
+        remote: { type: "http", url: "https://x.dev/mcp", oauth: { callbackPort: "41234", authServerMetadataUrl: "http://auth.x.dev/meta" } },
+      },
+    }),
+  )[0]!;
+  assert.equal(bad.type === "http" ? bad.oauth : "still loaded", undefined, "the server loads; only the unusable override is dropped");
+
+  const none = parseMcpConfig(JSON.stringify({ mcpServers: { remote: { type: "http", url: "https://x.dev/mcp" } } }))[0]!;
+  assert.equal(none.type === "http" ? none.oauth : null, undefined, "a server that needs no override carries none");
+});
+
+test("a client secret is read from the environment, per server first", () => {
+  // Never from mcp.json: that file gets committed, and a secret in a repository is a
+  // secret that has been published.
+  const env = { MINDWEAVE_MCP_CLIENT_SECRET: "shared", MINDWEAVE_MCP_CLIENT_SECRET_MY_SERVER: "specific" } as NodeJS.ProcessEnv;
+  assert.equal(clientSecretFor("my-server", env), "specific", "the per-server name wins");
+  assert.equal(clientSecretFor("other", env), "shared");
+  assert.equal(clientSecretFor("other", {}), undefined);
 });

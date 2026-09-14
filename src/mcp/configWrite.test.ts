@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { promises as fs, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, serialize, splitArgs } from "./configWrite.js";
+import { addServerToConfig, configPathFor, parseAddSpec, removeServerFromConfig, resolveConfigPath, serialize, splitArgs } from "./configWrite.js";
 import { parseMcpConfig } from "./config.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "mw-mcpcfg-"));
@@ -20,6 +20,26 @@ const spec = (line: string) => {
   assert.equal(r.ok, true, r.ok ? "" : r.error);
   return r.ok ? r.spec : (undefined as never);
 };
+
+/**
+ * Point `globalConfigPath()` at a disposable directory for the duration of `fn`, and
+ * restore whatever `MINDWEAVE_STATE_DIR` was set to afterward — even if `fn` throws.
+ *
+ * `configPathFor("global", cwd)` ignores `cwd`; without this, a test exercising the
+ * global scope writes into this machine's REAL `~/.mindweave/mcp.json`. That happened —
+ * test fixture servers ("only-global", "shadowed") landed in a real global config and
+ * showed up hung in a live session — before `globalConfigPath` read this override.
+ */
+async function withSandboxedGlobalConfig<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.MINDWEAVE_STATE_DIR;
+  process.env.MINDWEAVE_STATE_DIR = dir();
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.MINDWEAVE_STATE_DIR;
+    else process.env.MINDWEAVE_STATE_DIR = prev;
+  }
+}
 
 test("splitArgs keeps quoted arguments whole", () => {
   // The two things people quote here are headers and paths with spaces, and both break
@@ -142,8 +162,62 @@ test("serialize omits empty optionals rather than writing noise", () => {
   assert.deepEqual(serialize({ type: "http", name: "x", url: "https://a" }), { type: "http", url: "https://a" });
 });
 
+test("serialize persists `disabled` on both server types, and omits it when false", () => {
+  // The gap this closes: `disabled` existed on the type and parseEntry read it back, but
+  // nothing ever WROTE it, so a server disabled through the manager came back enabled on
+  // the next launch — Disable was a this-session-only illusion.
+  assert.deepEqual(
+    serialize({ type: "stdio", name: "x", command: "c", args: [], disabled: true }),
+    { command: "c", disabled: true },
+  );
+  assert.deepEqual(
+    serialize({ type: "http", name: "x", url: "https://a", disabled: true }),
+    { type: "http", url: "https://a", disabled: true },
+  );
+  // Not written at all when false — matches every other optional here being omitted
+  // rather than written as noise, and round-trips identically either way.
+  assert.deepEqual(serialize({ type: "stdio", name: "x", command: "c", args: [], disabled: false }), { command: "c" });
+});
+
+test("a written `disabled` flag reads back through the loader", async () => {
+  const path = join(dir(), "mcp.json");
+  await addServerToConfig(path, spec("x npx"));
+  const config = parseMcpConfig(await fs.readFile(path, "utf8"))[0]!;
+  await addServerToConfig(path, { name: "x", scope: "project", config: { ...config, disabled: true } });
+  const reloaded = parseMcpConfig(await fs.readFile(path, "utf8"))[0]!;
+  assert.equal(reloaded.disabled, true);
+});
+
 test("scope maps to the two real config locations", () => {
   const cwd = dir();
   assert.match(configPathFor("project", cwd), /mcp\.json$/);
   assert.notEqual(configPathFor("project", cwd), configPathFor("global", cwd));
+});
+
+test("resolveConfigPath finds the file that actually defines a server, project first", async () => {
+  // `globalConfigPath()` ignores `cwd` entirely — it is ONE real, fixed path on the
+  // machine running this test (`~/.mindweave/mcp.json`), unlike the project path, which
+  // is naturally sandboxed by `dir()`. Writing to it without `MINDWEAVE_STATE_DIR`
+  // pointed somewhere disposable would write real MCP server entries into whoever's
+  // machine runs this suite — which is exactly what happened once, hence the override.
+  await withSandboxedGlobalConfig(async () => {
+    const cwd = dir();
+    const project = configPathFor("project", cwd);
+    const global = configPathFor("global", cwd);
+    await addServerToConfig(global, spec("only-global npx"));
+    assert.equal(await resolveConfigPath(cwd, "only-global"), global, "found on the global file");
+
+    await addServerToConfig(project, spec("shadowed npx"));
+    await addServerToConfig(global, spec("shadowed npx"));
+    assert.equal(await resolveConfigPath(cwd, "shadowed"), project, "project shadows global — that's the one actually running");
+  });
+});
+
+test("resolveConfigPath falls back to project when the server is on neither file", async () => {
+  // Only a READ against the global path here, but sandboxed anyway: this must not depend
+  // on whatever this machine's real global config happens to contain.
+  await withSandboxedGlobalConfig(async () => {
+    const cwd = dir();
+    assert.equal(await resolveConfigPath(cwd, "never-persisted"), configPathFor("project", cwd));
+  });
 });

@@ -90,3 +90,23 @@ test("the resolver decides identity, so two spellings of one file share a handle
   assert.equal(h.register('"C:\\A\\File.TXT"'), "mwfile1");
   assert.equal(h.register('"C:\\a\\file.txt"'), "mwfile1");
 });
+
+test("a pasted slash command is a command, not a dropped file", () => {
+  // `/mcp` satisfies the POSIX half of the bare-path pattern, so pasting a command used
+  // to turn its first word into a file handle. That expanded back to a quoted absolute
+  // path at send time, the line no longer began with `/`, and the command was delivered
+  // to the model as a sentence — which answered helpfully instead of running it.
+  for (const line of ["/mcp add --http linear https://mcp.linear.app/mcp", "/key", "/model deepseek", "/undo"]) {
+    assert.deepEqual(findDroppedPaths(line), [], `'${line}' should not look like a drop`);
+  }
+});
+
+test("a real path pasted at the start of a line is still a drop", () => {
+  // The rule is the SECOND slash: a path has one, a command does not. Losing this would
+  // trade one bug for another.
+  assert.equal(findDroppedPaths("/Users/me/notes.txt explain this").length, 1);
+  assert.equal(findDroppedPaths("/home/me/a.txt").length, 1);
+  // And a command-shaped word anywhere BUT the start is untouched, because a line that
+  // begins with something else is not a command line at all.
+  assert.equal(findDroppedPaths("look at /tmp").length, 1);
+});

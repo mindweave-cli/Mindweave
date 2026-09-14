@@ -574,9 +574,77 @@ export class McpManager {
     return connection.status();
   }
 
+  /**
+   * Sign in to one server and reconnect it. Returns its state afterwards, or throws with
+   * the sentence to show — an authorization failure is almost never our bug, and the
+   * reason (consent declined, no dynamic registration, the browser never came back) is
+   * the only useful thing to put on screen.
+   */
+  async authenticate(name: string, options: { onUrl?: (url: string) => void; signal?: AbortSignal } = {}): Promise<ConnectionStatus | null> {
+    const connection = this.connections.get(name);
+    if (!connection) return null;
+    await connection.authenticate(options);
+    this.onChange?.();
+    return connection.status();
+  }
+
+  /** Forget one server's stored credential. */
+  async signOut(name: string): Promise<ConnectionStatus | null> {
+    const connection = this.connections.get(name);
+    if (!connection) return null;
+    await connection.signOut();
+    this.onChange?.();
+    return connection.status();
+  }
+
+  /** Which servers currently hold a stored credential, so the manage screen can offer
+   *  "Sign out" instead of a second "Sign in". Resolved together because the UI asks for
+   *  all of them at once and each is a file read. */
+  async credentialed(): Promise<Set<string>> {
+    const held = await Promise.all(
+      [...this.connections.values()].map(async (c) => ((await c.hasCredential()) ? c.config.name : null)),
+    );
+    return new Set(held.filter((n): n is string => n !== null));
+  }
+
   /** True when there is anything at all to show in `/mcp`. */
   hasServers(): boolean {
     return this.connections.size > 0;
+  }
+
+  /**
+   * The config a connected server is currently running with, for editing or for flipping
+   * its `disabled` flag. Not from disk — from the live connection, which is what is
+   * actually true right now and what a config on disk could disagree with (a hand-edit
+   * since this session started, say).
+   */
+  configFor(name: string): McpServerConfig | undefined {
+    return this.connections.get(name)?.config;
+  }
+
+  /**
+   * Stop a server and forget it for the rest of THIS session — the live half of Remove.
+   *
+   * `removeServerFromConfig` only edits the file, which is why its own caller has always
+   * had to say "it stays connected until this session ends": nothing closed the running
+   * connection or dropped its tools from what the model is offered. This is that other
+   * half, deliberately separate from the file write so a caller can persist without
+   * necessarily tearing down what is running (not needed today, kept correct anyway).
+   *
+   * `false` when there was nothing by that name to stop.
+   */
+  async removeServer(name: string): Promise<boolean> {
+    const connection = this.connections.get(name);
+    if (!connection) return false;
+    await connection.close().catch(() => {});
+    this.connections.delete(name);
+    // Same cleanup addServer does on a replace: a removed server's activation is stale,
+    // and leaving it would advertise tools to the model that no longer exist to call.
+    for (const activated of this.activatedNames()) {
+      if (activated.startsWith(mcpToolName(name, ""))) this.activated.delete(activated);
+    }
+    this.onConnectionChange();
+    return true;
   }
 
   /**

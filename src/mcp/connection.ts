@@ -39,6 +39,7 @@ import {
   type McpResourceTemplate,
 } from "./resources.js";
 import type { McpContentBlock } from "./catalog.js";
+import { authenticate, authHeaders, hasCredential, parseWwwAuthenticate, signOut, type AuthChallenge } from "./oauth/index.js";
 import { HttpTransport } from "./transport/http.js";
 import { StdioTransport } from "./transport/stdio.js";
 import { RpcError, type Transport } from "./transport/types.js";
@@ -76,6 +77,10 @@ export type ConnectionState = "pending" | "connected" | "failed" | "needs-auth" 
 /** Everything the UI and the pool need to know about one server. */
 export interface ConnectionStatus {
   name: string;
+  /** Which transport this server uses. Surfaced because only an http server can be signed
+   *  in to: a local command server has no authorization server to send anyone to, so the
+   *  manage screen must be able to tell the two apart without reaching for the config. */
+  type: McpServerConfig["type"];
   state: ConnectionState;
   toolCount: number;
   /** Prompts this server offers as slash commands (the user's half of MCP). */
@@ -123,6 +128,15 @@ export class McpConnection {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private onChange: (() => void) | null = null;
+  /**
+   * What the last 401 said about authorizing, if anything.
+   *
+   * Held on the connection rather than thrown with the error because the two moments are
+   * far apart: the header exists only on the rejected response, and the person who acts
+   * on it does so minutes later by choosing "Sign in". Empty is normal and usable — the
+   * flow falls back to the well-known locations when the server named none.
+   */
+  private challenge: AuthChallenge = {};
 
   constructor(readonly config: McpServerConfig) {
     this.state = config.disabled ? "disabled" : "pending";
@@ -140,6 +154,7 @@ export class McpConnection {
   status(): ConnectionStatus {
     return {
       name: this.config.name,
+      type: this.config.type,
       state: this.state,
       toolCount: this.toolDefs.length,
       promptCount: this.promptDefs.length,
@@ -181,6 +196,38 @@ export class McpConnection {
       this.connecting = null;
     });
     return this.connecting;
+  }
+
+  /**
+   * Sign in to this server, then connect with the token that produced.
+   *
+   * Only ever called because a person asked. The flow opens a browser and holds a local
+   * port, which is not something a background retry may do on its own — a window
+   * appearing for a server the user forgot they configured is worse than a row that says
+   * it needs signing in and waits.
+   */
+  async authenticate(options: { onUrl?: (url: string) => void; signal?: AbortSignal } = {}): Promise<void> {
+    await authenticate({
+      name: this.config.name,
+      config: this.config,
+      challenge: this.challenge,
+      ...(options.onUrl ? { onUrl: options.onUrl } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    await this.reconnect();
+  }
+
+  /** Forget this server's token. The connection is left alone: it will keep working until
+   *  the current request fails, and the next 401 puts it back to `needs-auth` honestly. */
+  async signOut(): Promise<void> {
+    await signOut(this.config.name, this.config);
+    this.challenge = {};
+  }
+
+  /** Whether a credential is stored, so the manage screen can offer "Sign out" rather
+   *  than a second "Sign in". */
+  async hasCredential(): Promise<boolean> {
+    return hasCredential(this.config.name, this.config);
   }
 
   /** Force a retry even past the cap — what `/mcp` reconnect does. */
@@ -290,7 +337,17 @@ export class McpConnection {
 
   private open(): Transport {
     if (this.config.type === "http") {
-      return new HttpTransport({ url: this.config.url, ...(this.config.headers ? { headers: this.config.headers } : {}) });
+      return new HttpTransport({
+        url: this.config.url,
+        ...(this.config.headers ? { headers: this.config.headers } : {}),
+        // A stored OAuth token, refreshed if it has gone stale, resolved per request. No
+        // credential yields no header, which is how an unauthenticated call earns the
+        // 401 that tells us what to sign in to.
+        authHeaders: () => authHeaders(this.config.name, this.config),
+        onAuthChallenge: (header) => {
+          this.challenge = parseWwwAuthenticate(header);
+        },
+      });
     }
     return new StdioTransport({
       command: this.config.command,

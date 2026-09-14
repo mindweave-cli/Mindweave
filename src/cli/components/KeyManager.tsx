@@ -14,7 +14,7 @@
  */
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { stripMouse } from "../mouse.js";
 import {
   ACTION_ACTIVATE,
@@ -27,9 +27,9 @@ import {
   type KeyRow,
   type ProviderRow,
 } from "../keyManager.js";
+import { MiniTabPanel as Panel, MiniTabRow as Row, miniTabPosition as position, miniTabWindowStart as windowStart, MINITAB_WINDOW as WINDOW } from "./minitabs.js";
 
-/** Rows visible at once. The footer is height-bounded; this is not a screen. */
-const WINDOW = 7;
+export { windowStart };
 
 type Mode =
   | { kind: "providers" }
@@ -292,118 +292,5 @@ export function KeyManager({
         />
       ))}
     </Panel>
-  );
-}
-
-/** "  3 of 9" when the list is longer than its window, so nothing is silently off the
- *  bottom. On the title row, where the pickers put it, and empty when everything fits. */
-function position(sel: number, total: number, size: number): string {
-  return total > size ? `  ${sel + 1} of ${total}` : "";
-}
-
-/** Scroll the window so the selection stays inside it. */
-export function windowStart(sel: number, rowCount: number, size = WINDOW): number {
-  if (rowCount <= size) return 0;
-  const half = Math.floor(size / 2);
-  return Math.max(0, Math.min(sel - half, rowCount - size));
-}
-
-/**
- * The header + body of the manager, CONTENT ONLY. The bordered box around it is the ONE
- * shared menu box in PromptInput (same box the `/` command menu and every picker use), so
- * `/key` reads as the same surface — the box never changes, only what is inside it. Every
- * row is `flexShrink={0}` so Yoga leaves the box at its real height (the footer measurement
- * depends on it) instead of compressing an overfull one.
- */
-function Panel({
-  title,
-  counter = "",
-  rows,
-  maxRows,
-  hint,
-  width,
-  children,
-}: {
-  title: string;
-  /** Position in a list longer than the window, on the title row — see `Picker`. */
-  counter?: string;
-  /** Body rows `children` occupies, so the blank fill below them can be worked out. */
-  rows: number;
-  maxRows: number;
-  hint: string;
-  width: number;
-  children: ReactNode;
-}) {
-  // Fill the box out to its fixed height so the hint is pinned to the BOTTOM at every
-  // level. Without the fill a short list left the hint floating in the middle of a box
-  // whose size never changes, and each level put it somewhere else — the one line that
-  // should be in the same place every time. Title(1) + hint(2, its top margin included)
-  // is the three rows the body does not get, which is the command list's shape and every
-  // picker's: title, then rows, then the hint on the bottom line.
-  const pad = Math.max(0, maxRows - 1 - rows);
-  const inner = Math.max(12, width - 4);
-  return (
-    <>
-      <Box flexShrink={0} width={inner}>
-        <Text bold wrap="truncate-end">{title}</Text>
-        {counter ? <Text dimColor>{counter}</Text> : null}
-      </Box>
-      {children}
-      {Array.from({ length: pad }).map((_, i) => (
-        <Box key={`pad${i}`} flexShrink={0}>
-          <Text> </Text>
-        </Box>
-      ))}
-      <Box flexShrink={0} marginTop={1}>
-        <Text dimColor wrap="truncate-end">{hint}</Text>
-      </Box>
-    </>
-  );
-}
-
-/**
- * One row. `mid` is a second COLUMN rather than more text in `left`, because a hint
- * appended to a label moves with the length of the label and the markers then land in
- * different places, so the list stops reading as a table.
- */
-function Row({
-  on,
-  n,
-  numWidth = 1,
-  left,
-  mid,
-  right,
-  rightColor,
-  width,
-}: {
-  on: boolean;
-  n: number;
-  /** Digits to reserve for the number, so a two-digit item does not shove a one-digit
-   *  item's label a column to the right. The parent knows the list length; the row does
-   *  not. Right-aligned within it, the way a numbered list reads. */
-  numWidth?: number;
-  left: string;
-  mid?: string;
-  right?: string;
-  rightColor?: string;
-  width: number;
-}) {
-  const inner = Math.max(12, width - 4);
-  return (
-    <Box flexShrink={0} width={inner}>
-      <Text color={on ? "cyan" : undefined} bold={on}>
-        {on ? " › " : "   "}
-        {`${String(n).padStart(numWidth)}  `}
-      </Text>
-      <Box width={mid === undefined ? 24 : 10}>
-        <Text color={on ? "cyan" : undefined} bold={on} wrap="truncate-end">{left}</Text>
-      </Box>
-      {mid === undefined ? null : (
-        <Box width={9}>
-          <Text dimColor wrap="truncate-end">{mid}</Text>
-        </Box>
-      )}
-      {right ? <Text color={rightColor} dimColor={!rightColor}>{right}</Text> : null}
-    </Box>
   );
 }

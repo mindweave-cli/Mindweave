@@ -28,6 +28,27 @@ export { encodeHeaderValue };
 export interface HttpOptions {
   url: string;
   headers?: Record<string, string>;
+  /**
+   * Headers resolved FRESH on every request, merged over the static ones.
+   *
+   * This is where an OAuth token arrives, and it cannot be a static header: an access
+   * token expires mid-session and is replaced by a refresh, so a value captured when the
+   * transport was built would be correct for an hour and then 401 forever. Async because
+   * producing one may mean spending a refresh token first.
+   *
+   * Kept separate from `headers` rather than replacing it: the configured headers are the
+   * user's (an API key, a tenant id) and must not be recomputed or lost.
+   */
+  authHeaders?: () => Promise<Record<string, string>>;
+  /**
+   * Told what a 401's `WWW-Authenticate` said, whenever one arrives.
+   *
+   * The header names the metadata document that the whole authorization flow starts from,
+   * and it is only ever sent with the rejection itself — by the time a person clicks
+   * "Sign in" the response is long gone. So it is captured here, at the only moment it
+   * exists, and remembered by the connection.
+   */
+  onAuthChallenge?: (header: string) => void;
   timeoutMs?: number;
   /** Injectable for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch;
@@ -146,6 +167,26 @@ export class HttpTransport implements Transport {
     });
   }
 
+  /** The configured headers with any live credential merged over them. Resolved per
+   *  request; a failure to produce one is not fatal, because a request WITHOUT a token is
+   *  exactly how a server gets the chance to tell us it wants one. */
+  private async liveHeaders(): Promise<Record<string, string>> {
+    const base = this.options.headers ?? {};
+    if (!this.options.authHeaders) return base;
+    try {
+      return { ...base, ...(await this.options.authHeaders()) };
+    } catch {
+      return base;
+    }
+  }
+
+  /** Remember what a rejection said about how to authorize, before the response is gone. */
+  private noteChallenge(response: Response): void {
+    if (response.status !== 401 && response.status !== 403) return;
+    const header = response.headers.get("www-authenticate");
+    if (header) this.options.onAuthChallenge?.(header);
+  }
+
   async request(method: string, params?: Record<string, unknown>, mirrored?: Record<string, string>): Promise<unknown> {
     if (this.disposed) throw new RpcError(-32603, "mcp transport is closed");
     const id = this.nextId++;
@@ -157,6 +198,7 @@ export class HttpTransport implements Transport {
 
     let response: Response;
     try {
+      const configured = await this.liveHeaders();
       response = await this.fetchImpl(this.options.url, {
         method: "POST",
         signal: controller.signal,
@@ -165,7 +207,7 @@ export class HttpTransport implements Transport {
           // The client says it takes either shape; the SERVER picks. A single result
           // comes back as JSON, a long-running call upgrades to a stream.
           accept: "application/json, text/event-stream",
-          ...(this.options.headers ?? {}),
+          ...configured,
           // Mirrored last, so configuration cannot overwrite them. These are not
           // settings — they are a restatement of the body, checked against it by the
           // server, and a configured header that disagreed would earn a -32020 on every
@@ -185,6 +227,7 @@ export class HttpTransport implements Transport {
     if (!response.ok) {
       // 401/403 are the auth signal the connection layer turns into `needs-auth`
       // rather than `failed`, so the code has to survive as more than a message.
+      this.noteChallenge(response);
       throw new RpcError(httpErrorCode(response.status), `mcp http ${response.status} ${response.statusText || ""}`.trim());
     }
 
@@ -211,18 +254,22 @@ export class HttpTransport implements Transport {
   /** Notifications have no id and no reply, so failure is not actionable. */
   notify(method: string, params?: Record<string, unknown>): void {
     if (this.disposed) return;
-    void this.fetchImpl(this.options.url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        ...metadataHeaders(method, params),
-        ...(this.options.headers ?? {}),
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", method, ...(params ? { params } : {}) }),
-    }).catch(() => {
-      /* nothing awaits a notification */
-    });
+    void this.liveHeaders()
+      .then((configured) =>
+        this.fetchImpl(this.options.url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            ...metadataHeaders(method, params),
+            ...configured,
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", method, ...(params ? { params } : {}) }),
+        }),
+      )
+      .catch(() => {
+        /* nothing awaits a notification */
+      });
   }
 
   onNotification(handler: (notification: Notification) => void): void {
@@ -245,6 +292,7 @@ export class HttpTransport implements Transport {
     const controller = new AbortController();
     this.streams.add(controller);
 
+    const streamHeaders = await this.liveHeaders();
     const response = await this.fetchImpl(this.options.url, {
       method: "POST",
       signal: controller.signal,
@@ -252,7 +300,7 @@ export class HttpTransport implements Transport {
         "content-type": "application/json",
         accept: "text/event-stream",
         ...metadataHeaders(method, params),
-        ...(this.options.headers ?? {}),
+        ...streamHeaders,
       },
       // No id: nothing resolves this, and a stream is not a request/response pair.
       body: JSON.stringify({ jsonrpc: "2.0", id: this.nextId++, method, ...(params ? { params } : {}) }),
@@ -263,6 +311,7 @@ export class HttpTransport implements Transport {
 
     if (!response.ok) {
       this.streams.delete(controller);
+      this.noteChallenge(response);
       throw new RpcError(httpErrorCode(response.status), `mcp http ${response.status} on ${method}`);
     }
 

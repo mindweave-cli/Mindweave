@@ -44,6 +44,13 @@ export const addMcpServer: Tool = {
     "value the user gave you for this purpose, knowing it is written to a config file " +
     "in plain text. Never invent, guess, or copy a credential from elsewhere in the " +
     "conversation; if one is needed and you do not have it, ask.\n" +
+    "A REMOTE SERVER THAT ANSWERS 401 NEEDS SIGNING IN, NOT AN API KEY. Nearly every " +
+    "hosted MCP server uses OAuth, and Mindweave signs in to those itself: tell the user " +
+    "to run `/mcp`, open the server, and choose 'Sign in'. A browser opens, they approve, " +
+    "and the token is stored securely and refreshed automatically. Do NOT ask for an API " +
+    "key or offer to write an Authorization header for a 401 — that puts a long-lived " +
+    "secret in a config file to do a job the sign-in already does better. Headers are for " +
+    "the rarer server that genuinely has no OAuth at all and documents a static key.\n" +
     "The name becomes the prefix of every tool the server offers (`github` → " +
     "`mcp__github__*`), so keep it short and recognisable. Default to this project; " +
     "`global: true` follows the user into unrelated work and is rarely what they mean.",

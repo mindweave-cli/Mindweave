@@ -73,3 +73,16 @@ test("the full-screen shell publishes zero and gets no correction", () => {
   setRowsBelowCaret(0);
   assert.doesNotMatch(caretToOutputEnd(), DOWN);
 });
+
+test("an UNKNOWN caret must not be reported as 'already at the end'", () => {
+  // The distinction this pins: zero means "the cursor is on the last row", which is a
+  // claim. When the caret is not declared at all — a picker is open, a turn is in flight —
+  // the honest answer is "move past everything", because exiting from that state with zero
+  // leaves the cursor mid-frame and the shell prints its prompt across the conversation,
+  // one row per Enter. Overshooting is free: CUD clamps at the bottom row.
+  setRowsBelowCaret(0);
+  assert.equal(caretToOutputEnd(), "\r\n", "zero still means no move — the full-screen shell relies on it");
+
+  setRowsBelowCaret(12);
+  assert.match(caretToOutputEnd(), /^\x1b\[12B\r\n$/, "an unknown caret moves past the whole region");
+});

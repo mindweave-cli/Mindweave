@@ -171,15 +171,33 @@ function okSpec(spec: AddSpec): ParseResult {
   return { ok: true, spec };
 }
 
-/** The on-disk shape for one server (the inverse of `parseEntry`). */
+/**
+ * The on-disk shape for one server (the inverse of `parseEntry`).
+ *
+ * `disabled` was missing from both branches until now — the field exists on
+ * `McpServerConfig` and `parseEntry` reads it back, but nothing ever WROTE it, so a
+ * server disabled through the manager came back enabled on the next launch. Persisting
+ * it is what lets Disable survive a restart rather than being a this-session-only toggle.
+ */
 export function serialize(config: McpServerConfig): Record<string, unknown> {
   if (config.type === "http") {
-    return { type: "http", url: config.url, ...(config.headers ? { headers: config.headers } : {}) };
+    return {
+      type: "http",
+      url: config.url,
+      ...(config.headers ? { headers: config.headers } : {}),
+      // Carried through rather than dropped: this block is hand-written by someone whose
+      // server cannot be signed in to automatically, and losing it on the next edit would
+      // silently put them back to a flow that does not work for them. Same gap `disabled`
+      // used to have, where the manager wrote a config the loader could not reproduce.
+      ...(config.oauth ? { oauth: config.oauth } : {}),
+      ...(config.disabled ? { disabled: true } : {}),
+    };
   }
   return {
     command: config.command,
     ...(config.args.length ? { args: config.args } : {}),
     ...(config.env ? { env: config.env } : {}),
+    ...(config.disabled ? { disabled: true } : {}),
   };
 }
 
@@ -208,6 +226,25 @@ export async function serverExistsInConfig(path: string, name: string): Promise<
   } catch {
     return false; // no file, or unreadable — nothing to replace
   }
+}
+
+/**
+ * Which config file a server actually lives in — project or global — so an edit lands on
+ * the file that already defines it instead of guessing.
+ *
+ * Checked project-first, same order `/mcp remove` already searches in: a project-scoped
+ * server shadows a global one of the same name, so if both happen to define it, the
+ * project's is the one actually running and the one an edit should change. Falls back to
+ * `project` when the server is not on disk at either path — the case for one added through
+ * a route that never persisted, where there is nothing to prefer and project is the
+ * ordinary default (see `AddScope`).
+ */
+export async function resolveConfigPath(cwd: string, name: string): Promise<string> {
+  const projectPath = configPathFor("project", cwd);
+  if (await serverExistsInConfig(projectPath, name)) return projectPath;
+  const globalPath = configPathFor("global", cwd);
+  if (await serverExistsInConfig(globalPath, name)) return globalPath;
+  return projectPath;
 }
 
 /**
