@@ -912,12 +912,15 @@ test("a second note carries only what is NEW — never the output already sent",
   // The offset that makes a note a delta. A shell can produce several events in its life
   // (it came up, then it ended), and each one carries a tail. Cut from the end of
   // everything each time, the second note repeats what the first already showed.
-  // Short startup grace so "it came up" fires quickly rather than after the default.
+  // Short startup grace so "it came up" fires quickly. SECOND is deliberately FAR away
+  // (3s): the first drain has to land after `ready` fires and before SECOND is printed,
+  // and a CI runner is slow enough that a narrow window turns this into a coin flip. An
+  // earlier version used 400ms and passed locally while failing on CI with an empty tail.
   const mgr = new BackgroundShells(50, 2_000);
-  const child = spawn(NODE, ["-e", "console.log('FIRST'); setTimeout(()=>{console.log('SECOND');},400)"], {
+  const child = spawn(NODE, ["-e", "console.log('FIRST'); setTimeout(()=>{console.log('SECOND');},3000)"], {
     detached: DETACH,
   });
-  mgr.adopt(child, { command: "node -e two-phase", cwd: process.cwd(), notify: "on_failure" });
+  const info = mgr.adopt(child, { command: "node -e two-phase", cwd: process.cwd(), notify: "on_failure" });
 
   // First note: it came up, and carries what it had said by then.
   await waitUntil(() => mgr.list()[0]!.ready === true, 10_000);
@@ -925,8 +928,14 @@ test("a second note carries only what is NEW — never the output already sent",
   assert.equal(first.length, 1, "the ready event");
   assert.match(first[0]!.tail, /FIRST/);
 
-  // Second note: it ended. The tail must NOT contain FIRST again.
-  await waitUntil(() => mgr.list()[0]!.status !== "running", 4000);
+  // WAIT FOR THE PRECONDITION rather than assuming it: drain only once the shell has
+  // actually said SECOND. Polling the buffer is what makes this test about the offset
+  // instead of about how fast the machine is.
+  const entryOf = () =>
+    (mgr as unknown as { shells: Map<number, { seen: string }> }).shells.get(info.id)!;
+  await waitUntil(() => entryOf().seen.includes("SECOND"), 15_000);
+
+  await waitUntil(() => mgr.list()[0]!.status !== "running", 15_000);
   const second = await mgr.drainEvents();
   assert.equal(second.length, 1, "the ended event");
   assert.match(second[0]!.tail, /SECOND/, "the new output is reported");
