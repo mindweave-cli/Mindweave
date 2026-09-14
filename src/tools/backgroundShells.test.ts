@@ -912,29 +912,39 @@ test("a second note carries only what is NEW — never the output already sent",
   // The offset that makes a note a delta. A shell can produce several events in its life
   // (it came up, then it ended), and each one carries a tail. Cut from the end of
   // everything each time, the second note repeats what the first already showed.
-  // Short startup grace so "it came up" fires quickly. SECOND is deliberately FAR away
-  // (3s): the first drain has to land after `ready` fires and before SECOND is printed,
-  // and a CI runner is slow enough that a narrow window turns this into a coin flip. An
-  // earlier version used 400ms and passed locally while failing on CI with an empty tail.
+  // The second line is emitted WHEN THIS TEST SAYS SO, not on a timer the machine has to
+  // beat. Two earlier versions used a delay (400ms, then 3s) and both were coin flips on
+  // a CI runner: if the polled output file was read late, the first drain swallowed both
+  // lines and the second note was legitimately empty. Waiting on the child's stdin makes
+  // the ordering a fact rather than a race.
   const mgr = new BackgroundShells(50, 2_000);
-  const child = spawn(NODE, ["-e", "console.log('FIRST'); setTimeout(()=>{console.log('SECOND');},3000)"], {
-    detached: DETACH,
-  });
+  const child = spawn(
+    NODE,
+    ["-e", "console.log('FIRST'); process.stdin.once('data', () => { console.log('SECOND'); process.exit(0); });"],
+    { detached: DETACH, stdio: ["pipe", "pipe", "pipe"] },
+  );
   const info = mgr.adopt(child, { command: "node -e two-phase", cwd: process.cwd(), notify: "on_failure" });
 
-  // First note: it came up, and carries what it had said by then.
-  await waitUntil(() => mgr.list()[0]!.ready === true, 10_000);
-  const first = await mgr.drainEvents();
-  assert.equal(first.length, 1, "the ready event");
-  assert.match(first[0]!.tail, /FIRST/);
-
-  // WAIT FOR THE PRECONDITION rather than assuming it: drain only once the shell has
-  // actually said SECOND. Polling the buffer is what makes this test about the offset
-  // instead of about how fast the machine is.
+  // EVERY wait here is on a real precondition, never on a clock. Output reaches `seen`
+  // through a polled file, so "the grace period has elapsed" does NOT imply "the first
+  // line has been read" — on a CI runner it frequently does not, and an earlier version
+  // of this test drained before either line had landed and asserted against an empty tail.
   const entryOf = () =>
     (mgr as unknown as { shells: Map<number, { seen: string }> }).shells.get(info.id)!;
-  await waitUntil(() => entryOf().seen.includes("SECOND"), 15_000);
 
+  // First note: it came up, and carries what it had actually said by then.
+  await waitUntil(() => entryOf().seen.includes("FIRST"), 15_000);
+  await waitUntil(() => mgr.list()[0]!.ready === true, 15_000);
+  const first = await mgr.drainEvents();
+  assert.equal(first.length, 1, "the ready event");
+  assert.match(first[0]!.tail, /FIRST/, "the first note should carry the output it had seen");
+  assert.ok(!entryOf().seen.includes("SECOND"), "premise: the second line must not have been said yet");
+
+  // NOW release the second line. Nothing before this point could have produced it.
+  child.stdin?.write("go\n");
+
+  // Second note: only what has been said SINCE.
+  await waitUntil(() => entryOf().seen.includes("SECOND"), 15_000);
   await waitUntil(() => mgr.list()[0]!.status !== "running", 15_000);
   const second = await mgr.drainEvents();
   assert.equal(second.length, 1, "the ended event");
