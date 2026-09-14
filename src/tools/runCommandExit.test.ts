@@ -10,14 +10,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ToolContext } from "./types.js";
 import { runCommand } from "./runCommand.js";
-import { readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-/** How many composed-output files are lying in the temp directory right now. */
-async function countOutputFiles(): Promise<number> {
-  const names = await readdir(tmpdir()).catch(() => [] as string[]);
-  return names.filter((n) => n.startsWith("mindweave-out-")).length;
-}
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -101,8 +97,36 @@ test("the dropped middle is KEPT on disk and the model is told where", async () 
 test("a command whose output fitted leaves no file behind", async () => {
   // Retention is for what was DROPPED. Keeping a file per command run would litter the
   // temp directory for no gain — there is nothing to go back for.
-  const before = await countOutputFiles();
-  const result = await runCommand.execute({ command: 'echo "small"', timeout: 30_000 }, ctx());
-  assert.doesNotMatch(result.output, /The FULL output is at/);
-  assert.equal(await countOutputFiles(), before, "an untruncated run must clean up after itself");
+  //
+  // The temp directory is POINTED SOMEWHERE PRIVATE for this check. Counting files in
+  // the shared one looks equivalent and is not: the suite runs test files concurrently
+  // in separate processes against the same directory, so another file's command creates
+  // an output file mid-count and this fails with an off-by-one that has nothing to do
+  // with the behaviour under test. It did exactly that on CI.
+  const previous = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
+  const isolated = await mkdtemp(join(tmpdir(), "mw-retain-"));
+  process.env.TMPDIR = isolated;
+  process.env.TEMP = isolated;
+  process.env.TMP = isolated;
+  try {
+    const result = await runCommand.execute({ command: 'echo "small"', timeout: 30_000 }, ctx());
+    assert.doesNotMatch(result.output, /The FULL output is at/, "nothing was dropped, so nothing to point at");
+
+    // WAIT for the delete rather than assuming it has landed. `removeOutputFile` is
+    // deliberately fire-and-forget (`void fs.rm(...)`) so a finished command is not held
+    // up by its own cleanup, which means the file legitimately outlives the call by a
+    // tick. Asserting immediately tests the scheduler, not the behaviour.
+    const remaining = async () => (await readdir(isolated)).filter((n) => n.startsWith("mindweave-out-"));
+    const deadline = Date.now() + 5_000;
+    while ((await remaining()).length > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.deepEqual(await remaining(), [], "an untruncated run must clean up after itself");
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await rm(isolated, { recursive: true, force: true });
+  }
 });
